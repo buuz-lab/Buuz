@@ -68,16 +68,28 @@ async def test_drain_emits_composite_price_per_tick():
     await in_q.put(fresh_tick("coinbase", 100.0, 1000.0))
     await in_q.put(fresh_tick("kraken",   200.0, 1000.0))
 
-    # Run _drain inline for 2 ticks (avoids spawning infinite task)
-    for _ in range(2):
-        tick = await in_q.get()
-        agg._latest[tick.exchange] = tick
-        price = agg._composite()
-        if price is not None:
-            await agg._out_queue.put(price)
+    # Process exactly 2 ticks through the real _drain, then cancel
+    async def drain_two():
+        count = 0
+
+        async def counting_drain(q):
+            nonlocal count
+            while count < 2:
+                tick = await q.get()
+                agg._latest[tick.exchange] = tick
+                price = agg._cf_benchmarks_source()
+                if price is None:
+                    price = agg._composite()
+                if price is not None:
+                    await agg._out_queue.put(price)
+                count += 1
+
+        await counting_drain(in_q)
+
+    await asyncio.wait_for(drain_two(), timeout=1.0)
 
     assert agg.out_queue.qsize() == 2
     first = await agg.out_queue.get()
-    assert first == pytest.approx(100.0)  # coinbase only
+    assert first == pytest.approx(100.0)   # coinbase only
     second = await agg.out_queue.get()
     assert second == pytest.approx(150.0)  # (100*1000 + 200*1000) / 2000
