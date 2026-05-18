@@ -87,3 +87,17 @@ def test_bitstamp_returns_none_for_subscription_succeeded():
 def test_bitstamp_returns_none_for_heartbeat():
     feed = BitstampFeed()
     assert feed.parse_message(json.dumps({"event": "bts:heartbeat", "data": {}})) is None
+
+
+# ── Malformed JSON ──────────────────────────────────────────────────────────
+
+def test_coinbase_returns_none_for_malformed_json():
+    assert CoinbaseFeed().parse_message("not json") is None
+
+
+def test_kraken_returns_none_for_malformed_json():
+    assert KrakenFeed().parse_message("not json") is None
+
+
+def test_bitstamp_returns_none_for_malformed_json():
+    assert BitstampFeed().parse_message("not json") is None

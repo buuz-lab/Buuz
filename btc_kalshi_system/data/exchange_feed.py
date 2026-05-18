@@ -38,11 +38,12 @@ class ExchangeFeed(ABC):
                 await self._connect_and_stream(queue)
                 attempt = 0
             except Exception as exc:
-                self._connected = False
                 delay = RECONNECT_DELAYS[min(attempt, len(RECONNECT_DELAYS) - 1)]
                 logger.warning(f"{self.__class__.__name__} disconnected ({exc}), retry in {delay}s")
                 await asyncio.sleep(delay)
                 attempt += 1
+            finally:
+                self._connected = False
 
     async def _connect_and_stream(self, queue: asyncio.Queue) -> None:
         async with websockets.connect(self.ws_url) as ws:
@@ -132,7 +133,7 @@ class BitstampFeed(ExchangeFeed):
                 return None
             if msg.get("channel") != "live_trades_btcusd":
                 return None
-            data = msg["data"]
+            data = msg.get("data") or {}
             return Tick(
                 exchange="bitstamp",
                 price=float(data["price"]),
