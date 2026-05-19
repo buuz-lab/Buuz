@@ -7,7 +7,7 @@ import websockets
 from loguru import logger
 
 from btc_kalshi_system.data.models import Tick
-from config import BITSTAMP_WS_URL, COINBASE_WS_URL, KRAKEN_WS_URL, RECONNECT_DELAYS
+from config import BITSTAMP_WS_URL, COINBASE_WS_URL, GEMINI_WS_URL, KRAKEN_WS_URL, RECONNECT_DELAYS
 
 
 class ExchangeFeed(ABC):
@@ -142,6 +142,42 @@ class BitstampFeed(ExchangeFeed):
                 volume=float(data["amount"]),  # per-trade size, used as weight proxy
                 timestamp=time.time(),
             )
+        except (KeyError, ValueError, json.JSONDecodeError):
+            pass
+        return None
+
+
+class GeminiFeed(ExchangeFeed):
+
+    @property
+    def ws_url(self) -> str:
+        return GEMINI_WS_URL
+
+    def subscribe_message(self) -> dict:
+        return {}  # unused — Gemini streams on connect, no subscribe needed
+
+    async def _connect_and_stream(self, queue: asyncio.Queue) -> None:
+        async with websockets.connect(self.ws_url) as ws:
+            self._connected = True
+            logger.info(f"{self.__class__.__name__} connected")
+            async for raw in ws:
+                tick = self.parse_message(raw)
+                if tick is not None:
+                    await queue.put(tick)
+
+    def parse_message(self, raw: str) -> Tick | None:
+        try:
+            msg = json.loads(raw)
+            if msg.get("type") != "update":
+                return None
+            for event in msg.get("events", []):
+                if event.get("type") == "trade":
+                    return Tick(
+                        exchange="gemini",
+                        price=float(event["price"]),
+                        volume=float(event["amount"]),
+                        timestamp=time.time(),
+                    )
         except (KeyError, ValueError, json.JSONDecodeError):
             pass
         return None

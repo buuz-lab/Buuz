@@ -101,3 +101,41 @@ def test_kraken_returns_none_for_malformed_json():
 
 def test_bitstamp_returns_none_for_malformed_json():
     assert BitstampFeed().parse_message("not json") is None
+
+
+# ── Gemini ─────────────────────────────────────────────────────────────────
+
+def test_gemini_parse_trade_event():
+    from btc_kalshi_system.data.exchange_feed import GeminiFeed
+    feed = GeminiFeed()
+    msg = json.dumps({
+        "type": "update",
+        "eventId": 12345,
+        "events": [{"type": "trade", "tid": 99, "price": "103500.00", "amount": "0.025", "makerSide": "ask"}]
+    })
+    tick = feed.parse_message(msg)
+    assert tick is not None
+    assert tick.exchange == "gemini"
+    assert tick.price == pytest.approx(103500.0)
+    assert tick.volume == pytest.approx(0.025)
+
+
+def test_gemini_returns_none_for_non_update_message():
+    from btc_kalshi_system.data.exchange_feed import GeminiFeed
+    feed = GeminiFeed()
+    assert feed.parse_message(json.dumps({"type": "heartbeat", "heartbeat_sequence": 0})) is None
+
+
+def test_gemini_returns_none_for_non_trade_event():
+    from btc_kalshi_system.data.exchange_feed import GeminiFeed
+    feed = GeminiFeed()
+    msg = json.dumps({
+        "type": "update",
+        "events": [{"type": "change", "side": "bid", "price": "103500.00", "remaining": "1.0", "delta": "0.5"}]
+    })
+    assert feed.parse_message(msg) is None
+
+
+def test_gemini_returns_none_for_malformed_json():
+    from btc_kalshi_system.data.exchange_feed import GeminiFeed
+    assert GeminiFeed().parse_message("not json") is None
