@@ -23,3 +23,7 @@ CF_BENCHMARKS_API_KEY: str = os.getenv("CF_BENCHMARKS_API_KEY", "")
 
 KALSHI_API_KEY_ID: str = os.getenv("KALSHI_API_KEY_ID", "")
 KALSHI_PRIVATE_KEY_PATH: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "./keys/kalshi_private.key")
+
+# Set to true to simulate trades without placing real orders.
+# Use this to bootstrap the calibrator and edge tracker before going live.
+PAPER_TRADING: bool = os.getenv("PAPER_TRADING", "false").lower() == "true"

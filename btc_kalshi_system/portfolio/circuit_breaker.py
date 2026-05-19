@@ -4,6 +4,7 @@ from typing import Optional
 
 from loguru import logger
 
+import config
 from btc_kalshi_system.execution.router import ClientState, KalshiClientRouter
 from btc_kalshi_system.models.calibrator import Calibrator
 from btc_kalshi_system.portfolio.monitor import PortfolioMonitor
@@ -45,12 +46,10 @@ class CircuitBreaker:
         self._calibrator = calibrator
 
     def check(self) -> BreakerStatus:
-        for fn in (
-            self._check_clients,
-            self._check_drawdown,
-            self._check_rolling_edge,
-            self._check_calibrator,
-        ):
+        checks = [self._check_clients, self._check_drawdown]
+        if not config.PAPER_TRADING:
+            checks += [self._check_rolling_edge, self._check_calibrator]
+        for fn in checks:
             result = fn()
             if result is not None:
                 logger.error(f"Circuit breaker tripped: [{result.reason.value}] {result.message}")

@@ -107,6 +107,8 @@ class KronosV2:
 
     async def run(self) -> None:
         self._running = True
+        if config.PAPER_TRADING:
+            logger.info("Running in PAPER TRADING mode — no real orders will be placed")
         logger.info("KronosV2 starting up")
 
         queues = [asyncio.Queue() for _ in range(4)]
@@ -224,7 +226,8 @@ class KronosV2:
         # f. Pre-trade checklist
         current_exposure = self._monitor.get_current_exposure()
         same_timeframe_open = self._monitor.has_timeframe_position(timeframe)
-        edge_above_threshold = self._edge_tracker.is_above_threshold()
+        # In paper mode Gate 4 is always open — edge tracker hasn't accumulated yet
+        edge_above_threshold = True if config.PAPER_TRADING else self._edge_tracker.is_above_threshold()
 
         result = self._checklist.run(
             signal=signal,
@@ -242,24 +245,30 @@ class KronosV2:
             logger.info(f"Pre-trade checklist failed for {ticker} [gate {result.failed_gate}]: {result.failed_reason}")
             return
 
-        # h. Place order
+        # h. Place order (or simulate in paper mode)
         trade_id = str(uuid.uuid4())
         side = "yes" if signal.direction == 1 else "no"
-        try:
-            order_resp = self._router.place_order(
-                ticker=ticker,
-                side=side,
-                count=result.kelly_contracts,
-                price_cents=best_ask_cents,
-                client_order_id=trade_id,
-            )
+        if config.PAPER_TRADING:
             logger.info(
-                f"Order placed: {ticker} {side} {result.kelly_contracts}@{best_ask_cents}¢ "
+                f"[PAPER] Simulated fill: {ticker} {side} {result.kelly_contracts}@{best_ask_cents}¢ "
                 f"(${result.kelly_dollars:.2f} kelly) trade_id={trade_id}"
             )
-        except Exception as exc:
-            logger.error(f"Order placement failed for {ticker}: {exc}")
-            return
+        else:
+            try:
+                self._router.place_order(
+                    ticker=ticker,
+                    side=side,
+                    count=result.kelly_contracts,
+                    price_cents=best_ask_cents,
+                    client_order_id=trade_id,
+                )
+                logger.info(
+                    f"Order placed: {ticker} {side} {result.kelly_contracts}@{best_ask_cents}¢ "
+                    f"(${result.kelly_dollars:.2f} kelly) trade_id={trade_id}"
+                )
+            except Exception as exc:
+                logger.error(f"Order placement failed for {ticker}: {exc}")
+                return
 
         # i. Record position
         position = OpenPosition(
@@ -447,6 +456,20 @@ class KronosV2:
                     self._db.commit()
                 except sqlite3.Error as exc:
                     logger.error(f"SQLite update failed for {position.trade_id}: {exc}")
+
+                # Refit calibrator with all resolved trades so n_samples grows
+                try:
+                    rows = self._db.execute(
+                        "SELECT kronos_raw, outcome FROM trades WHERE outcome IS NOT NULL"
+                    ).fetchall()
+                    if rows:
+                        import numpy as np
+                        raw_probs = np.array([r[0] for r in rows], dtype=float)
+                        outcomes = np.array([r[1] for r in rows], dtype=float)
+                        self._calibrator.fit(raw_probs, outcomes)
+                        logger.debug(f"Calibrator refit with {len(rows)} resolved trades")
+                except Exception as exc:
+                    logger.warning(f"Calibrator refit failed: {exc}")
 
                 logger.info(
                     f"Trade resolved: {position.ticker} trade_id={position.trade_id} "
