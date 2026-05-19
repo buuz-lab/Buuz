@@ -60,7 +60,8 @@ class KalshiRawClient:
         }
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
-        headers = self._sign(method, path)
+        path_for_signing = path.split("?")[0]
+        headers = self._sign(method, path_for_signing)
         url = self._base_url + path
         logger.debug("%s %s", method.upper(), path)
         try:

@@ -26,6 +26,7 @@ class OpenPosition:
     entry_price_cents: int
     kelly_dollars: float
     timestamp: float
+    calibrated_prob: float = 0.0
 
 
 @dataclass
