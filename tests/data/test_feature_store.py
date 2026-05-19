@@ -132,6 +132,16 @@ def test_flush_writes_ohlcv_to_redis():
     assert len(df) >= 1
 
 
+def test_get_ohlcv_preserves_utc_index():
+    store = make_store()
+    _populate_two_candles(store)
+    store._flush_to_redis()
+    df = store.get_ohlcv("5min")
+    assert df is not None
+    assert df.index.tz is not None
+    assert str(df.index.tz) == "UTC"
+
+
 def test_get_resolution_estimate_returns_none_before_flush():
     store = make_store()
     assert store.get_resolution_estimate() is None

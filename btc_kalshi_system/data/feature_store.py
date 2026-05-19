@@ -42,7 +42,10 @@ class FeatureStore:
         while True:
             price = await price_queue.get()
             self._tick_buffer.append((time.time(), price))
-            self._flush_to_redis()
+            try:
+                self._flush_to_redis()
+            except Exception as exc:
+                logger.warning(f"Redis flush failed: {exc}")
 
     def _flush_to_redis(self) -> None:
         if not self._tick_buffer:
@@ -77,7 +80,11 @@ class FeatureStore:
         Returns None if insufficient data has accumulated since startup.
         """
         raw = self._redis.get(f"brti:ohlcv:{timeframe}")
-        return pd.read_json(io.StringIO(raw.decode())) if raw else None
+        if not raw:
+            return None
+        df = pd.read_json(io.StringIO(raw.decode()))
+        df.index = df.index.tz_localize("UTC")
+        return df
 
     def get_raw_ticks(self, n_seconds: int) -> pd.Series | None:
         """Last n_seconds of BRTI prices as pd.Series indexed by UTC timestamp."""
