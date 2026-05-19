@@ -1,5 +1,5 @@
 """
-Standalone Kalshi REST client using RSA auth (PKCS1v15 / SHA-256).
+Standalone Kalshi REST client using RSA-PSS auth (SHA-256).
 Works independently of pykalshi — intended as a failover when pykalshi breaks.
 """
 
@@ -11,13 +11,13 @@ from pathlib import Path
 
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 
 import config
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 class KalshiRawClient:
@@ -39,13 +39,20 @@ class KalshiRawClient:
         except Exception as exc:
             raise ValueError(f"Failed to load Kalshi private key: {exc}") from exc
 
-        self._base_url = base_url.rstrip("/")
+        self._base_url = "https://api.elections.kalshi.com"
         self._session = requests.Session()
 
     def _sign(self, method: str, path: str) -> dict:
         ts_ms = str(int(time.time() * 1000))
         message = (ts_ms + method.upper() + path).encode()
-        sig = self._private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
+        sig = self._private_key.sign(
+            message,
+            asym_padding.PSS(
+                mgf=asym_padding.MGF1(hashes.SHA256()),
+                salt_length=asym_padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
         return {
             "KALSHI-ACCESS-KEY": self._api_key_id,
             "KALSHI-ACCESS-TIMESTAMP": ts_ms,
