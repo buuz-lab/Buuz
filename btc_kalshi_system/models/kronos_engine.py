@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 from btc_kalshi_system.data.feature_store import FeatureStore
 
@@ -47,28 +48,32 @@ class KronosEngine:
             )
 
         df = df.tail(400)
+        if len(df) < 400:
+            logger.warning(f"KronosEngine: only {len(df)} 5-min candles available (recommend >=400)")
+
         self._load()
 
-        x_timestamp = df.index[-1]
-        y_timestamp = x_timestamp + pd.Timedelta(minutes=5)
+        # predict() requires Series types, not bare Timestamps
+        x_timestamp = df.index.to_series().reset_index(drop=True)
+        y_timestamp = pd.Series([df.index[-1] + pd.Timedelta(minutes=5)])
 
-        samples = self._predictor.predict(
-            df,
-            x_timestamp,
-            y_timestamp,
-            pred_len=1,
-            T=1.0,
-            top_p=0.9,
-            sample_count=n_paths,
-        )
+        # sample_count>1 averages paths internally — call n_paths times with sample_count=1
+        predicted_closes = []
+        for _ in range(n_paths):
+            row = self._predictor.predict(
+                df, x_timestamp, y_timestamp,
+                pred_len=1, T=1.0, top_p=0.9, sample_count=1,
+                verbose=False,
+            )
+            predicted_closes.append(float(row["close"].iloc[0]))
+        predicted_closes = np.array(predicted_closes)
 
-        predicted_closes = samples["close"].values
         prob = float(np.mean(predicted_closes > threshold))
 
         print(f"\n{'='*55}")
         print(f"Kronos MC Inference — {self._model_name}")
-        print(f"Input:  {len(df)} × 5-min candles  ({df.index[0]} → {x_timestamp})")
-        print(f"Target: {y_timestamp}")
+        print(f"Input:  {len(df)} × 5-min candles  ({df.index[0]} → {df.index[-1]})")
+        print(f"Target: {y_timestamp.iloc[0]}")
         print(f"MC paths: {n_paths}")
         print(f"Predicted close — min=${predicted_closes.min():,.2f}  "
               f"mean=${predicted_closes.mean():,.2f}  max=${predicted_closes.max():,.2f}")
