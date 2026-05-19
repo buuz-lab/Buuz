@@ -46,7 +46,7 @@ class ExchangeFeed(ABC):
                 self._connected = False
 
     async def _connect_and_stream(self, queue: asyncio.Queue) -> None:
-        async with websockets.connect(self.ws_url) as ws:
+        async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
             self._connected = True
             logger.info(f"{self.__class__.__name__} connected")
             await ws.send(json.dumps(self.subscribe_message()))
@@ -157,7 +157,7 @@ class GeminiFeed(ExchangeFeed):
         return {}  # unused — Gemini streams on connect, no subscribe needed
 
     async def _connect_and_stream(self, queue: asyncio.Queue) -> None:
-        async with websockets.connect(self.ws_url) as ws:
+        async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20) as ws:
             self._connected = True
             logger.info(f"{self.__class__.__name__} connected")
             async for raw in ws:

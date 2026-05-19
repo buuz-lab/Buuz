@@ -25,7 +25,7 @@ class DerivativesFeed:
     def __init__(self, redis_url: str = REDIS_URL) -> None:
         import ccxt.async_support as ccxt_async
         self._redis = redis.from_url(redis_url)
-        self._exchange = ccxt_async.binance({"enableRateLimit": True})
+        self._exchange = ccxt_async.bybit({"enableRateLimit": True})
         self._prev_oi: float = 0.0
 
     # ── Public entry point ─────────────────────────────────────────────────────
