@@ -95,21 +95,21 @@ class KrakenFeed(ExchangeFeed):
     def subscribe_message(self) -> dict:
         return {
             "method": "subscribe",
-            "params": {"channel": "ticker", "symbol": ["BTC/USD"]},
+            "params": {"channel": "trade", "symbol": ["BTC/USD"]},
             "req_id": 1,
         }
 
     def parse_message(self, raw: str) -> Tick | None:
         try:
             msg = json.loads(raw)
-            if msg.get("channel") != "ticker" or msg.get("type") != "update":
+            if msg.get("channel") != "trade" or msg.get("type") != "update":
                 return None
             for item in msg.get("data", []):
                 if item.get("symbol") == "BTC/USD":
                     return Tick(
                         exchange="kraken",
-                        price=float(item["last"]),
-                        volume=float(item["volume"]),
+                        price=float(item["price"]),
+                        volume=float(item["qty"]),
                         timestamp=time.time(),
                     )
         except (KeyError, ValueError, json.JSONDecodeError):
