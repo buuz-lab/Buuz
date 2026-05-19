@@ -20,3 +20,6 @@ REDIS_TTL_OHLCV: dict[str, int] = {"5min": 600, "15min": 1800, "1h": 7200}
 OHLCV_TIMEFRAMES: list[str] = ["5min", "15min", "1h"]
 
 CF_BENCHMARKS_API_KEY: str = os.getenv("CF_BENCHMARKS_API_KEY", "")
+
+KALSHI_API_KEY_ID: str = os.getenv("KALSHI_API_KEY_ID", "")
+KALSHI_PRIVATE_KEY_PATH: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "./keys/kalshi_private.key")

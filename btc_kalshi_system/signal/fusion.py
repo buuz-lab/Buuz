@@ -114,11 +114,16 @@ class SignalFusionEngine:
 
     def _regime_features(self) -> dict:
         ctx = self._market_context
+        df = self._store.get_ohlcv("5min")
+        if df is not None and len(df) >= 12:
+            vol = float(df["close"].pct_change().tail(12).std())
+        else:
+            vol = 0.0
         return {
             "funding_rate": float(ctx.get("funding_rate", 0.0)),
             "funding_rate_trend": float(ctx.get("funding_trend", 0.0)),
             "oi_delta_pct": float(ctx.get("oi_delta", 0.0)),
             "cvd_normalized": float(ctx.get("cvd_normalized", 0.0)),
             "basis_spread_pct": float(ctx.get("basis_spread", 0.0)),
-            "brti_volatility_1h": float(ctx.get("brti_volatility_1h", 0.0)),
+            "brti_volatility_1h": vol,
         }
