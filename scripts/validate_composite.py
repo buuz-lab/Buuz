@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from btc_kalshi_system.data.brti_aggregator import BRTIAggregator
-from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, KrakenFeed
+from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, GeminiFeed, KrakenFeed
 from btc_kalshi_system.data.models import Tick
 
 
@@ -24,10 +24,11 @@ async def run_validation(minutes: int, csv_path: str | None) -> None:
     coinbase_q: asyncio.Queue[Tick] = asyncio.Queue()
     kraken_q:   asyncio.Queue[Tick] = asyncio.Queue()
     bitstamp_q: asyncio.Queue[Tick] = asyncio.Queue()
+    gemini_q:   asyncio.Queue[Tick] = asyncio.Queue()
 
     agg = BRTIAggregator()
     composite_prices: list[float] = []
-    exchange_tick_counts: dict[str, int] = {"coinbase": 0, "kraken": 0, "bitstamp": 0}
+    exchange_tick_counts: dict[str, int] = {"coinbase": 0, "kraken": 0, "bitstamp": 0, "gemini": 0}
     tick_log: list[dict] = []
     stop_event = asyncio.Event()
 
@@ -51,16 +52,18 @@ async def run_validation(minutes: int, csv_path: str | None) -> None:
         stop_event.set()
 
     print(f"Running BRTI composite feed for {minutes} minute(s)...")
-    print("Exchanges: Coinbase, Kraken, Bitstamp")
+    print("Exchanges: Coinbase, Kraken, Bitstamp, Gemini")
     print("-" * 50)
 
     tasks = [
         asyncio.create_task(CoinbaseFeed().run(coinbase_q)),
         asyncio.create_task(KrakenFeed().run(kraken_q)),
         asyncio.create_task(BitstampFeed().run(bitstamp_q)),
+        asyncio.create_task(GeminiFeed().run(gemini_q)),
         asyncio.create_task(drain_exchange("coinbase", coinbase_q)),
         asyncio.create_task(drain_exchange("kraken", kraken_q)),
         asyncio.create_task(drain_exchange("bitstamp", bitstamp_q)),
+        asyncio.create_task(drain_exchange("gemini", gemini_q)),
         asyncio.create_task(collect_composite()),
         asyncio.create_task(timeout()),
     ]
@@ -80,9 +83,7 @@ async def run_validation(minutes: int, csv_path: str | None) -> None:
         print(f"Final composite price:     ${composite_prices[-1]:,.2f}")
         window = composite_prices[-60:] if len(composite_prices) >= 60 else composite_prices
         print(f"Resolution estimate (last {len(window)} prices avg): ${sum(window)/len(window):,.2f}")
-        latest_per_exchange = {
-            e: t.price for e, t in agg._latest.items()
-        }
+        latest_per_exchange = {e: t.price for e, t in agg._latest.items()}
         if len(latest_per_exchange) >= 2:
             spread = max(latest_per_exchange.values()) - min(latest_per_exchange.values())
             print(f"Final cross-exchange spread: ${spread:,.2f}")

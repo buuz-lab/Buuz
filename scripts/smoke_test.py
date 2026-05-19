@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from btc_kalshi_system.data.brti_aggregator import BRTIAggregator
-from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, KrakenFeed
+from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, GeminiFeed, KrakenFeed
 from btc_kalshi_system.data.feature_store import FeatureStore
 from btc_kalshi_system.data.models import Tick
 
@@ -26,6 +26,7 @@ async def run_smoke(seconds: int) -> bool:
     coinbase_q: asyncio.Queue[Tick] = asyncio.Queue()
     kraken_q:   asyncio.Queue[Tick] = asyncio.Queue()
     bitstamp_q: asyncio.Queue[Tick] = asyncio.Queue()
+    gemini_q:   asyncio.Queue[Tick] = asyncio.Queue()
 
     agg = BRTIAggregator()
     store = FeatureStore()
@@ -39,7 +40,8 @@ async def run_smoke(seconds: int) -> bool:
         asyncio.create_task(CoinbaseFeed().run(coinbase_q)),
         asyncio.create_task(KrakenFeed().run(kraken_q)),
         asyncio.create_task(BitstampFeed().run(bitstamp_q)),
-        asyncio.create_task(agg.run([coinbase_q, kraken_q, bitstamp_q])),
+        asyncio.create_task(GeminiFeed().run(gemini_q)),
+        asyncio.create_task(agg.run([coinbase_q, kraken_q, bitstamp_q, gemini_q])),
         asyncio.create_task(store.run(agg.out_queue)),
         asyncio.create_task(timeout()),
     ]
