@@ -33,18 +33,18 @@ def test_coinbase_returns_none_for_non_update_event():
 
 # ── Kraken ─────────────────────────────────────────────────────────────────
 
-def test_kraken_parse_ticker_message():
+def test_kraken_parse_trade_message():
     feed = KrakenFeed()
     msg = json.dumps({
-        "channel": "ticker",
+        "channel": "trade",
         "type": "update",
-        "data": [{"symbol": "BTC/USD", "last": 103500.0, "volume": 3252.6}]
+        "data": [{"symbol": "BTC/USD", "price": 103500.0, "qty": 0.5, "side": "buy"}]
     })
     tick = feed.parse_message(msg)
     assert tick is not None
     assert tick.exchange == "kraken"
     assert tick.price == pytest.approx(103500.0)
-    assert tick.volume == pytest.approx(3252.6)
+    assert tick.volume == pytest.approx(0.5)
 
 
 def test_kraken_returns_none_for_subscribe_response():
@@ -54,7 +54,7 @@ def test_kraken_returns_none_for_subscribe_response():
 
 def test_kraken_returns_none_for_snapshot():
     feed = KrakenFeed()
-    msg = json.dumps({"channel": "ticker", "type": "snapshot", "data": []})
+    msg = json.dumps({"channel": "trade", "type": "snapshot", "data": []})
     assert feed.parse_message(msg) is None
 
 
