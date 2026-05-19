@@ -78,7 +78,7 @@ class CoinbaseFeed(ExchangeFeed):
                         return Tick(
                             exchange="coinbase",
                             price=float(ticker["price"]),
-                            volume=float(ticker["volume_24_h"]),
+                            volume=float(ticker["last_size"]),
                             timestamp=time.time(),
                         )
         except (KeyError, ValueError, json.JSONDecodeError):
