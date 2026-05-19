@@ -17,6 +17,9 @@ ccxt>=4.2
 cryptography>=42.0
 requests>=2.31
 pydantic>=2.6
+huggingface-hub>=0.21
+tqdm>=4.66
+einops>=0.7
 
 # Test
 pytest>=8.0
