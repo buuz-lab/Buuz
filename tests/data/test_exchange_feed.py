@@ -10,14 +10,14 @@ def test_coinbase_parse_ticker_message():
     msg = json.dumps({
         "channel": "ticker",
         "events": [{"type": "update", "tickers": [
-            {"product_id": "BTC-USD", "price": "103500.00", "volume_24_h": "15234.5"}
+            {"product_id": "BTC-USD", "price": "103500.00", "last_size": "0.01234"}
         ]}]
     })
     tick = feed.parse_message(msg)
     assert tick is not None
     assert tick.exchange == "coinbase"
     assert tick.price == pytest.approx(103500.0)
-    assert tick.volume == pytest.approx(15234.5)
+    assert tick.volume == pytest.approx(0.01234)
 
 
 def test_coinbase_returns_none_for_subscription_confirmation():
