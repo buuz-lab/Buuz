@@ -92,8 +92,11 @@ class SignalFusionEngine:
 
         deepseek_regime = ds["regime"]
 
-        # For up/down markets, strike = BTC price at market open, so this computes
-        # P(predicted_close > open_price) = P(price goes up) — exactly what we want.
+        # For KXBTC15M up/down markets, strike = close of the last completed 15-min
+        # BRTI candle (i.e. the BRTI price at the open of the current 15-min window).
+        # This computes P(predicted_5min_close > last_15min_close) ≈ P(market resolves yes).
+        # The caller (_extract_strike in main.py) is responsible for supplying the
+        # correct reference price — do not substitute spot price or 5-min close here.
         kronos_raw = self._kronos.run_monte_carlo(self._store, threshold=strike)
         kronos_cal = self._calibrator.transform(kronos_raw)
         kronos_direction = 1 if kronos_cal >= 0.5 else 0

@@ -365,8 +365,21 @@ class KronosV2:
                     return float(part[1:])
                 except ValueError:
                     continue
-        # For up/down markets the threshold is "higher than current price",
-        # so live BRTI price is the right substitute when no strike field is present.
+        # KXBTC15M up/down markets have no explicit strike field.
+        # These markets resolve "yes" if BRTI at resolution > BRTI at market open,
+        # where "market open" = close of the last completed 15-min BRTI candle.
+        # Using the live 5-min close as threshold is wrong: if BTC moved $300 during
+        # the current 15-min window, the wrong reference price produces the wrong
+        # direction signal entirely.
+        if market.get("market_type") == "15min":
+            price = self._get_15min_reference_price()
+            if price > 0.0:
+                logger.debug(
+                    f"No strike field for {ticker} (15-min up/down) — "
+                    f"using last completed 15-min BRTI close {price:.2f} as threshold"
+                )
+                return price
+        # Fallback for other timeframes or if no 15-min candles are available yet.
         price = self._get_composite_price()
         if price > 0.0:
             logger.debug(
@@ -433,6 +446,32 @@ class KronosV2:
         except Exception:
             pass
         return 0.0
+
+    def _get_15min_reference_price(self) -> float:
+        """Return the close of the last COMPLETED 15-min BRTI candle.
+
+        KXBTC15M markets resolve as 'yes' if BRTI at resolution >  BRTI at market
+        open.  'Market open' for the current 15-min window equals the close of the
+        previous completed 15-min candle.  Using the live 5-min close instead
+        introduces a systematic error whenever price has drifted during the current
+        15-min window: we would be asking Kronos the wrong directional question.
+        """
+        import pandas as pd
+        try:
+            df = self._store.get_ohlcv("15min")
+            if df is not None and len(df) >= 1:
+                now_utc = pd.Timestamp.now(tz="UTC")
+                # Walk backwards to find the most recent completed candle.
+                # The last row may be the in-progress (open) candle.
+                for i in range(len(df) - 1, -1, -1):
+                    candle_end = df.index[i] + pd.Timedelta(minutes=15)
+                    if candle_end <= now_utc:
+                        return float(df.iloc[i]["close"])
+        except Exception as exc:
+            logger.debug(f"Could not determine 15-min reference price: {exc}")
+        # Fallback: if no completed 15-min candle exists yet (system just started),
+        # use 5-min close as an approximation until the first candle closes.
+        return self._get_composite_price()
 
     def _record_trade_sqlite(
         self,
