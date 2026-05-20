@@ -377,9 +377,35 @@ class KronosV2:
 
     def _parse_orderbook(self, orderbook: dict) -> tuple[int, int, int]:
         try:
+            # Current Kalshi API returns orderbook_fp with yes_dollars/no_dollars.
+            # Prices are dollar strings (e.g. "0.5500"), quantities are float strings.
+            # Lists are in ASCENDING price order — best bid is the LAST entry.
+            book_fp = orderbook.get("orderbook_fp")
+            if book_fp:
+                yes_bids = book_fp.get("yes_dollars", [])  # ascending dollar strings
+                no_bids = book_fp.get("no_dollars", [])    # ascending dollar strings
+
+                if not no_bids:
+                    return (0, 0, 0)
+
+                # Best bids = last entry (highest price) in each ascending list
+                best_yes_bid = float(yes_bids[-1][0]) if yes_bids else 0.0
+                best_no_bid = float(no_bids[-1][0])
+
+                # Convert to integer cents
+                best_bid_cents = round(best_yes_bid * 100)
+                best_ask_cents = round((1.0 - best_no_bid) * 100)  # implied YES ask
+                available_contracts = int(float(no_bids[-1][1]))
+
+                if best_ask_cents <= 0 or best_ask_cents >= 100:
+                    return (0, 0, 0)
+
+                return (best_bid_cents, best_ask_cents, available_contracts)
+
+            # Fallback: legacy format — "orderbook" key, integer cents, descending
             book = orderbook.get("orderbook", orderbook)
-            yes_bids = book.get("yes", [])   # [[price_cents, qty], ...] descending
-            no_bids = book.get("no", [])     # [[price_cents, qty], ...] descending
+            yes_bids = book.get("yes", [])
+            no_bids = book.get("no", [])
 
             best_bid_cents = int(yes_bids[0][0]) if yes_bids else 0
             if no_bids:
