@@ -86,10 +86,10 @@ class PreTradeChecklist:
             return fail(5, f"Signal edge {signal_edge:.4f} does not exceed spread + 0.005 ({min_required:.4f})")
 
         # Gate 6 — Strike proximity check (KXBTCD / strike markets only)
-        # For KXBTC15M up/down markets the strike IS the current price by design
-        # (there is no explicit strike field, so _extract_strike falls back to
-        # composite_price).  Applying a $150 proximity gate would reject every
-        # 15-min market unconditionally.  Skip Gate 6 for the 15min timeframe.
+        # For KXBTC15M up/down markets _extract_strike uses the last completed
+        # 15-min BRTI close as the threshold, not composite_price.  Applying a
+        # $150 proximity gate would reject every 15-min market unconditionally.
+        # Skip Gate 6 for the 15min timeframe.
         if signal.timeframe != "15min":
             distance = abs(composite_price - signal.strike)
             if distance < 150:
