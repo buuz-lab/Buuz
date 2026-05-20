@@ -5,6 +5,7 @@ import pytest
 
 from btc_kalshi_system.models.deepseek_parser import (
     DeepSeekContextParser,
+    NEUTRAL_DEFAULT,
     SAFE_DEFAULT,
 )
 
@@ -146,8 +147,10 @@ def test_prompt_includes_market_context_values():
 
 # ── Construction ──────────────────────────────────────────────────────────────
 
-def test_missing_api_key_falls_back_to_safe_default():
-    """Without an API key, every call returns safe default (cannot authenticate)."""
+def test_missing_api_key_falls_back_to_neutral_default():
+    """No API key = intentional (user skipping DeepSeek) → neutral fallback, not cautious."""
     parser = DeepSeekContextParser(api_key="")
     result = parser.get_current_context(_good_context())
-    assert result == SAFE_DEFAULT
+    assert result == NEUTRAL_DEFAULT
+    assert result["suppress_trading"] is False
+    assert result["regime"] == "ranging"

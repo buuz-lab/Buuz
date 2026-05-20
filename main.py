@@ -129,7 +129,13 @@ class KronosV2:
         while self._running:
             loop_start = time.time()
             try:
-                self._run_cycle()
+                # Run the entire cycle in a thread-pool worker so PyTorch inference
+                # (100 forward passes through the Kronos transformer) never blocks
+                # the asyncio event loop thread.  On macOS, running PyTorch inside
+                # the kqueue-based event loop thread causes a segfault because
+                # PyTorch's Accelerate-framework internals conflict with kqueue's
+                # dispatch queue.  Moving it off-thread eliminates the conflict.
+                await asyncio.to_thread(self._run_cycle)
             except Exception as exc:
                 logger.error(f"Unhandled error in main loop cycle: {exc}")
             elapsed = time.time() - loop_start

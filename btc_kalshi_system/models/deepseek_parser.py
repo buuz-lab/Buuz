@@ -30,6 +30,17 @@ _HTTP_TIMEOUT_SECONDS = 30
 _VALID_REGIMES = {"trending_up", "trending_down", "ranging", "high_uncertainty"}
 _REQUIRED_KEYS = ("regime", "confidence", "suppress_trading", "suppress_reason", "notes")
 
+# Used when DeepSeek is reachable and returns a valid regime with no special conditions.
+NEUTRAL_DEFAULT: dict[str, Any] = {
+    "regime": "ranging",
+    "confidence": 0.0,
+    "suppress_trading": False,
+    "suppress_reason": None,
+    "notes": "DeepSeek unavailable — using neutral fallback so signals are not shrunk.",
+}
+
+# Used when DeepSeek call fails in a way that suggests we should be cautious
+# (e.g. a partial/garbled response, not just a network/billing error).
 SAFE_DEFAULT: dict[str, Any] = {
     "regime": "high_uncertainty",
     "confidence": 0.0,
@@ -78,8 +89,9 @@ class DeepSeekContextParser:
     def get_current_context(self, market_context: dict) -> dict:
         """Return a structured regime dict — cached for `cache_minutes` minutes."""
         if not self._api_key:
-            logger.warning("DeepSeekContextParser: no API key configured, returning safe default")
-            return dict(SAFE_DEFAULT)
+            # No key configured = intentional, not an error — use neutral so signals aren't shrunk.
+            logger.debug("DeepSeekContextParser: no API key configured, using neutral fallback")
+            return dict(NEUTRAL_DEFAULT)
 
         if self._is_cache_valid():
             return dict(self._cache)  # defensive copy
@@ -87,7 +99,22 @@ class DeepSeekContextParser:
         try:
             prompt = self._build_prompt(market_context)
             raw_response = self._call_api(prompt)
+        except requests.HTTPError as exc:
+            # 402 = no credits.  Log once clearly; use neutral fallback (not high_uncertainty)
+            # so signals are not shrunk during bootstrap while credits are topped up.
+            status = exc.response.status_code if exc.response is not None else "?"
+            if status == 402:
+                logger.warning(
+                    "DeepSeekContextParser: 402 Payment Required — DeepSeek account has no credits. "
+                    "Using neutral fallback (regime=ranging, suppress=False). "
+                    "Top up at https://platform.deepseek.com to enable LLM context gating."
+                )
+            else:
+                logger.warning(f"DeepSeekContextParser: HTTP error — {exc}")
+                return dict(SAFE_DEFAULT)
+            return dict(NEUTRAL_DEFAULT)
         except Exception as exc:
+            # Unknown failure (network error, timeout, etc.) — stay conservative.
             logger.warning(f"DeepSeekContextParser: API call failed — {exc}")
             return dict(SAFE_DEFAULT)
 

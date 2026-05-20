@@ -27,10 +27,19 @@ class KalshiClientRouter:
         self._api_key_id = api_key_id or config.KALSHI_API_KEY_ID
         self._private_key_path = private_key_path or config.KALSHI_PRIVATE_KEY_PATH
 
-        self._raw = KalshiRawClient(
-            api_key_id=self._api_key_id,
-            private_key_path=self._private_key_path,
-        )
+        try:
+            self._raw = KalshiRawClient(
+                api_key_id=self._api_key_id,
+                private_key_path=self._private_key_path,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            # Key missing or malformed — log clearly and re-raise so the operator
+            # sees an actionable message rather than an empty log file.
+            logger.critical(
+                f"KalshiRawClient failed to initialise: {exc}\n"
+                "Check KALSHI_PRIVATE_KEY_PATH in .env and ensure the file exists."
+            )
+            raise
 
         self._primary = self._init_pykalshi()
         self._state: ClientState = (

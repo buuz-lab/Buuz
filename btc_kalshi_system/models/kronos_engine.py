@@ -23,10 +23,22 @@ class KronosEngine:
     def _load(self) -> None:
         if self._predictor is not None:
             return
+        import torch
         from kronos_model import Kronos, KronosPredictor, KronosTokenizer
-        model = Kronos.from_pretrained(self._model_name)
-        tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
-        self._predictor = KronosPredictor(model, tokenizer, max_context=512)
+
+        # map_location="cpu" forces weights to land on CPU during torch.load() inside
+        # from_pretrained(), BEFORE KronosPredictor gets a chance to set the device.
+        # Without this, PyTorchModelHubMixin loads to MPS on Apple Silicon, and the
+        # subsequent .to("cpu") move triggers a segfault in torch.multinomial.
+        logger.info("KronosEngine: loading model weights directly to CPU …")
+        model = Kronos.from_pretrained(self._model_name, map_location="cpu")
+        tokenizer = KronosTokenizer.from_pretrained(
+            "NeoQuasar/Kronos-Tokenizer-base", map_location="cpu"
+        )
+        # Single-threaded to avoid Accelerate-framework threading conflicts on macOS.
+        torch.set_num_threads(1)
+        self._predictor = KronosPredictor(model, tokenizer, device="cpu", max_context=512)
+        logger.info("KronosEngine: model ready on CPU")
 
     def run_monte_carlo(
         self,
