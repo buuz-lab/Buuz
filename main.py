@@ -200,7 +200,7 @@ class KronosV2:
             logger.debug(f"Could not determine strike for {ticker}, skipping")
             return
 
-        timeframe = "same_day"
+        timeframe = market.get("market_type", "15min")
 
         # c. Signal
         signal = self._fusion.get_signal(timeframe=timeframe, strike=strike)
