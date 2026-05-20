@@ -167,7 +167,7 @@ class KronosV2:
         # 5. Active markets
         markets = self._get_active_markets()
         if not markets:
-            logger.info("No active KXBTC markets found")
+            logger.info("No active BTC markets found")
             return
 
         # 6. Process each market
@@ -314,14 +314,22 @@ class KronosV2:
         return {}
 
     def _get_active_markets(self) -> list[dict]:
-        try:
-            resp = self._router._raw._request(
-                "GET", "/trade-api/v2/markets?series_ticker=KXBTC&status=open"
-            )
-            return resp.get("markets", [])
-        except Exception as exc:
-            logger.warning(f"Failed to fetch active KXBTC markets: {exc}")
-            return []
+        # KXBTC15M = 15-min BTC up/down; KXBTCD = hourly BTC above/below
+        series = [("KXBTC15M", "15min"), ("KXBTCD", "1h")]
+        markets: list[dict] = []
+        for series_ticker, market_type in series:
+            try:
+                resp = self._router._raw._request(
+                    "GET", f"/trade-api/v2/markets?series_ticker={series_ticker}&status=open"
+                )
+                for m in resp.get("markets", []):
+                    m["market_type"] = market_type
+                    markets.append(m)
+            except Exception as exc:
+                logger.warning(f"Failed to fetch {series_ticker} markets: {exc}")
+        if not markets:
+            logger.info("No active 15-min or hourly BTC markets found")
+        return markets
 
     def _extract_strike(self, market: dict) -> float | None:
         # Try common Kalshi market fields for the strike price
