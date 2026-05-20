@@ -332,7 +332,6 @@ class KronosV2:
         return markets
 
     def _extract_strike(self, market: dict) -> float | None:
-        # Try common Kalshi market fields for the strike price
         for field in ("floor_strike", "cap_strike", "strike_price", "result_at_open"):
             val = market.get(field)
             if val is not None:
@@ -345,6 +344,14 @@ class KronosV2:
         for part in ticker.split("-"):
             if part.startswith("T") and part[1:].isdigit():
                 return float(part[1:])
+        # For up/down markets the threshold is "higher than current price",
+        # so live BRTI price is the right substitute when no strike field is present.
+        price = self._get_composite_price()
+        if price > 0.0:
+            logger.debug(
+                f"No strike field found for {ticker} — using composite price {price:.2f} as fallback"
+            )
+            return price
         return None
 
     def _parse_orderbook(self, orderbook: dict) -> tuple[int, int, int]:
