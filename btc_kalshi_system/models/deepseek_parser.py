@@ -49,7 +49,7 @@ SAFE_DEFAULT: dict[str, Any] = {
     "notes": "Falling back to safe default — DeepSeek call failed or returned malformed data.",
 }
 
-_PROMPT_TEMPLATE = """You are a BTC market regime classifier. Given the following market context, output ONLY a JSON object with no preamble, no explanation, and no markdown fencing.
+_PROMPT_TEMPLATE = """You are a BTC market regime classifier for an automated trading system. Given the following market context, output ONLY a JSON object with no preamble, no explanation, and no markdown fencing.
 
 Context:
 - Funding rate: {funding_rate}% (trend: {funding_trend})
@@ -58,6 +58,12 @@ Context:
 - Basis spread: {basis_spread}%
 - Recent headlines: {headlines}
 - Upcoming macro events (2h): {macro_events}
+
+IMPORTANT — suppress_trading rules:
+- Set suppress_trading=false for ALL normal market conditions, including calm, ranging, low-volatility, or uncertain markets. The trading system is DESIGNED to operate in these conditions.
+- Set suppress_trading=true ONLY for extraordinary, imminent market-disrupting events: active exchange hacks, ongoing flash crashes, imminent Fed/FOMC announcements within 30 minutes, confirmed major protocol exploits, or similar one-in-a-month events.
+- Low funding rate, flat OI, quiet headlines = suppress_trading=false (this is normal and tradeable).
+- Insufficient data = suppress_trading=false (default to allowing trades; do not suppress on uncertainty alone).
 
 Output exactly this JSON structure:
 {{
