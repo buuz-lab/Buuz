@@ -22,27 +22,67 @@ class DerivativesFeed:
     Refreshes every 5 minutes in an async loop.
     """
 
+    # Exchange preference order — first one that connects without a 403/geo-block wins.
+    # Bybit geo-blocks US users via CloudFront (HTTP 403).
+    # OKX is the fallback: same perp futures data, accessible from the US.
+    _EXCHANGE_PREFERENCE = ["okx", "bybit"]
+
     def __init__(self, redis_url: str = REDIS_URL) -> None:
         import ccxt.async_support as ccxt_async
         self._redis = redis.from_url(redis_url)
-        self._exchange = ccxt_async.bybit({"enableRateLimit": True})
+        self._ccxt_async = ccxt_async
+        self._exchange = None   # resolved lazily on first fetch
+        self._exchange_name: str = ""
         self._prev_oi: float = 0.0
 
     # ── Public entry point ─────────────────────────────────────────────────────
 
+    async def _resolve_exchange(self) -> bool:
+        """Try each exchange in preference order; set self._exchange to the first that works."""
+        for name in self._EXCHANGE_PREFERENCE:
+            try:
+                ex = getattr(self._ccxt_async, name)({"enableRateLimit": True})
+                # Lightweight probe — instruments-info or markets call
+                await ex.load_markets()
+                self._exchange = ex
+                self._exchange_name = name
+                logger.info(f"DerivativesFeed: using {name} for derivatives data")
+                return True
+            except Exception as exc:
+                logger.warning(f"DerivativesFeed: {name} unavailable ({exc}), trying next …")
+                try:
+                    await ex.close()
+                except Exception:
+                    pass
+        logger.error("DerivativesFeed: all exchanges unavailable — regime features will be zeros")
+        return False
+
     async def run(self) -> None:
         """Refresh features every 5 minutes indefinitely."""
         try:
+            if not await self._resolve_exchange():
+                # No exchange available — run a no-op loop so gather() doesn't crash
+                while True:
+                    await asyncio.sleep(_REFRESH_INTERVAL)
+
             while True:
                 try:
                     features = await self._fetch_features()
                     self._write_features(features)
                     logger.info(f"DerivativesFeed: wrote regime:features — {features}")
                 except Exception as exc:
-                    logger.warning(f"DerivativesFeed: fetch failed: {exc}")
+                    logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
+                    # If this exchange started geo-blocking mid-session, try to failover
+                    if "403" in str(exc) or "Forbidden" in str(exc):
+                        logger.warning("DerivativesFeed: 403 detected — attempting exchange failover")
+                        await self._exchange.close()
+                        self._exchange = None
+                        if not await self._resolve_exchange():
+                            break
                 await asyncio.sleep(_REFRESH_INTERVAL)
         finally:
-            await self._exchange.close()
+            if self._exchange is not None:
+                await self._exchange.close()
 
     # ── Feature computation ────────────────────────────────────────────────────
 

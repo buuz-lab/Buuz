@@ -93,6 +93,13 @@ class KronosV2:
             calibrator=self._calibrator,
         )
 
+        # Preload Kronos here — single-threaded, no event loop, no concurrent I/O.
+        # Loading it later (inside asyncio.to_thread while WebSocket feeds run) causes
+        # a segfault on Apple Silicon because PyTorch's Accelerate-framework init races
+        # with macOS kqueue.  Once loaded, _load() becomes a no-op so the worker thread
+        # call is safe.
+        self._kronos.preload()
+
         self._db = sqlite3.connect("trades.db", check_same_thread=False)
         self._db.execute(_CREATE_TRADES_TABLE)
         self._db.commit()

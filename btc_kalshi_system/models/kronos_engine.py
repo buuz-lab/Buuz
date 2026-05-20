@@ -20,23 +20,33 @@ class KronosEngine:
         self._model_name = model_name
         self._predictor = None  # lazy-loaded on first call
 
+    def preload(self) -> None:
+        """Eagerly load the model.
+
+        Call this BEFORE starting the asyncio event loop (e.g. in KronosV2.__init__).
+        Loading inside a worker thread while WebSocket feeds run concurrently triggers
+        a segfault on Apple Silicon because PyTorch's Accelerate-framework initialisation
+        is not safe under concurrent macOS kqueue I/O.  Loading here — single-threaded,
+        no event loop — is unconditionally safe.
+        """
+        self._load()
+
     def _load(self) -> None:
         if self._predictor is not None:
             return
         import torch
         from kronos_model import Kronos, KronosPredictor, KronosTokenizer
 
-        # map_location="cpu" forces weights to land on CPU during torch.load() inside
-        # from_pretrained(), BEFORE KronosPredictor gets a chance to set the device.
-        # Without this, PyTorchModelHubMixin loads to MPS on Apple Silicon, and the
-        # subsequent .to("cpu") move triggers a segfault in torch.multinomial.
-        logger.info("KronosEngine: loading model weights directly to CPU …")
+        # set_num_threads MUST come before any torch operation (including from_pretrained).
+        # In the test script this was called first and inference succeeded; calling it
+        # after from_pretrained races with Accelerate's internal thread pool init.
+        torch.set_num_threads(1)
+
+        logger.info("KronosEngine: loading model weights to CPU …")
         model = Kronos.from_pretrained(self._model_name, map_location="cpu")
         tokenizer = KronosTokenizer.from_pretrained(
             "NeoQuasar/Kronos-Tokenizer-base", map_location="cpu"
         )
-        # Single-threaded to avoid Accelerate-framework threading conflicts on macOS.
-        torch.set_num_threads(1)
         self._predictor = KronosPredictor(model, tokenizer, device="cpu", max_context=512)
         logger.info("KronosEngine: model ready on CPU")
 
