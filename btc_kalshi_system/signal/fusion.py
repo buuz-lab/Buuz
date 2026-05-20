@@ -74,6 +74,8 @@ class SignalFusionEngine:
 
         deepseek_regime = ds["regime"]
 
+        # For up/down markets, strike = BTC price at market open, so this computes
+        # P(predicted_close > open_price) = P(price goes up) — exactly what we want.
         kronos_raw = self._kronos.run_monte_carlo(self._store, threshold=strike)
         kronos_cal = self._calibrator.transform(kronos_raw)
         kronos_direction = 1 if kronos_cal >= 0.5 else 0
