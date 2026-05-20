@@ -136,14 +136,18 @@ class DeepSeekContextParser:
         return (time.time() - self._cache_time) < (self._cache_minutes * 60)
 
     def _build_prompt(self, market_context: dict) -> str:
+        # Key names must match what DerivativesFeed writes to Redis (regime:features).
+        # Previous mismatch (e.g. "funding_trend" vs "funding_rate_trend") caused
+        # DeepSeek to receive "n/a" for most fields and suppress trading due to
+        # "insufficient data" — even though the data existed in Redis.
         return _PROMPT_TEMPLATE.format(
             funding_rate=market_context.get("funding_rate", "n/a"),
-            funding_trend=market_context.get("funding_trend", "n/a"),
-            oi_delta=market_context.get("oi_delta", "n/a"),
-            liquidations_usd=market_context.get("liquidations_usd", "n/a"),
-            basis_spread=market_context.get("basis_spread", "n/a"),
-            headlines=market_context.get("headlines", []),
-            macro_events=market_context.get("macro_events", []),
+            funding_trend=market_context.get("funding_rate_trend", "n/a"),
+            oi_delta=market_context.get("oi_delta_pct", "n/a"),
+            liquidations_usd=market_context.get("liquidations_usd", "n/a"),  # not yet collected
+            basis_spread=market_context.get("basis_spread_pct", "n/a"),
+            headlines=market_context.get("headlines", []),       # not yet collected
+            macro_events=market_context.get("macro_events", []), # not yet collected
         )
 
     def _call_api(self, prompt: str) -> str:
