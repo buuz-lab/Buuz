@@ -32,7 +32,7 @@ import config
 logger.remove()
 logger.add(sys.stderr, level="INFO")
 Path("logs").mkdir(exist_ok=True)
-logger.add("logs/kronos_{time}.log", rotation="1 day", retention="30 days", level="DEBUG")
+logger.add("logs/kronos_{time}.log", rotation="1 day", retention="30 days", level="DEBUG", enqueue=True, catch=True)
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 
