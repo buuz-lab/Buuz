@@ -9,7 +9,7 @@ from loguru import logger
 from config import REDIS_URL
 
 _REFRESH_INTERVAL = 300   # 5 minutes
-_FEATURES_TTL = 300       # Redis TTL matches refresh interval
+_FEATURES_TTL = 600       # 2x refresh interval — tolerates one missed cycle without expiring
 _FUNDING_LOOKBACK_MS = 4 * 3600_000  # 4 hours in milliseconds
 _SYMBOL = "BTC/USDT:USDT"
 
