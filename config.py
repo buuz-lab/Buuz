@@ -27,3 +27,19 @@ KALSHI_PRIVATE_KEY_PATH: str = os.getenv("KALSHI_PRIVATE_KEY_PATH", "./keys/kals
 # Set to true to simulate trades without placing real orders.
 # Use this to bootstrap the calibrator and edge tracker before going live.
 PAPER_TRADING: bool = os.getenv("PAPER_TRADING", "false").lower() == "true"
+
+# Path to the serialized XGBoost RegimeModel. Created by scripts/train_regime.py
+# once ≥500 non-stale resolved trades are accumulated in trades.db. KronosV2 will
+# attempt to load this file at startup; if missing, the system runs in bootstrap
+# mode (Kronos-only with _BOOTSTRAP_SHRINK).
+REGIME_MODEL_PATH: str = os.getenv("REGIME_MODEL_PATH", "models/regime.pkl")
+
+# Gate 2 enforcement mode.
+#   False (default): Kronos/regime disagreements are logged but the trade still
+#       proceeds. Use this for the first ~50 trades after loading a freshly
+#       trained model to observe the disagreement rate and confidence
+#       distribution before letting the gate block trades.
+#   True: Disagreements return None (current "trained-path" behavior).
+# Has no effect while RegimeModel is untrained — Gate 2 is bypassed entirely
+# in the NotTrainedError code path regardless of this flag.
+REGIME_GATE2_ENFORCING: bool = os.getenv("REGIME_GATE2_ENFORCING", "false").lower() == "true"

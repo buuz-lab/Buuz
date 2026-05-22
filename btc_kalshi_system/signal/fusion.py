@@ -3,7 +3,8 @@ SignalFusionEngine — combines Kronos MC forecast, regime model, and DeepSeek
 context into a single gated TradingSignal.
 
 Gate 1 (DeepSeek): suppress_trading=True  → return None
-Gate 2 (direction): Kronos ≠ regime       → return None (skipped if regime not trained)
+Gate 2 (direction): Kronos ≠ regime       → log warning, and return None ONLY when
+    config.REGIME_GATE2_ENFORCING=True. Skipped entirely if regime not trained.
 
 Combined probability formula (when both models available):
     combined = 0.6 * kronos_calibrated + 0.4 * regime_prob
@@ -23,12 +24,13 @@ from passing during bootstrap, stalling trade accumulation indefinitely.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
 from loguru import logger
 
+import config
 from btc_kalshi_system.data.feature_store import FeatureStore
 from btc_kalshi_system.models.calibrator import Calibrator
 from btc_kalshi_system.models.deepseek_parser import DeepSeekContextParser
@@ -54,6 +56,14 @@ class TradingSignal:
     timeframe: str
     strike: float
     timestamp: datetime
+    # Snapshot of the six regime features at signal-creation time. These are the
+    # exact values that were (or would be) fed to RegimeModel.get_regime(); they
+    # are persisted at trade-write time and form the training X matrix later.
+    regime_features: dict = field(default_factory=dict)
+    # True if the upstream `regime:features` Redis key was missing/expired when
+    # this signal was built. Stale rows are still tradeable in bootstrap mode
+    # (regime features are unused), but they must be filtered out before training.
+    features_stale: bool = False
 
 
 class SignalFusionEngine:
@@ -104,14 +114,31 @@ class SignalFusionEngine:
         kronos_cal = self._calibrator.transform(kronos_raw)
         kronos_direction = 1 if kronos_cal >= 0.5 else 0
 
+        # Compute features ONCE per signal so the values we feed the regime model
+        # match the values we persist in trades.db. This is the snapshot used both
+        # at inference time and (later) as the training row for this trade.
+        regime_features, features_stale = self._regime_features()
+
         try:
-            regime_result = self._regime.get_regime(self._regime_features())
+            regime_result = self._regime.get_regime(regime_features)
             regime_prob = regime_result["prob_up"]
             regime_direction = regime_result["direction"]
 
-            # Gate 2: Kronos and regime must agree
+            # Gate 2: Kronos and regime must agree.
+            # In shadow mode (config.REGIME_GATE2_ENFORCING=False) we log the
+            # disagreement but continue trading. This lets a freshly trained
+            # model run alongside Kronos for ~50 trades so the disagreement rate
+            # and regime confidence distribution can be observed before letting
+            # the gate block live trades. Flip to True once validated.
             if kronos_direction != regime_direction:
-                return None
+                logger.warning(
+                    f"Gate 2 disagreement: kronos_direction={kronos_direction} "
+                    f"regime_direction={regime_direction} kronos_cal={kronos_cal:.3f} "
+                    f"regime_prob={regime_prob:.3f} regime_confidence={regime_result.get('confidence', 0):.3f} "
+                    f"enforcing={config.REGIME_GATE2_ENFORCING}"
+                )
+                if config.REGIME_GATE2_ENFORCING:
+                    return None
 
             combined = _KRONOS_WEIGHT * kronos_cal + _REGIME_WEIGHT * regime_prob
             if deepseek_regime == "high_uncertainty":
@@ -148,16 +175,37 @@ class SignalFusionEngine:
             timeframe=timeframe,
             strike=strike,
             timestamp=datetime.now(timezone.utc),
+            regime_features=regime_features,
+            features_stale=features_stale,
         )
 
-    def _regime_features(self) -> dict:
+    def _regime_features(self) -> tuple[dict, bool]:
+        """
+        Build the six-feature dict consumed by RegimeModel.get_regime() and the
+        feature-store at training time.
+
+        Returns (features, stale). `stale=True` means the upstream Binance-derived
+        regime context (funding/OI/CVD/basis) was missing or expired in Redis when
+        this snapshot was built — five of the six features fell back to 0.0 and
+        the row should be excluded from any future training X matrix.
+
+        We intentionally still return numeric values (0.0 fallback) even when
+        stale, so XGBoost.predict_proba() doesn't blow up in the trained path.
+        The caller is expected to consult `stale` to decide whether to bail out.
+        """
         ctx = self._market_context
+        stale = not ctx  # empty dict ⇒ Redis read failed or key expired
+
+        # brti_volatility_1h is computed locally from the OHLCV store and is
+        # independent of the Redis regime:features key. It can be valid even
+        # when ctx is empty, so we don't include it in the staleness check.
         df = self._store.get_ohlcv("5min")
         if df is not None and len(df) >= 12:
             vol = float(df["close"].pct_change().tail(12).std())
         else:
             vol = 0.0
-        return {
+
+        features = {
             "funding_rate": float(ctx.get("funding_rate", 0.0)),
             "funding_rate_trend": float(ctx.get("funding_rate_trend", 0.0)),
             "oi_delta_pct": float(ctx.get("oi_delta_pct", 0.0)),
@@ -165,3 +213,4 @@ class SignalFusionEngine:
             "basis_spread_pct": float(ctx.get("basis_spread_pct", 0.0)),
             "brti_volatility_1h": vol,
         }
+        return features, stale

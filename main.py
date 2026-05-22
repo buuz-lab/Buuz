@@ -62,9 +62,33 @@ CREATE TABLE IF NOT EXISTS trades (
     deepseek_regime TEXT,
     fill_price_cents INTEGER,
     outcome INTEGER DEFAULT NULL,
-    pnl_dollars REAL DEFAULT NULL
+    pnl_dollars REAL DEFAULT NULL,
+    -- Six regime features as-of signal-creation time. These columns are the
+    -- training X matrix for RegimeModel once we have ≥500 non-stale rows.
+    funding_rate REAL DEFAULT NULL,
+    funding_rate_trend REAL DEFAULT NULL,
+    oi_delta_pct REAL DEFAULT NULL,
+    cvd_normalized REAL DEFAULT NULL,
+    basis_spread_pct REAL DEFAULT NULL,
+    brti_volatility_1h REAL DEFAULT NULL,
+    -- 1 if the regime:features Redis read was empty/expired at trade time.
+    -- Stale rows must be filtered out of the training set.
+    features_stale INTEGER DEFAULT 0
 )
 """
+
+# Idempotent column additions for databases created before the regime-feature
+# columns existed. SQLite's ALTER TABLE ADD COLUMN is fast (rewrites no rows)
+# and the OperationalError swallow makes this safe to run on every startup.
+_TRADES_COLUMN_MIGRATIONS = [
+    ("funding_rate",        "REAL DEFAULT NULL"),
+    ("funding_rate_trend",  "REAL DEFAULT NULL"),
+    ("oi_delta_pct",        "REAL DEFAULT NULL"),
+    ("cvd_normalized",      "REAL DEFAULT NULL"),
+    ("basis_spread_pct",    "REAL DEFAULT NULL"),
+    ("brti_volatility_1h",  "REAL DEFAULT NULL"),
+    ("features_stale",      "INTEGER DEFAULT 0"),
+]
 
 
 class KronosV2:
@@ -72,7 +96,19 @@ class KronosV2:
         self._store = FeatureStore()
         self._kronos = KronosEngine()
         self._calibrator = Calibrator()
-        self._regime = RegimeModel()
+        # Try to load a trained RegimeModel from disk. If the file doesn't exist
+        # yet (e.g. system is still in bootstrap mode and hasn't collected enough
+        # paper trades to train), fall back to an unfit instance. fusion.py's
+        # NotTrainedError branch will then run Kronos-only with _BOOTSTRAP_SHRINK.
+        try:
+            self._regime = RegimeModel.load(config.REGIME_MODEL_PATH)
+            logger.info(f"RegimeModel loaded from {config.REGIME_MODEL_PATH}")
+        except FileNotFoundError:
+            self._regime = RegimeModel()
+            logger.info(
+                f"RegimeModel file not found at {config.REGIME_MODEL_PATH} — "
+                f"running in bootstrap mode (Kronos-only, Gate 2 bypassed)"
+            )
         self._deepseek = DeepSeekContextParser()
         self._fusion = SignalFusionEngine(
             feature_store=self._store,
@@ -102,6 +138,16 @@ class KronosV2:
 
         self._db = sqlite3.connect("trades.db", check_same_thread=False)
         self._db.execute(_CREATE_TRADES_TABLE)
+        # Apply additive schema migrations for pre-existing databases. New columns
+        # default to NULL on existing rows — that's the correct signal that those
+        # historical trades have no captured regime features and must be excluded
+        # from training.
+        for col_name, col_def in _TRADES_COLUMN_MIGRATIONS:
+            try:
+                self._db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_def}")
+            except sqlite3.OperationalError:
+                # "duplicate column name" — column already exists. Safe to ignore.
+                pass
         self._db.commit()
 
         self._running = False
@@ -487,6 +533,13 @@ class KronosV2:
         fill_price_cents: int,
     ) -> None:
         import math
+        # Pull the six regime features off the signal. These are the exact values
+        # that were fed to RegimeModel at inference time (or would have been, in
+        # bootstrap mode) — so the persisted row is a faithful training example.
+        # `features_stale=1` flags rows where the upstream Redis read failed; the
+        # numeric columns are still populated (with the 0.0 fallback that fusion
+        # used) so the row is reproducible, but training must filter on stale=0.
+        feats = signal.regime_features or {}
         try:
             self._db.execute(
                 """
@@ -494,8 +547,11 @@ class KronosV2:
                     trade_id, timestamp, ticker, timeframe, direction, strike,
                     market_price, kelly_dollars, kelly_contracts,
                     kronos_raw, kronos_calibrated, regime_prob, deepseek_regime,
-                    fill_price_cents
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    fill_price_cents,
+                    funding_rate, funding_rate_trend, oi_delta_pct,
+                    cvd_normalized, basis_spread_pct, brti_volatility_1h,
+                    features_stale
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trade_id,
@@ -512,6 +568,13 @@ class KronosV2:
                     None if math.isnan(signal.regime_prob) else signal.regime_prob,
                     signal.deepseek_regime,
                     fill_price_cents,
+                    feats.get("funding_rate"),
+                    feats.get("funding_rate_trend"),
+                    feats.get("oi_delta_pct"),
+                    feats.get("cvd_normalized"),
+                    feats.get("basis_spread_pct"),
+                    feats.get("brti_volatility_1h"),
+                    1 if signal.features_stale else 0,
                 ),
             )
             self._db.commit()

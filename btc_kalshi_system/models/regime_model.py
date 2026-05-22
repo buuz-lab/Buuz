@@ -41,14 +41,22 @@ class RegimeModel:
         confidence = float(abs(prob_up - 0.5) * 2)  # 0 at boundary, 1 at extremes
         return {"prob_up": prob_up, "direction": direction, "confidence": confidence}
 
-    def train(self, X: np.ndarray, y: np.ndarray) -> "RegimeModel":
-        self._clf = xgb.XGBClassifier(
-            n_estimators=100,
-            max_depth=4,
-            learning_rate=0.1,
-            eval_metric="logloss",
-            random_state=42,
-        )
+    def train(self, X: np.ndarray, y: np.ndarray, **xgb_kwargs) -> "RegimeModel":
+        """
+        Fit the XGBoost classifier. Extra keyword arguments are forwarded to
+        XGBClassifier — most usefully `scale_pos_weight` for imbalanced labels
+        (use `(y==0).sum() / (y==1).sum()`). Caller-supplied kwargs override the
+        defaults below.
+        """
+        defaults = {
+            "n_estimators": 100,
+            "max_depth": 4,
+            "learning_rate": 0.1,
+            "eval_metric": "logloss",
+            "random_state": 42,
+        }
+        defaults.update(xgb_kwargs)
+        self._clf = xgb.XGBClassifier(**defaults)
         self._clf.fit(X, y)
         return self
 

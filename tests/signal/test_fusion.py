@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import config
 from btc_kalshi_system.models.regime_model import NotTrainedError
 from btc_kalshi_system.signal.fusion import _BOOTSTRAP_SHRINK, SignalFusionEngine, TradingSignal
 
@@ -95,7 +96,11 @@ def test_gate1_suppress_prevents_kronos_call():
 
 # ── Gate 2: direction agreement ────────────────────────────────────────────────
 
-def test_gate2_direction_mismatch_returns_none():
+def test_gate2_direction_mismatch_returns_none(monkeypatch):
+    """With Gate 2 in enforce mode, direction disagreement must return None.
+    (In shadow mode the disagreement is logged but the trade proceeds — see
+    test_gate2_shadow_mode_does_not_block below.)"""
+    monkeypatch.setattr(config, "REGIME_GATE2_ENFORCING", True)
     # Kronos cal=0.70 → direction=1 (up); regime direction=0 (down)
     engine = make_engine(kronos_cal=0.70, regime_prob=0.30, regime_direction=0)
     assert engine.get_signal("5min", 76000.0) is None
@@ -276,3 +281,77 @@ def test_strike_forwarded_to_kronos():
     engine._kronos.run_monte_carlo.assert_called_once_with(
         engine._store, threshold=99999.0
     )
+
+
+# ── Regime feature snapshot persisted on the signal ───────────────────────────
+
+def test_signal_carries_regime_features_dict():
+    """The exact features fed to RegimeModel must travel back on the TradingSignal
+    so they can be persisted in trades.db for future training."""
+    engine = make_engine()
+    engine.update_market_context({
+        "funding_rate": 0.0001,
+        "funding_rate_trend": -0.00002,
+        "oi_delta_pct": 0.012,
+        "cvd_normalized": 0.3,
+        "basis_spread_pct": 0.0008,
+    })
+    result = engine.get_signal("5min", 76000.0)
+    assert result is not None
+    # All six keys must be present and numeric (brti_volatility_1h is computed
+    # locally from feature_store, the others come from market_context).
+    for key in ("funding_rate", "funding_rate_trend", "oi_delta_pct",
+                "cvd_normalized", "basis_spread_pct", "brti_volatility_1h"):
+        assert key in result.regime_features
+        assert isinstance(result.regime_features[key], float)
+    assert result.regime_features["funding_rate"] == pytest.approx(0.0001)
+    assert result.regime_features["cvd_normalized"] == pytest.approx(0.3)
+
+
+def test_signal_features_stale_true_when_market_context_empty():
+    """Empty market_context (Redis miss) must produce features_stale=True so
+    training pipelines can filter out the row."""
+    engine = make_engine()  # default ctx is {}
+    result = engine.get_signal("5min", 76000.0)
+    assert result is not None
+    assert result.features_stale is True
+
+
+def test_signal_features_stale_false_when_market_context_populated():
+    engine = make_engine()
+    engine.update_market_context({"funding_rate": 0.0001})
+    result = engine.get_signal("5min", 76000.0)
+    assert result is not None
+    assert result.features_stale is False
+
+
+# ── Gate 2 soft-launch (shadow vs enforce) ────────────────────────────────────
+
+def test_gate2_shadow_mode_does_not_block(monkeypatch):
+    """When REGIME_GATE2_ENFORCING=False, Kronos/regime disagreements must NOT
+    return None — the trade proceeds and the disagreement is just logged."""
+    monkeypatch.setattr(config, "REGIME_GATE2_ENFORCING", False)
+    # Kronos up (0.70), regime down (0.30 / direction=0) — disagreement
+    engine = make_engine(kronos_cal=0.70, regime_prob=0.30, regime_direction=0)
+    result = engine.get_signal("5min", 76000.0)
+    assert result is not None
+    # Combined blend still computed with both inputs since Gate 2 didn't block
+    expected = 0.6 * 0.70 + 0.4 * 0.30
+    assert result.calibrated_prob == pytest.approx(expected)
+
+
+def test_gate2_enforce_mode_blocks(monkeypatch):
+    """When REGIME_GATE2_ENFORCING=True, disagreements return None as before."""
+    monkeypatch.setattr(config, "REGIME_GATE2_ENFORCING", True)
+    engine = make_engine(kronos_cal=0.70, regime_prob=0.30, regime_direction=0)
+    assert engine.get_signal("5min", 76000.0) is None
+
+
+def test_gate2_shadow_mode_does_not_affect_agreement(monkeypatch):
+    """Sanity check: with the flag off and the directions agreeing, behavior is
+    unchanged from the original test_gate2_both_up_returns_signal."""
+    monkeypatch.setattr(config, "REGIME_GATE2_ENFORCING", False)
+    engine = make_engine(kronos_cal=0.70, regime_prob=0.70, regime_direction=1)
+    result = engine.get_signal("5min", 76000.0)
+    assert result is not None
+    assert result.direction == 1
