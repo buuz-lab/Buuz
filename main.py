@@ -2,6 +2,7 @@ import asyncio
 import json
 import signal
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -176,6 +177,7 @@ class KronosV2:
             self._store.run(agg.out_queue),
             deriv.run(),
             self._main_loop(),
+            self._regime_watchdog(),
         )
 
     async def _main_loop(self) -> None:
@@ -194,6 +196,33 @@ class KronosV2:
             elapsed = time.time() - loop_start
             await asyncio.sleep(max(0, SIGNAL_INTERVAL_SECONDS - elapsed))
         logger.info("KronosV2 main loop stopped")
+
+    async def _regime_watchdog(self) -> None:
+        """Warn when regime:features TTL is dangerously low or key has expired."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                ttl = self._store._redis.ttl("regime:features")
+                if ttl == -2:
+                    logger.error("WATCHDOG: regime:features is EXPIRED — trades firing now will be stale")
+                    subprocess.run(
+                        ["osascript", "-e",
+                         'display notification "regime:features EXPIRED — stale trades possible"'
+                         ' with title "KronosV2 ALERT" sound name "Sosumi"'],
+                        check=False,
+                    )
+                elif 0 <= ttl <= 90:
+                    logger.warning(
+                        f"WATCHDOG: regime:features TTL={ttl}s — dangerously low, refresh may have stalled"
+                    )
+                    subprocess.run(
+                        ["osascript", "-e",
+                         f'display notification "regime:features TTL={ttl}s — refresh stalled"'
+                         f' with title "KronosV2 Warning" sound name "Basso"'],
+                        check=False,
+                    )
+            except Exception as exc:
+                logger.error(f"WATCHDOG: TTL check failed — {exc}")
 
     def stop(self) -> None:
         logger.info("KronosV2 stopping")

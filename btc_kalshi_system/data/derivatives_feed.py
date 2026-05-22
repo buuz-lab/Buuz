@@ -66,10 +66,12 @@ class DerivativesFeed:
                     await asyncio.sleep(_REFRESH_INTERVAL)
 
             while True:
+                success = False
                 try:
                     features = await self._fetch_features()
                     self._write_features(features)
                     logger.info(f"DerivativesFeed: wrote regime:features — {features}")
+                    success = True
                 except Exception as exc:
                     logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
                     # If this exchange started geo-blocking mid-session, try to failover
@@ -79,7 +81,10 @@ class DerivativesFeed:
                         self._exchange = None
                         if not await self._resolve_exchange():
                             break
-                await asyncio.sleep(_REFRESH_INTERVAL)
+                # On success, refresh 60s early so the key (TTL=600s) is always
+                # renewed with headroom to spare even if the fetch runs long.
+                # On failure, wait the full interval before retrying.
+                await asyncio.sleep(_REFRESH_INTERVAL - 60 if success else _REFRESH_INTERVAL)
         finally:
             if self._exchange is not None:
                 await self._exchange.close()
