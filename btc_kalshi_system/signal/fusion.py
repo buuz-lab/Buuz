@@ -8,7 +8,9 @@ Gate 2 (direction): Kronos ≠ regime       → return None (skipped if regime n
 Combined probability formula (when both models available):
     combined = 0.6 * kronos_calibrated + 0.4 * regime_prob
     if deepseek_regime == "high_uncertainty":
-        combined = 0.5 + (combined - 0.5) * 0.5
+        combined = 0.5 + (combined - 0.5) * 0.5   # 50% shrink
+    elif deepseek_regime == "ranging":
+        combined = 0.5 + (combined - 0.5) * 0.7   # 30% shrink — noisy but tradeable
 
 When RegimeModel raises NotTrainedError (regime model not yet trained):
     combined = 0.5 + (kronos_calibrated - 0.5) * _BOOTSTRAP_SHRINK  (0.8, not 0.5)
@@ -36,6 +38,7 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 _KRONOS_WEIGHT = 0.6
 _REGIME_WEIGHT = 0.4
 _UNCERTAINTY_SHRINK = 0.5   # applied when DeepSeek signals high_uncertainty
+_RANGING_SHRINK = 0.7       # applied when DeepSeek signals ranging (noisy, not untradeable)
 _BOOTSTRAP_SHRINK = 0.8     # applied when RegimeModel is untrained (bootstrap phase)
 
 
@@ -113,6 +116,8 @@ class SignalFusionEngine:
             combined = _KRONOS_WEIGHT * kronos_cal + _REGIME_WEIGHT * regime_prob
             if deepseek_regime == "high_uncertainty":
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
+            elif deepseek_regime == "ranging":
+                combined = 0.5 + (combined - 0.5) * _RANGING_SHRINK
 
         except NotTrainedError:
             # Regime model not yet trained — Kronos-only with a lighter bootstrap shrink.
@@ -123,7 +128,12 @@ class SignalFusionEngine:
             # no paper trades were placed and the calibrator could never train.
             regime_prob = math.nan
             regime_direction = -1
-            combined = 0.5 + (kronos_cal - 0.5) * _BOOTSTRAP_SHRINK
+            base_shrink = _BOOTSTRAP_SHRINK
+            if deepseek_regime == "high_uncertainty":
+                base_shrink = _UNCERTAINTY_SHRINK
+            elif deepseek_regime == "ranging":
+                base_shrink = _RANGING_SHRINK
+            combined = 0.5 + (kronos_cal - 0.5) * base_shrink
 
         direction = 1 if combined >= 0.5 else 0
 
