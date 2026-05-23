@@ -30,9 +30,25 @@ _FEATURE_COLS = [
     "cvd_normalized",
     "basis_spread_pct",
     "brti_volatility_1h",
+    "cvd_velocity",
+    "cvd_acceleration",
+    "brti_momentum_5min",
+    "brti_momentum_15min",
+    "candle_progress",
+    "hour_sin",
+    "hour_cos",
+    "kalshi_implied_prob",
+    "funding_window_proximity",
+    "trend_slope_1h",
+    "trend_r2_1h",
+    "hourly_sr_proximity",
+    "range_breakout_flag",
+    "tape_speed_tpm",
 ]
 
-_FRESH_FILTER = (
+# Legacy 6-feature filter: used to count post-instrumentation rows (all rows since
+# the original feature logging was added, regardless of 20-feature expansion).
+_LEGACY_FILTER = (
     "features_stale = 0"
     " AND funding_rate IS NOT NULL"
     " AND funding_rate_trend IS NOT NULL"
@@ -40,6 +56,15 @@ _FRESH_FILTER = (
     " AND cvd_normalized IS NOT NULL"
     " AND basis_spread_pct IS NOT NULL"
     " AND brti_volatility_1h IS NOT NULL"
+)
+
+# 20-feature filter: rows eligible for regime model training.
+_FRESH_FILTER = (
+    _LEGACY_FILTER
+    + " AND cvd_velocity IS NOT NULL"
+    + " AND brti_momentum_5min IS NOT NULL"
+    + " AND kalshi_implied_prob IS NOT NULL"
+    + " AND funding_window_proximity IS NOT NULL"
 )
 
 
@@ -83,7 +108,12 @@ def section_training_progress(conn: sqlite3.Connection) -> None:
     post_instr = conn.execute(
         "SELECT COUNT(*) FROM trades WHERE funding_rate IS NOT NULL"
     ).fetchone()[0]
-    training_ready = conn.execute(
+    training_ready_6 = conn.execute(
+        f"""SELECT COUNT(*) FROM trades
+           WHERE {_LEGACY_FILTER}
+             AND outcome IS NOT NULL"""
+    ).fetchone()[0]
+    training_ready_20 = conn.execute(
         f"""SELECT COUNT(*) FROM trades
            WHERE {_FRESH_FILTER}
              AND outcome IS NOT NULL"""
@@ -92,8 +122,9 @@ def section_training_progress(conn: sqlite3.Connection) -> None:
     print("=== TRAINING PROGRESS ===")
     print(f"Total rows in trades.db        : {total_rows}")
     print(f"Post-instrumentation rows      : {post_instr}  (funding_rate IS NOT NULL)")
-    print(f"Training-ready rows            : {training_ready}  (features_stale=0, resolved)")
-    print(f"Progress to 500                : {_progress_bar(training_ready, 500)}")
+    print(f"Training-ready (6-feature)     : {training_ready_6}  (features_stale=0, resolved)")
+    print(f"Training-ready (20-feature)    : {training_ready_20}  (all new cols NOT NULL)")
+    print(f"Progress to 500 (20-feature)   : {_progress_bar(training_ready_20, 500)}")
 
     # Resolved rate over last 7 days (or full window if less data)
     recent_resolved = conn.execute(
@@ -130,10 +161,10 @@ def section_training_progress(conn: sqlite3.Connection) -> None:
 
     print()
     print(f"Resolved rate ({window_label:<25s}): {resolved_rate:.1f} trades/day")
-    if training_ready >= 500:
+    if training_ready_20 >= 500:
         print("Estimated days to 500          : READY")
     elif resolved_rate > 0:
-        days_needed = (500 - training_ready) / resolved_rate
+        days_needed = (500 - training_ready_20) / resolved_rate
         print(f"Estimated days to 500          : {days_needed:.1f}")
     else:
         print("Estimated days to 500          : N/A (no resolved-rate data)")
@@ -173,12 +204,12 @@ def section_feature_staleness(conn: sqlite3.Connection) -> None:
     ).fetchone()[0]
 
     stale = conn.execute(
-        """SELECT COUNT(*) FROM trades
+        f"""SELECT COUNT(*) FROM trades
            WHERE funding_rate IS NOT NULL AND features_stale = 1"""
     ).fetchone()[0]
 
     fresh = conn.execute(
-        """SELECT COUNT(*) FROM trades
+        f"""SELECT COUNT(*) FROM trades
            WHERE funding_rate IS NOT NULL AND features_stale = 0"""
     ).fetchone()[0]
 
