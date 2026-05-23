@@ -159,3 +159,41 @@ def test_features_contain_all_six_keys():
     for key in ("funding_rate", "funding_rate_trend", "oi_delta_pct",
                 "cvd_normalized", "basis_spread_pct", "brti_volatility_1h"):
         assert key in loaded
+
+
+def test_lkg_key_written_on_successful_write():
+    """_write_features must also populate regime:features:lkg with a 24h TTL
+    and a _lkg_written_at timestamp so _get_market_context can fall back to
+    real features (rather than zeros) during exchange outages."""
+    import json, time
+    feed = make_feed()
+    features = {
+        "funding_rate": 0.01,
+        "funding_rate_trend": 0.002,
+        "oi_delta_pct": 0.05,
+        "cvd_normalized": 0.3,
+        "basis_spread_pct": -0.001,
+        "brti_volatility_1h": 0.008,
+    }
+    before = time.time()
+    feed._write_features(features)
+
+    # Key must exist
+    raw_lkg = feed._redis.get("regime:features:lkg")
+    assert raw_lkg is not None, "regime:features:lkg was not written"
+
+    # TTL must be ~24 h (allow a couple of seconds of slack)
+    ttl = feed._redis.ttl("regime:features:lkg")
+    assert 86_390 <= ttl <= 86_400, f"Expected ~86400s TTL, got {ttl}"
+
+    # Payload must contain all six feature keys plus _lkg_written_at
+    lkg = json.loads(raw_lkg)
+    for key in ("funding_rate", "funding_rate_trend", "oi_delta_pct",
+                "cvd_normalized", "basis_spread_pct", "brti_volatility_1h"):
+        assert key in lkg, f"LKG key missing: {key}"
+    assert "_lkg_written_at" in lkg
+    assert lkg["_lkg_written_at"] >= before
+
+    # The six feature values must match what was written
+    assert lkg["funding_rate"] == 0.01
+    assert lkg["cvd_normalized"] == 0.3

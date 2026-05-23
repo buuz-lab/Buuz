@@ -10,6 +10,7 @@ from config import REDIS_URL
 
 _REFRESH_INTERVAL = 300   # 5 minutes
 _FEATURES_TTL = 600       # 2x refresh interval — tolerates one missed cycle without expiring
+_LKG_TTL = 86_400         # 24 hours — last-known-good survives multi-hour exchange outages
 _FUNDING_LOOKBACK_MS = 4 * 3600_000  # 4 hours in milliseconds
 _SYMBOL = "BTC/USDT:USDT"
 
@@ -190,4 +191,16 @@ class DerivativesFeed:
     # ── Redis write ────────────────────────────────────────────────────────────
 
     def _write_features(self, features: dict) -> None:
-        self._redis.set("regime:features", json.dumps(features), ex=_FEATURES_TTL)
+        serialized = json.dumps(features)
+        self._redis.set("regime:features", serialized, ex=_FEATURES_TTL)
+        # Also write a last-known-good copy with a 24h TTL so _get_market_context
+        # can fall back to real (stale-flagged) features during exchange outages
+        # instead of zeros. _lkg_written_at lets the caller log how old the data is.
+        lkg = {**features, "_lkg_written_at": time.time()}
+        self._redis.set("regime:features:lkg", json.dumps(lkg), ex=_LKG_TTL)
+        # Also persist as last-known-good so fusion can fall back to real values
+        # (rather than zeros) during exchange outages. _lkg_written_at lets the
+        # caller log the feature age for observability.
+        lkg_payload = dict(features)
+        lkg_payload["_lkg_written_at"] = time.time()
+        self._redis.set("regime:features:lkg", json.dumps(lkg_payload), ex=_LKG_TTL)

@@ -395,11 +395,26 @@ class KronosV2:
 
     def _get_market_context(self) -> dict:
         try:
+            import time as _time
             import redis as _redis
             r = _redis.from_url(config.REDIS_URL, decode_responses=True)
             raw_features = r.get("regime:features")
             if raw_features:
                 return json.loads(raw_features)
+            # Primary key expired (exchange outage) — try last-known-good fallback.
+            # LKG features are still better than zeros for Gate 2 inference, but
+            # the row is still marked stale (features_stale=1) so it never enters
+            # RegimeModel training. _lkg sentinel is checked in fusion._regime_features().
+            lkg_raw = r.get("regime:features:lkg")
+            if lkg_raw:
+                lkg = json.loads(lkg_raw)
+                age_s = _time.time() - lkg.pop("_lkg_written_at", _time.time())
+                logger.warning(
+                    f"regime:features expired — falling back to LKG features "
+                    f"({age_s / 3600:.1f}h old); row will be marked stale"
+                )
+                lkg["_lkg"] = True
+                return lkg
         except Exception as exc:
             logger.debug(f"Failed to read regime features from Redis: {exc}")
         return {}
