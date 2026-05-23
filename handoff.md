@@ -46,7 +46,7 @@ training. Existing 351 rows have NULLs for the 14 new columns and are excluded f
 
 ## Design Decisions Made This Session
 
-### Feature expansion: 6 → 20 features
+### Feature expansion: 6 → 21 features
 
 The full `_FEATURE_ORDER` (must be identical in `regime_model.py`, `train_regime.py`,
 and returned dict from `fusion._regime_features()` — mismatch silently corrupts training):
@@ -56,7 +56,7 @@ funding_rate, funding_rate_trend, oi_delta_pct, cvd_normalized, basis_spread_pct
 brti_volatility_1h, cvd_velocity, cvd_acceleration, brti_momentum_5min,
 brti_momentum_15min, candle_progress, hour_sin, hour_cos, kalshi_implied_prob,
 funding_window_proximity, trend_slope_1h, trend_r2_1h, hourly_sr_proximity,
-range_breakout_flag, tape_speed_tpm
+range_breakout_flag, tape_speed_tpm, large_print_direction
 ```
 
 **New features and their sources:**
@@ -75,6 +75,7 @@ range_breakout_flag, tape_speed_tpm
 | `hourly_sr_proximity` | `store.get_ohlcv("1h")` | [0,1]: 0=at support, 1=at resistance |
 | `range_breakout_flag` | `store.get_ohlcv("5min")` | Signed: +=bullish breakout, -=bearish |
 | `tape_speed_tpm` | `store.get_raw_ticks(60)` | Tick count per minute / 100 |
+| `large_print_direction` | `derivatives_feed.py` fetch_trades | Net dir score from prints > 2× avg size |
 
 ### Phase 0: CVD Soft Gate (Gate 7 in pretrade_checklist.py)
 Based on: YES→UP with negative CVD = 32.3% win rate (handoff data). Statistical backing
@@ -101,9 +102,26 @@ Approach C exit classifier training data.
 Bootstrap mode: if `regime_model._clf is None`, PositionMonitor skips exit decision
 but still writes snapshots. Do not skip snapshot collection.
 
+### Dynamic Kelly (chop, tape, streak shrinks)
+Three multiplicative shrinks applied after the existing Kelly cap:
+
+| Condition | Threshold | Shrink | Rationale |
+|-----------|-----------|--------|-----------|
+| Chop | `abs(range_breakout_flag) < 0.15` | × 0.70 | No directional breakout = low conviction |
+| Dead tape | `tape_speed_tpm < 0.20` | × 0.80 | < 20 TPM = thin, uncommitted flow |
+| Loss streak | `loss_streak >= 3` | × 0.60 | Consecutive losses signal adverse conditions |
+
+Worst case (all three active): `0.70 × 0.80 × 0.60 = 0.336×` base Kelly.
+
+Loss streak tracked in Redis key `trading:loss_streak` (integer counter). Cleared on win, incremented on loss in `main.py _check_resolutions`. Read by `PreTradeChecklist` before each Kelly call.
+
+New constants: `KELLY_CHOP_THRESHOLD`, `KELLY_CHOP_SHRINK`, `KELLY_TAPE_THRESHOLD`, `KELLY_TAPE_SHRINK`, `KELLY_STREAK_THRESHOLD`, `KELLY_STREAK_SHRINK` in `kelly.py`.
+
 ---
 
 ## What Worked (most recent first)
+
+- **Phase 2b: large_print_direction + Dynamic Kelly (this session, commits `287d9e7` and `1dc0211`).** 21st regime feature from institutional flow (prints > 2× avg size). Three Dynamic Kelly shrinks: chop, dead tape, loss streak. 257 tests passing.
 
 - **Phase 0/1/2 implementation (this session, commit `bd80bc0`).** CVD soft gate (Gate 7),
   20-feature expansion, PositionMonitor, 14 new DB columns, `trade_snapshots` table.
@@ -172,19 +190,14 @@ samples. Do not remove the Gate 6 guard in the meantime.
   2 min of market appearance as smart-money signal. Needs new intra-cycle polling
   infrastructure that snapshots entry price when market first appears.
 
-- **Large print direction** (SLY Tier 2 #6): Net directional score from prints > 2×
-  session average size. Requires per-trade volume data (last_size/qty/amount) to be
-  verified flowing into CVD first. See `memory/project_phase3_cvd_flag.md` — validate
-  this before building the feature.
+- **Large print direction** (SLY Tier 2 #6): ✅ **COMPLETE** (2026-05-23). Implemented as `large_print_direction` — the 21st regime feature. Net directional score from prints > 2× session average size. Source: `derivatives_feed.py` fetch_trades. Stored in `regime:features` Redis key and persisted to `trades.db`.
 
 ### Deferred to post-training (Tier 3):
 - **Per-feature-group accuracy tracking / meta-learning** (SLY Tier 3 #10):
   Dynamic per-regime multipliers on feature groups. `edge_tracker.py` exists but
   needs regime model trained and ~200 post-training trades to calibrate.
 
-- **Position score → dynamic Kelly** (SLY Tier 3 #11): Confidence × EV × authority
-  × win rate × market quality → Risk Tier → Kelly fraction. Current Kelly is
-  calibrated_prob-based. Upgrade after regime model is live and validated.
+- **Dynamic Kelly shrinks** (SLY Tier 3 #11): ✅ **COMPLETE** (2026-05-23). Three multiplicative shrinks — chop (×0.70 when `abs(range_breakout_flag) < 0.15`), dead tape (×0.80 when `tape_speed_tpm < 0.20`), loss streak (×0.60 when `loss_streak ≥ 3`). See Dynamic Kelly section above.
 
 - **Slippage gate enhancement** (SLY Tier 3 #12): KXBTC15M bid-ask spread sometimes
   wide mid-cycle. Gate 6 currently skipped for 15min timeframe. Needs spread data
@@ -254,7 +267,7 @@ samples. Do not remove the Gate 6 guard in the meantime.
 
 ## Context / Gotchas
 
-- **Test suite invariant: 245 pass.** Run from project root: `python3 -m pytest`.
+- **Test suite invariant: 257 pass.** Run from project root: `python3 -m pytest`.
 
 - **Feature order is a 3-file contract.** `_FEATURE_ORDER` in `regime_model.py`,
   `_FEATURE_COLS` in `train_regime.py`, and returned dict keys from `fusion._regime_features()`
