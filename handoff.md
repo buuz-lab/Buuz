@@ -12,14 +12,13 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## Current Progress
 
-**As of 2026-05-22 ~21:00 UTC: ~23+ training-ready rows. System requires a restart
-to pick up all changes from today's sessions.**
+**As of 2026-05-23 ~06:10 UTC: 89 training-ready rows. System is live and running.**
 
 - `PAPER_TRADING=true` in `.env`
-- **~32 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-07.**
-- Previous stats at session start: 226 total trades / 17 training-ready rows, 142W / 83L (63%), Net P&L: +$307.01.
-- **System needs a restart** to activate loguru hardening, overlapping refresh, watchdog, and LKG fallback.
-- **OKX outage 14:20–21:00+ PDT today.** Watchdog fired ERROR continuously. Trades during
+- **~43 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-02 (~9.5 days).**
+- Stats at this session: 304 total trades / 89 training-ready rows, 177W / 125L (59%), Net P&L: +$289.63.
+- System is **running** (PID changes on restart — check `pgrep -f main.py`).
+- **OKX outage 14:20–21:00+ PDT 2026-05-22.** Watchdog fired ERROR continuously. Trades during
   this window fired on stale (zero) features. LKG fix addresses this for future outages.
 
 **Go-live thresholds (both must be met):**
@@ -98,6 +97,23 @@ to pick up all changes from today's sessions.**
 ---
 
 ## Files Touched / Created
+
+### This session (2026-05-23 — per-ticker position cap)
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/portfolio/monitor.py` | Added `ticker_position_count(ticker) -> int` method — counts open positions for a specific ticker. |
+| `main.py` | Added `MAX_POSITIONS_PER_TICKER = 3` constant. Added gate before pre-trade checklist: skips market if `ticker_position_count(ticker) >= 3`. |
+
+**Why:** Without this cap the system was averaging-down into every price dip on the same
+ticker, stacking 4+ positions (43x44¢ → 83x25¢ → 106x20¢ → 149x13¢) and concentrating
+$80+ of exposure on a single bet. The existing `has_timeframe_position` check only applies
+a Kelly correlation discount (0.7×) — it never blocks entry. The `MAX_TOTAL_EXPOSURE_DOLLARS`
+cap didn't trigger because each trade was small in dollar terms at low prices. The "3 trades
+per market" behavior that previously existed was emergent from the exposure math at typical
+prices (~50¢), not an explicit rule. This commit makes it explicit.
+
+**Commit:** `2e7480f`
 
 ### This session (2026-05-22, late evening — Coinglass + Kraken fallbacks)
 
