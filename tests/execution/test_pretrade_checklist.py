@@ -1,5 +1,6 @@
 import math
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -29,7 +30,11 @@ def make_signal(
 
 @pytest.fixture
 def checklist():
-    return PreTradeChecklist(KellySizer())
+    with patch("btc_kalshi_system.execution.pretrade_checklist.redis") as mock_redis:
+        mock_client = MagicMock()
+        mock_client.get.return_value = None  # loss_streak = 0
+        mock_redis.from_url.return_value = mock_client
+        yield PreTradeChecklist(KellySizer())
 
 
 def base_kwargs(signal: TradingSignal | None = None) -> dict:

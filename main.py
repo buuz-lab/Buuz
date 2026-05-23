@@ -191,6 +191,9 @@ class KronosV2:
             db_path="trades.db",
         )
 
+        import redis as _redis_module
+        self._redis = _redis_module.from_url(config.REDIS_URL)
+
         # Preload Kronos here — single-threaded, no event loop, no concurrent I/O.
         # Loading it later (inside asyncio.to_thread while WebSocket feeds run) causes
         # a segfault on Apple Silicon because PyTorch's Accelerate-framework init races
@@ -774,6 +777,11 @@ class KronosV2:
                     outcome = 1 if position.direction == 1 else 0
                 else:
                     outcome = 1 if position.direction == 0 else 0
+
+                if outcome == 1:  # win
+                    self._redis.delete("trading:loss_streak")
+                else:             # loss
+                    self._redis.incr("trading:loss_streak")
 
                 resolved_at = time.time()
                 trade = self._monitor.resolve_trade(

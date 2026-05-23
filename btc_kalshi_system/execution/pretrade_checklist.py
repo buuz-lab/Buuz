@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+import redis
 import config
 from btc_kalshi_system.execution.kelly import KellySizer
 from btc_kalshi_system.signal.fusion import TradingSignal
@@ -18,6 +19,7 @@ class ChecklistResult:
 class PreTradeChecklist:
     def __init__(self, kelly_sizer: KellySizer) -> None:
         self._kelly = kelly_sizer
+        self._redis = redis.from_url(config.REDIS_URL)
 
     def run(
         self,
@@ -56,11 +58,14 @@ class PreTradeChecklist:
             win_prob = 1.0 - signal.calibrated_prob
             trade_price_cents = 100 - best_bid_cents
         market_price = trade_price_cents / 100
+        loss_streak = int(self._redis.get("trading:loss_streak") or 0)
         kelly_dollars = self._kelly.compute_size(
             prob=win_prob,
             market_price=market_price,
             current_exposure=current_exposure,
             same_timeframe_open=same_timeframe_open,
+            regime_features=signal.regime_features,
+            loss_streak=loss_streak,
         )
         kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
 

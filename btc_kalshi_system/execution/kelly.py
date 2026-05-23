@@ -5,6 +5,13 @@ MAX_SINGLE_TRADE_DOLLARS = 50.0
 MAX_TOTAL_EXPOSURE_DOLLARS = 150.0
 CORRELATION_DISCOUNT = 0.7
 
+KELLY_CHOP_THRESHOLD  = 0.15
+KELLY_CHOP_SHRINK     = 0.70
+KELLY_TAPE_THRESHOLD  = 0.20
+KELLY_TAPE_SHRINK     = 0.80
+KELLY_STREAK_THRESHOLD = 3
+KELLY_STREAK_SHRINK   = 0.60
+
 
 class KellySizer:
     def compute_size(
@@ -13,6 +20,8 @@ class KellySizer:
         market_price: float,
         current_exposure: float,
         same_timeframe_open: bool,
+        regime_features: dict | None = None,
+        loss_streak: int = 0,
     ) -> float:
         edge = prob - market_price
         if edge <= 0:
@@ -29,6 +38,15 @@ class KellySizer:
 
         remaining_capacity = MAX_TOTAL_EXPOSURE_DOLLARS - current_exposure
         size = min(raw_dollars, MAX_SINGLE_TRADE_DOLLARS, remaining_capacity)
+
+        if regime_features:
+            if abs(regime_features.get("range_breakout_flag", 1.0)) < KELLY_CHOP_THRESHOLD:
+                size *= KELLY_CHOP_SHRINK
+            if regime_features.get("tape_speed_tpm", 1.0) < KELLY_TAPE_THRESHOLD:
+                size *= KELLY_TAPE_SHRINK
+        if loss_streak >= KELLY_STREAK_THRESHOLD:
+            size *= KELLY_STREAK_SHRINK
+
         return max(size, 0.0)
 
     def dollars_to_contracts(self, dollars: float, price_cents: int) -> int:
