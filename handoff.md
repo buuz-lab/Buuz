@@ -4,191 +4,306 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 up/down markets). Forecast direction via Kronos + XGBoost regime classifier +
-DeepSeek gate, size with fractional Kelly, run 6 pre-trade gates. **Current
-focus:** accumulate 500 training-ready rows, then train and deploy the RegimeModel.
-The pipeline is fully instrumented — just waiting on data volume.
+DeepSeek gate, size with fractional Kelly, run 6+ pre-trade gates.
+
+**Current focus:** Accumulate 500 new 20-feature training rows (~June 2), train and
+deploy the RegimeModel, then flip `PAPER_TRADING=false` and go live (~June 5–7).
 
 ---
 
 ## Current Progress
 
-**As of 2026-05-23 ~14:00 UTC: 132 training-ready rows. System is live (PID 44671).**
+**As of 2026-05-23 ~18:30 UTC: 0 training-ready 20-feature rows. System is live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
-- **~49 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~7.5 days).**
-- Stats at this handoff: 345 total trades / 132 training-ready rows, 192W / 153L (55.6%), Net P&L: +$21.06
-- System is **running** — confirm with `ps aux | grep "[Pp]ython.*main\.py"`
-- Latest commit: `a85c349`
-- Currently in a **quiet period** — Kronos gating on Gate 2 "Kelly size rounds to 0 contracts" due to elevated volatility (brti_vol ~0.0014, 2x normal). No trades since 13:00 UTC. This is correct self-limiting behavior.
+- **~49 trades/day. Expected 500 new 20-feature rows by ~2026-06-02.**
+- Stats: 351 total trades / 0 training-ready 20-feature rows, 169W / 182L (48.1%), Net P&L: -$17.26
+- System is **running** on PID 47293 — confirm with `ps aux | grep "[Pp]ython.*main\.py"`
+- Latest commit: `bd80bc0`
+
+**Implementation complete (2026-05-23).** Phase 0 (CVD gate), Phase 1 (6→20 feature
+expansion), and Phase 2 (PositionMonitor) are all merged and live. System was restarted
+at ~18:30 UTC. New trades will accumulate with all 20 features. The CVD ring buffer
+requires 5 entries before `cvd_velocity`/`cvd_acceleration` are non-NULL — that means
+the first ~20 minutes of trades will have `features_stale=1` and be excluded from
+training. Existing 351 rows have NULLs for the 14 new columns and are excluded from
+20-feature training (use `--legacy` to train on 6-feature subset).
 
 **Go-live thresholds (both must be met):**
-- ≥ 500 resolved trades total — for calibrator
-- ≥ 500 training-ready rows (`features_stale=0 AND funding_rate IS NOT NULL AND
-  outcome IS NOT NULL`) — for regime model training
+- ≥ 500 resolved trades total → calibrator (already met: 351 → will hit ~500 by ~May 27)
+- ≥ 500 new 20-feature training rows → regime model (~June 2)
+
+**Timeline:**
+| Date | Milestone |
+|------|-----------|
+| May 23 (today) | Implementation complete, system restarted, 20-feature collection begins |
+| ~May 26–27 | 500 total trades → train calibrator |
+| ~June 2–3 | 500 new 20-feature rows → `python3 scripts/train_regime.py` |
+| ~June 2–3 | Deploy regime model → flip `REGIME_GATE2_ENFORCING=true`, PositionMonitor exit becomes active |
+| ~June 5–7 | ~50 shadow trades observed → flip `PAPER_TRADING=false` |
+
+---
+
+## Design Decisions Made This Session
+
+### Feature expansion: 6 → 20 features
+
+The full `_FEATURE_ORDER` (must be identical in `regime_model.py`, `train_regime.py`,
+and returned dict from `fusion._regime_features()` — mismatch silently corrupts training):
+
+```
+funding_rate, funding_rate_trend, oi_delta_pct, cvd_normalized, basis_spread_pct,
+brti_volatility_1h, cvd_velocity, cvd_acceleration, brti_momentum_5min,
+brti_momentum_15min, candle_progress, hour_sin, hour_cos, kalshi_implied_prob,
+funding_window_proximity, trend_slope_1h, trend_r2_1h, hourly_sr_proximity,
+range_breakout_flag, tape_speed_tpm
+```
+
+**New features and their sources:**
+| Feature | Source | Notes |
+|---------|--------|-------|
+| `cvd_velocity` | Redis sorted set `regime:cvd_history` | Rate of change of CVD over 5 min |
+| `cvd_acceleration` | Same | Delta of 5-min vs 10-min velocity |
+| `brti_momentum_5min` | `store.get_ohlcv("5min")` | 1-candle pct return |
+| `brti_momentum_15min` | Same | 3-candle pct return |
+| `candle_progress` | `time.time() % 900 / 900` | Position in 15-min window [0,1] |
+| `hour_sin` / `hour_cos` | UTC time | Cyclically encoded hour of day |
+| `kalshi_implied_prob` | Orderbook mid-price | Set via `market_context["kalshi_mid_cents"]` before `get_signal()` |
+| `funding_window_proximity` | UTC time | 1.0 at 00/08/16 UTC funding settlement, 0.0 at midpoint |
+| `trend_slope_1h` | Last 12 5-min closes | Normalized linear regression slope |
+| `trend_r2_1h` | Same | R² of that regression (trend quality) |
+| `hourly_sr_proximity` | `store.get_ohlcv("1h")` | [0,1]: 0=at support, 1=at resistance |
+| `range_breakout_flag` | `store.get_ohlcv("5min")` | Signed: +=bullish breakout, -=bearish |
+| `tape_speed_tpm` | `store.get_raw_ticks(60)` | Tick count per minute / 100 |
+
+### Phase 0: CVD Soft Gate (Gate 7 in pretrade_checklist.py)
+Based on: YES→UP with negative CVD = 32.3% win rate (handoff data). Statistical backing
+from SLY bot analysis (28.6% win rate on opposing CVD trades).
+- `CVD_GATE_THRESHOLD = 0.3` in `config.py`
+- If `direction == 1` and `cvd_normalized < -0.3` → fail Gate 7
+- If `direction == 0` and `cvd_normalized > +0.3` → fail Gate 7
+- Uses `signal.regime_features` which already exists on `TradingSignal`
+
+### Phase 2: PositionMonitor (mid-trade exit)
+New coroutine in `btc_kalshi_system/execution/position_monitor.py`. Wakes every 60s.
+At T+5 and T+10 per open position: re-runs `_regime_features()` + Kronos MC.
+Exit condition: regime model AND Kronos both disagree with entry direction → submit
+offsetting IOC order via `router.place_order()`.
+
+**Critical rule:** `_execute_exit()` calls `portfolio_monitor.remove_position()` FIRST
+then places the raw API call. It NEVER calls `add_position()`. This ensures the exit
+does not count toward `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`.
+
+All T+5/T+10 snapshots (20 features + Kronos prob + exit_triggered) are written to
+`trade_snapshots` table in `trades.db` regardless of whether exit fires. This is the
+Approach C exit classifier training data.
+
+Bootstrap mode: if `regime_model._clf is None`, PositionMonitor skips exit decision
+but still writes snapshots. Do not skip snapshot collection.
 
 ---
 
 ## What Worked (most recent first)
 
+- **Phase 0/1/2 implementation (this session, commit `bd80bc0`).** CVD soft gate (Gate 7),
+  20-feature expansion, PositionMonitor, 14 new DB columns, `trade_snapshots` table.
+  245 tests passing. System live and collecting 20-feature rows.
+
+- **SLY bot analysis (previous design session).** Validated CVD gate with real statistics
+  (28.6% win rate on opposing-CVD trades). Provided roadmap of signals that actually
+  move BTC/Kalshi markets.
+
 - **Win rate by price script (`scripts/win_rate_by_price.py`, commit `a85c349`).**
-  Run anytime to see win rate, net P&L, and avg P&L per trade broken down by entry
-  price bucket. Flags: `--bucket 5` (5¢ buckets), `--dir yes/no`, `--min-trades N`.
-  Current findings: 0–19¢ = 0% win rate ($-19/trade avg), 20–49¢ = 36–39% but
-  positive avg P&L in 20–29¢ bucket due to large payouts, 60+¢ = 67–82%.
+  Run anytime: `python3 scripts/win_rate_by_price.py`. Flags: `--bucket 5`, `--dir yes/no`,
+  `--min-trades N`. Current: 0–19¢ = 0% win, 60+¢ = 67–82%.
 
-- **Entry price floor removed (commit `6f74f82`).** `MIN_ENTRY_PRICE_CENTS=20` was
-  added then removed after a blocked 19¢ NO→DOWN trade would have won. Kronos appears
-  to have genuine contrarian edge at low prices. Monitor sub-20¢ win rate via the
-  script as data accumulates — if it stays at 0% consider re-adding the floor.
+- **Entry price floor removed (commit `6f74f82`).** Sub-20¢ trades allowed.
+  Monitor: if sub-20¢ win rate stays 0% after 20+ trades, re-add `MIN_ENTRY_PRICE_CENTS=20`.
 
-- **Per-side position cap (commit `bcd3967`).** Replaced blanket `MAX_POSITIONS_PER_TICKER=3`
-  with `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`: YES and NO positions tracked separately.
-  Kronos can now flip and enter the opposite direction on the same market if CVD flips
-  mid-candle. Added `ticker_direction_count(ticker, direction)` to `PortfolioMonitor` (Redis-backed).
+- **Per-side position cap (commit `bcd3967`).** `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`.
+  `ticker_direction_count(ticker, direction)` is Redis-backed in `PortfolioMonitor`.
 
-- **`floor_strike` as primary strike source (commit `ee2bc31`).** Kalshi sets
-  `floor_strike` to the BRTI average at market open — the canonical resolution
-  reference price. Added `> 0` guard to reject unset markets. Previously accepted
-  `floor_strike=0`, making Kronos compute P(BTC > $0) ≈ 100%, biasing all signals YES→UP.
+- **`floor_strike` as primary strike source (commit `ee2bc31`).** `> 0` guard rejects
+  unset markets. Previously `floor_strike=0` made Kronos compute P(BTC > $0) ≈ 100%.
 
-- **Circuit breaker drawdown skipped in paper trading (commit `bc9f988`).** Daily
-  drawdown check only runs in live mode. In paper mode it was halting data collection
-  when paper P&L crossed -$200.
+- **LKG feature fallback.** `regime:features:lkg` (TTL=24h). `_lkg=True` in context
+  marks row as stale — excluded from training.
 
-- **Per-ticker cap (Redis-backed) (commit `82375d3`).** `ticker_direction_count`
-  reads from `portfolio:open_positions` Redis hash — authoritative across all
-  processes. In-memory counts fail when multiple main.py processes are running.
-
-- **Last-Known-Good (LKG) feature fallback.** During exchange outages `regime:features`
-  expires. Fix: writes `regime:features:lkg` (TTL=24h). `_get_market_context()` tries
-  LKG when primary expired. `fusion._regime_features()` treats `_lkg=True` as stale.
-
-- **CVD oscillation insight.** Today CVD swung -0.747→+0.679→-0.591→+0.373→-0.567→+0.623
-  within 2 hours. Kronos (bootstrap mode, Monte Carlo only) doesn't read CVD — it fires
-  on price momentum alone. This causes 5-6 consecutive losses when CVD and price diverge.
-  The regime model gating on CVD alignment is the long-term fix.
-
-- **Win rate analysis.** YES→UP with negative CVD: 32.3% (well below breakeven).
-  Price bucket win rates: <50¢ = 37-44%, 50-65¢ = 56.4%, 65+¢ = 72.4%.
-  NO→DOWN all-time: 60.9% vs YES→UP: 51.4% — real directional asymmetry.
-
-- **Coinglass + Kraken fallbacks for derivatives feed.**
-- **Loguru hardening (`enqueue=True, catch=True`).**
-- **TTL=600s + overlapping 240s refresh for `regime:features`.**
-- **`_regime_watchdog` coroutine** (TTL check every 60s, macOS notifications).
+- **CVD oscillation documented.** CVD swung ±0.7 within 2h today. Kronos fires on
+  price momentum only — doesn't read CVD. Gate 7 (CVD soft gate) is the immediate fix.
 
 ---
 
 ## What Failed / Avoided
 
-- **Blanket MAX_POSITIONS_PER_TICKER=3.** Prevented CVD flip recovery — when CVD
-  flipped mid-candle, the cap blocked the correctly-directioned opposite trade.
-  Replaced by per-side cap.
-- **20¢ entry price floor (added then removed).** Added to prevent 169x12¢-style trades,
-  but removed after a blocked 19¢ trade would have won. Sub-20¢ data too thin (6 trades)
-  to make a definitive call. Monitor via `scripts/win_rate_by_price.py`.
-- **In-memory position count for per-ticker cap.** Broke when multiple stale main.py
-  processes ran simultaneously. Each had its own `_positions` dict, so the cap was
-  per-process, not global. Always use Redis-backed count.
-- **floor_strike=0 accepted as valid.** Made Kronos compute P(BTC > $0) ≈ 100%.
-  Fixed with `if v > 0` guard.
-- **Circuit breaker in paper mode.** Tripped at -$200 paper P&L, halting all new
-  trades and training data collection. Now disabled in paper mode.
-- **Backfilling 200+ pre-instrumentation trades.** Rejected — funding rate/OI/CVD/basis
-  history not reliably reconstructable.
-- **TTL == refresh interval (both 300s).** Any drift caused key expiry before renewal.
-  Fixed via TTL=600s + overlapping refresh.
+- **Blanket `MAX_POSITIONS_PER_TICKER=3`.** Replaced by per-side cap.
+- **20¢ entry price floor (added then removed).** Sub-20¢ data too thin (6 trades).
+- **In-memory position count.** Broke under multiple processes. Always Redis-backed.
+- **`floor_strike=0` accepted as valid.** Made Kronos compute P(BTC > $0) ≈ 100%.
+- **Circuit breaker in paper mode.** Tripped at -$200, halting data collection.
+- **Backfilling pre-instrumentation trades.** Rejected — funding/OI/CVD not reconstructable.
+- **TTL == refresh interval.** Fixed via TTL=600s + overlapping 240s refresh.
+
+---
+
+## Post-Training Roadmap (no code yet)
+
+These require the regime model to be trained and validated before implementation is useful.
+
+### #10 — Per-feature-group accuracy tracking (meta-learning)
+After ~200 post-training live trades, extend `edge_tracker.py` to bucket accuracy by
+regime type (trending / ranging / high-vol). Track which of the 21 features are most
+predictive per regime. XGBoost feature importance gives a first pass; dynamic per-regime
+multipliers on Kelly or gate thresholds are the upgrade. Do not build before the model
+has been live for at least 200 resolved trades — the signal will be too noisy.
+
+### #12 — Slippage gate for 15min markets
+Gate 6 is currently skipped for `timeframe == "15min"`. KXBTC15M bid-ask spread is
+sometimes wide mid-cycle and can eliminate edge. Before setting a threshold, accumulate
+spread observations across many cycles post-go-live. Revisit when you have 200+ spread
+samples. Do not remove the Gate 6 guard in the meantime.
+
+---
+
+## What We Deferred From SLY Bot Analysis
+
+### Skipped entirely (implement later, separate session):
+- **Kalshi intra-cycle YES momentum** (SLY Tier 1 #2): Track YES price delta in first
+  2 min of market appearance as smart-money signal. Needs new intra-cycle polling
+  infrastructure that snapshots entry price when market first appears.
+
+- **Large print direction** (SLY Tier 2 #6): Net directional score from prints > 2×
+  session average size. Requires per-trade volume data (last_size/qty/amount) to be
+  verified flowing into CVD first. See `memory/project_phase3_cvd_flag.md` — validate
+  this before building the feature.
+
+### Deferred to post-training (Tier 3):
+- **Per-feature-group accuracy tracking / meta-learning** (SLY Tier 3 #10):
+  Dynamic per-regime multipliers on feature groups. `edge_tracker.py` exists but
+  needs regime model trained and ~200 post-training trades to calibrate.
+
+- **Position score → dynamic Kelly** (SLY Tier 3 #11): Confidence × EV × authority
+  × win rate × market quality → Risk Tier → Kelly fraction. Current Kelly is
+  calibrated_prob-based. Upgrade after regime model is live and validated.
+
+- **Slippage gate enhancement** (SLY Tier 3 #12): KXBTC15M bid-ask spread sometimes
+  wide mid-cycle. Gate 6 currently skipped for 15min timeframe. Needs spread data
+  across more cycles to set a defensible threshold.
 
 ---
 
 ## Files Touched / Created
 
-### This session (2026-05-23)
-
+### This session (2026-05-23, commit `bd80bc0`)
 | File | Change |
 |------|--------|
-| `main.py` | `_extract_strike`: `floor_strike` primary path with `> 0` guard. Replaced `MAX_POSITIONS_PER_TICKER=3` with `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`. Per-side cap gate in `_process_market`. `MIN_ENTRY_PRICE_CENTS=20` floor added then removed (see What Failed). Circuit breaker drawdown disabled in paper mode. |
-| `btc_kalshi_system/portfolio/monitor.py` | Added `ticker_direction_count(ticker, direction) -> int` (Redis-backed with in-memory fallback). |
-| `btc_kalshi_system/portfolio/circuit_breaker.py` | Daily drawdown check moved inside `if not self._paper_trading` block. |
-| `scripts/monitor_trades.py` | **NEW.** Live SQLite polling monitor (15s interval) — prints new trades, resolutions, running record, P&L, training progress bar. |
-| `scripts/win_rate_by_price.py` | **NEW.** Win rate / P&L breakdown by entry price bucket. `--bucket`, `--dir yes/no`, `--min-trades` flags. |
+| `config.py` | Added `CVD_GATE_THRESHOLD = 0.3` |
+| `btc_kalshi_system/execution/pretrade_checklist.py` | Added Gate 7 (CVD soft gate) |
+| `btc_kalshi_system/data/derivatives_feed.py` | CVD ring buffer writes (`regime:cvd_history` sorted set, keep last 90) |
+| `btc_kalshi_system/signal/fusion.py` | `_regime_features()` expanded to 20 features; `update_kalshi_mid()` method added |
+| `btc_kalshi_system/models/regime_model.py` | `_FEATURE_ORDER` → 20 features |
+| `main.py` | 14 new schema columns + `trade_snapshots` table, `kalshi_mid_cents` into context, PositionMonitor wired into asyncio.gather() |
+| `scripts/train_regime.py` | `_FEATURE_COLS` → 20 features, `_FEATURE_COLS_LEGACY` for 6-feature fallback, `--legacy` flag |
+| `btc_kalshi_system/execution/position_monitor.py` | **NEW.** Mid-trade exit coroutine |
+| `tests/signal/test_feature_order.py` | **NEW.** Feature-order consistency test (3 assertions) |
+| `tests/signal/test_regime_features.py` | **NEW.** 22 tests for new feature math |
+| `tests/execution/test_gate7_cvd.py` | **NEW.** 8 tests for CVD soft gate |
+| `tests/execution/test_position_monitor.py` | **NEW.** 7 tests for PositionMonitor + schema idempotency |
 
-### Prior sessions (2026-05-22 — 2026-05-23)
-
+### Prior sessions (2026-05-23 earlier)
 | File | Change |
 |------|--------|
-| `btc_kalshi_system/data/derivatives_feed.py` | Coinglass + Kraken fallbacks, LKG key write, TTL=600s, overlapping 240s refresh, `_funding_rate_trend` zero fallback. |
-| `btc_kalshi_system/signal/fusion.py` | `TradingSignal` carries `regime_features` + `features_stale`. Gate 2 soft-launch. LKG stale detection. |
-| `main.py` | LKG fallback in `_get_market_context`. Loguru `enqueue=True, catch=True`. `_regime_watchdog`. 23-column schema. Idempotent ALTER TABLE. |
-| `config.py` | `REGIME_MODEL_PATH`, `REGIME_GATE2_ENFORCING`, `COINGLASS_API_KEY`. |
-| `scripts/train_regime.py` | Feature variance gate, 3-fold walk-forward CV, feature importance logging, `--max-rows`. |
-| `scripts/regime_health_check.py` | **NEW.** Diagnostic: training progress, staleness rate, feature variance, model health. |
-| `scripts/auto_retrain.py` | **NEW.** Cron-driven retraining with emergency/row/time triggers. |
+| `main.py` | `floor_strike` primary strike, per-side cap, circuit breaker paper mode fix |
+| `btc_kalshi_system/portfolio/monitor.py` | `ticker_direction_count` Redis-backed |
+| `btc_kalshi_system/portfolio/circuit_breaker.py` | Drawdown check gated on live mode |
+| `scripts/monitor_trades.py` | **NEW.** Live SQLite polling monitor |
+| `scripts/win_rate_by_price.py` | **NEW.** Win rate / P&L by price bucket |
 
 ---
 
 ## Next Steps
 
-1. **Monitor training-ready row accumulation.** Run `python3 scripts/regime_health_check.py`
-   daily. Currently at 132/500 (~7.5 days to go at 49/day). Confirm one process running:
-   `ps aux | grep "[Pp]ython.*main\.py"`.
+1. **Monitor 20-feature row accumulation.** Run `python3 scripts/regime_health_check.py`
+   daily (or query directly):
+   ```sql
+   SELECT COUNT(*) FROM trades
+   WHERE cvd_velocity IS NOT NULL AND brti_momentum_5min IS NOT NULL
+     AND kalshi_implied_prob IS NOT NULL AND outcome IS NOT NULL;
+   ```
+   Need 500. Target: ~June 2.
 
-2. **Watch sub-20¢ win rate.** Run `python3 scripts/win_rate_by_price.py` periodically.
-   Currently 0/6 wins at 0–19¢ ($-19/trade avg). If this stays at 0% after 20+ trades,
-   re-add `MIN_ENTRY_PRICE_CENTS=20` to `main.py`. If it climbs above 35%, Kronos has
-   genuine contrarian edge there and the floor should stay removed.
+2. **Train calibrator when total trades ≥ 500.** (~May 26–27 at current rate.)
+   Update calibration in config or script — exact steps TBD based on calibrator implementation.
 
-3. **Consider a CVD soft gate (early regime signal).** Add a check in `_process_market`:
-   if `cvd_normalized < -0.3` skip YES→UP; if `cvd_normalized > +0.3` skip NO→DOWN.
-   This is a preview of Gate 2. Would have prevented most of today's losses. Discuss
-   before implementing — it reduces training data diversity.
+3. **Train the regime model when 20-feature rows ≥ 500.**
+   `python3 scripts/train_regime.py --dry-run` — check Brier < 0.25, Kronos agreement > 55%.
+   If sane, re-run without `--dry-run` → saves `models/regime.pkl`.
+   Restart main.py → model auto-loads. Gate 2 runs in shadow mode by default.
+   Flip `REGIME_GATE2_ENFORCING=true` after ~50 shadow trades.
 
-4. **Add auto_retrain to crontab.** Copy the crontab line from the top of
-   `scripts/auto_retrain.py`. Test first with `python3 scripts/auto_retrain.py --dry-run`.
+4. **Early experimentation option:** If you want to train on the existing 351 6-feature rows:
+   `python3 scripts/train_regime.py --legacy` — uses only original 6 features.
+   Not recommended for deployment but useful for sanity-checking the pipeline.
 
-5. **Train the model when ready.** `python3 scripts/train_regime.py --dry-run` previews
-   Brier / accuracy. If sane (Brier < 0.25, Kronos agreement > 55%), re-run without
-   `--dry-run` to save `models/regime.pkl`. Restart — it auto-loads. Then flip
-   `REGIME_GATE2_ENFORCING=true` after ~50 shadow trades.
+5. **After regime model is live: implement deferred SLY features.**
+   Priority order: (a) Kalshi intra-cycle YES momentum (new polling), (b) large print
+   direction (after verifying per-trade volume flows through CVD — see memory flag),
+   (c) dynamic Kelly with position scoring, (d) slippage gate for 15min markets.
 
 ---
 
 ## Context / Gotchas
 
-- **Test suite invariant: 207 pass.** Run from project root: `python3 -m pytest`.
-- **Check for stale processes before starting.** `ps aux | grep "[Pp]ython.*main\.py"` —
-  if more than one Python process appears, `kill -9` all but the newest. `pgrep -af main.py`
-  returns false positives (matches shell wrappers). Use `ps aux` for reliability.
+- **Test suite invariant: 245 pass.** Run from project root: `python3 -m pytest`.
+
+- **Feature order is a 3-file contract.** `_FEATURE_ORDER` in `regime_model.py`,
+  `_FEATURE_COLS` in `train_regime.py`, and returned dict keys from `fusion._regime_features()`
+  must be identical in the same order. There is a test for this: `python3 -m pytest tests/ -k "feature_order"`.
+
+- **Existing 351 rows use 6 features.** `--legacy` flag in `train_regime.py` trains on
+  them using only the original 6 features. Default training requires all new columns NOT NULL.
+
+- **CVD ring buffer cold start.** If `regime:cvd_history` has fewer than 5 entries,
+  `cvd_velocity` and `cvd_acceleration` = 0.0 and `features_stale=True`. Rows with
+  stale=True are excluded from training. After restart, expect ~20 min before the buffer
+  warms up (5 derivatives feed cycles).
+
+- **PositionMonitor exit never calls `add_position()`.** It calls `remove_position()`
+  first, then submits a raw API offsetting order. The offsetting order (e.g. buying NO
+  to close a YES position) must NOT increment the NO side counter. This is by design.
+  Do not "fix" this — it would break `MAX_POSITIONS_PER_TICKER_PER_SIDE`.
+
+- **`kalshi_mid_cents` must be set in `market_context` before `get_signal()`.** The
+  `_regime_features()` method reads it from `self._market_context`. If missing,
+  `kalshi_implied_prob = 0.5` and `stale=True`. Set it in main.py after each orderbook fetch.
+
+- **Kronos is blocking (2–3s on CPU).** Always offload via `loop.run_in_executor(None, ...)`.
+  Never call on the event loop thread. Preload before asyncio starts (Apple Silicon segfault
+  avoidance — do not refactor).
+
+- **Check for stale processes before restarting.** `ps aux | grep "[Pp]ython.*main\.py"`.
+  Kill all but newest. `pgrep -af main.py` gives false positives — use `ps aux`.
+
 - **Per-side cap is Redis-backed.** `ticker_direction_count` reads `portfolio:open_positions`
-  hash directly. Accurate across all processes. Do not revert to in-memory count.
-- **No entry price floor currently active.** `MIN_ENTRY_PRICE_CENTS` was added then removed.
-  Sub-20¢ trades are allowed. Monitor win rate via `python3 scripts/win_rate_by_price.py`.
-- **CVD does NOT influence Kronos decisions in bootstrap mode.** CVD is logged to SQLite
-  for regime model training only. Kronos fires on Monte Carlo (BRTI candle price momentum).
-  This is why CVD divergence causes multi-trade loss streaks. The regime model (Gate 2) is
-  the fix.
-- **`floor_strike` is set by Kalshi at market open.** It equals the BRTI average at open.
-  For KXBTC15M markets it is always non-zero once the market opens. The `> 0` guard only
-  catches markets polled before open. BRTI candle fallback now logs a WARNING when hit.
-- **Label = `int(direction == outcome)`, NOT `outcome`.** `outcome` = did trade win.
-  For NO→DOWN wins, `outcome=1` but `direction=0`, so label = 0. All evaluation uses this.
-- **Two `brti_volatility_1h` implementations exist.** `DerivativesFeed` (Redis ticks) vs
-  `fusion._regime_features()` (5-min OHLCV pct_change). Persisted column is fusion version.
-  Do not consolidate after model training begins — it invalidates trained models.
-- **Kronos preload rule.** Apple Silicon segfault avoidance: preload Kronos in
-  `KronosV2.__init__()` before asyncio, `map_location="cpu"`, `set_num_threads(1)` BEFORE
-  `from_pretrained`. Do not refactor.
-- **Gate 2 starts in SHADOW mode after loading a model.** Set `REGIME_GATE2_ENFORCING=true`
-  only after observing ~50 trades. Default `false`.
-- **LKG sentinel `_lkg=True` in market context dict.** Never add `_lkg` or `_lkg_written_at`
-  to the 6-feature list — it will corrupt XGBoost model inputs.
-- **`dump.rdb` and `trades.db.bak.*` must NOT be committed.** Stage code files explicitly.
-- **Calibrator is independent.** Uses only `kronos_raw + outcome`, not regime features.
-  Hits its 500-sample threshold separately from the regime model.
-- **Gate 6 is skipped for `timeframe == "15min"`.**
-- **RSA-PSS Kalshi signing, sign path-only.**
-- **Coinglass fallback requires `COINGLASS_API_KEY` in `.env`.** Without it, logs WARNING
-  and returns zeros. Kraken fallback uses spot BTC/USD — no API key required.
-- **`RANGING_SHRINK=0.7`, `_BOOTSTRAP_SHRINK=0.8`, `_UNCERTAINTY_SHRINK=0.5`** in
-  `fusion.py`. Do not equate bootstrap and uncertainty shrinks.
+  hash directly. Do not revert to in-memory count — breaks under multiple processes.
+
+- **Label semantics.** `y_up = int(direction == outcome)`. This is "did market close UP",
+  not "did trade win". For NO→DOWN wins: `direction=0, outcome=1 → label=0`.
+
+- **LKG sentinel.** `_lkg=True` in market context dict. Never add `_lkg` or
+  `_lkg_written_at` to the feature list — corrupts XGBoost inputs.
+
+- **Gate 2 starts in SHADOW mode.** `REGIME_GATE2_ENFORCING=false` by default after
+  loading a model. Only flip to `true` after observing ~50 shadow trades.
+
+- **Gate 6 skipped for `timeframe == "15min"`.** Do not remove this guard.
+
+- **Two `brti_volatility_1h` implementations exist.** `DerivativesFeed` (Redis ticks)
+  vs `fusion._regime_features()` (5-min OHLCV pct_change). Persisted column is the
+  fusion version. Do not consolidate after model training begins.
+
+- **`dump.rdb` and `trades.db.bak.*` must NOT be committed.**
+
 - **DeepSeek `NEUTRAL_DEFAULT` on 402, not `SAFE_DEFAULT`.**
+
+- **`RANGING_SHRINK=0.7`, `_BOOTSTRAP_SHRINK=0.8`, `_UNCERTAINTY_SHRINK=0.5`** — do not equate.
