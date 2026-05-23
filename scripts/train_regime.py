@@ -91,6 +91,7 @@ _FEATURE_COLS = [
     "hourly_sr_proximity",
     "range_breakout_flag",
     "tape_speed_tpm",
+    "large_print_direction",
 ]
 
 _FEATURE_COLS_LEGACY = [
@@ -116,7 +117,8 @@ ORDER BY timestamp ASC
 _EXTRA_FILTERS_20 = """AND cvd_velocity IS NOT NULL
   AND brti_momentum_5min IS NOT NULL
   AND kalshi_implied_prob IS NOT NULL
-  AND funding_window_proximity IS NOT NULL"""
+  AND funding_window_proximity IS NOT NULL
+  AND large_print_direction IS NOT NULL"""
 
 def _build_query(legacy: bool) -> str:
     if legacy:

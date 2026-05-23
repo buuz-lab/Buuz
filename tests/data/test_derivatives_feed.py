@@ -241,7 +241,7 @@ async def test_kraken_fallback_when_okx_trades_fail():
     # Seed BRTI so basis_spread_pct has a denominator
     feed._redis.set("brti:resolution_estimate", "67000.0")
 
-    cvd, basis = await feed._fetch_trades_data()
+    cvd, basis, large_print = await feed._fetch_trades_data()
 
     feed._ccxt_async.kraken.assert_called_once()
     mock_kraken.fetch_trades.assert_called_once()
@@ -262,3 +262,69 @@ async def test_coinglass_fallback_skipped_when_api_key_empty():
     assert curr_funding == pytest.approx(0.0)
     assert trend == pytest.approx(0.0)
     assert oi_delta == pytest.approx(0.0)
+
+
+# ── _large_print_direction ─────────────────────────────────────────────────────
+
+def test_large_print_direction_all_buys_above_threshold():
+    feed = make_feed()
+    # avg=2.0, threshold=4.0; trade at 5.0 is large and a buy
+    trades = [
+        {"amount": 1.0, "side": "buy"},
+        {"amount": 1.0, "side": "sell"},
+        {"amount": 1.0, "side": "buy"},
+        {"amount": 5.0, "side": "buy"},
+    ]
+    # avg=(1+1+1+5)/4=2.0, threshold=4.0, large=[5.0 buy]
+    # buy_vol=5, sell_vol=0 → 1.0
+    assert feed._large_print_direction(trades) == pytest.approx(1.0)
+
+
+def test_large_print_direction_all_sells_above_threshold():
+    feed = make_feed()
+    trades = [
+        {"amount": 1.0, "side": "buy"},
+        {"amount": 1.0, "side": "sell"},
+        {"amount": 1.0, "side": "buy"},
+        {"amount": 5.0, "side": "sell"},
+    ]
+    # avg=2.0, threshold=4.0, large=[5.0 sell]
+    # buy_vol=0, sell_vol=5 → -1.0
+    assert feed._large_print_direction(trades) == pytest.approx(-1.0)
+
+
+def test_large_print_direction_no_large_prints():
+    feed = make_feed()
+    # All trades same size — no trade exceeds 2× avg
+    trades = [
+        {"amount": 2.0, "side": "buy"},
+        {"amount": 2.0, "side": "buy"},
+        {"amount": 2.0, "side": "sell"},
+    ]
+    # avg=2.0, threshold=4.0, no trade > 4.0 → returns 0.0
+    assert feed._large_print_direction(trades) == pytest.approx(0.0)
+
+
+def test_large_print_direction_mixed():
+    feed = make_feed()
+    # 5 small trades of 1.0, 2 large buys of 10.0, 1 large sell of 10.0
+    trades = [
+        {"amount": 1.0, "side": "buy"},
+        {"amount": 1.0, "side": "sell"},
+        {"amount": 1.0, "side": "buy"},
+        {"amount": 1.0, "side": "sell"},
+        {"amount": 1.0, "side": "buy"},
+        {"amount": 10.0, "side": "buy"},
+        {"amount": 10.0, "side": "buy"},
+        {"amount": 10.0, "side": "sell"},
+    ]
+    # avg=(5*1 + 3*10)/8=35/8=4.375, threshold=8.75
+    # large=[10buy,10buy,10sell], buy_vol=20, sell_vol=10, total=30
+    # score=(20-10)/30 = 1/3
+    result = feed._large_print_direction(trades)
+    assert result == pytest.approx(1.0 / 3.0, rel=1e-5)
+
+
+def test_large_print_direction_empty_trades():
+    feed = make_feed()
+    assert feed._large_print_direction([]) == pytest.approx(0.0)

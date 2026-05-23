@@ -100,4 +100,4 @@ def test_feature_order_all_three_match():
     """All three sources must be identical including ORDER (not just membership)."""
     fusion_keys = _get_fusion_feature_keys()
     assert _FEATURE_ORDER == _FEATURE_COLS == fusion_keys
-    assert len(_FEATURE_ORDER) == 20
+    assert len(_FEATURE_ORDER) == 21

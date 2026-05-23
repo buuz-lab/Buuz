@@ -25,6 +25,7 @@ _FEATURE_ORDER = [
     "hourly_sr_proximity",
     "range_breakout_flag",
     "tape_speed_tpm",
+    "large_print_direction",
 ]
 
 

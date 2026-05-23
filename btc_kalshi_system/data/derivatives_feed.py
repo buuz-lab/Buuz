@@ -114,15 +114,16 @@ class DerivativesFeed:
             self._fetch_trades_data(),
         )
         curr_funding, trend, oi_delta = results[0]
-        cvd, basis = results[1]
+        cvd, basis, large_print = results[1]
         vol = self._brti_volatility_1h()
         return {
-            "funding_rate":       curr_funding,
-            "funding_rate_trend": trend,
-            "oi_delta_pct":       oi_delta,
-            "cvd_normalized":     cvd,
-            "basis_spread_pct":   basis,
-            "brti_volatility_1h": vol,
+            "funding_rate":          curr_funding,
+            "funding_rate_trend":    trend,
+            "oi_delta_pct":          oi_delta,
+            "cvd_normalized":        cvd,
+            "basis_spread_pct":      basis,
+            "brti_volatility_1h":    vol,
+            "large_print_direction": large_print,
         }
 
     async def _fetch_funding_and_oi(self) -> tuple[float, float, float]:
@@ -181,23 +182,23 @@ class DerivativesFeed:
             self._prev_oi = curr_oi
         return curr_funding, trend, oi_delta
 
-    async def _fetch_trades_data(self) -> tuple[float, float]:
-        """Returns (cvd_normalized, basis_spread_pct).
+    async def _fetch_trades_data(self) -> tuple[float, float, float]:
+        """Returns (cvd_normalized, basis_spread_pct, large_print_direction).
         Tries OKX first; falls back to Kraken fetchTrades on any exception."""
         try:
             trades = await self._exchange.fetch_trades(_SYMBOL, limit=500)
-            return self._cvd_normalized(trades), self._basis_spread_pct(trades)
+            return self._cvd_normalized(trades), self._basis_spread_pct(trades), self._large_print_direction(trades)
         except Exception as exc:
             logger.warning(
                 f"DerivativesFeed: OKX trades fetch failed — using Kraken fallback ({exc})"
             )
             return await self._kraken_trades_data()
 
-    async def _kraken_trades_data(self) -> tuple[float, float]:
+    async def _kraken_trades_data(self) -> tuple[float, float, float]:
         if self._kraken_exchange is None:
             self._kraken_exchange = self._ccxt_async.kraken({"enableRateLimit": True})
         trades = await self._kraken_exchange.fetch_trades(_KRAKEN_SYMBOL, limit=500)
-        return self._cvd_normalized(trades), self._basis_spread_pct(trades)
+        return self._cvd_normalized(trades), self._basis_spread_pct(trades), self._large_print_direction(trades)
 
     def _funding_rate_trend(self, history: list[dict]) -> float:
         """Funding rate change over the last _FUNDING_LOOKBACK_MS (4 hours).
@@ -245,6 +246,19 @@ class DerivativesFeed:
             return 0.0
         last_price = float(trades[-1]["price"])
         return (last_price - brti) / brti
+
+    def _large_print_direction(self, trades: list[dict]) -> float:
+        if not trades:
+            return 0.0
+        avg_size = sum(t["amount"] for t in trades) / len(trades)
+        threshold = 2 * avg_size
+        large = [t for t in trades if t["amount"] > threshold]
+        if not large:
+            return 0.0
+        buy_vol = sum(t["amount"] for t in large if t["side"] == "buy")
+        sell_vol = sum(t["amount"] for t in large if t["side"] == "sell")
+        total = buy_vol + sell_vol
+        return (buy_vol - sell_vol) / total if total > 0.0 else 0.0
 
     def _brti_volatility_1h(self) -> float:
         """Coefficient of variation of BRTI ticks in the last hour from Redis."""

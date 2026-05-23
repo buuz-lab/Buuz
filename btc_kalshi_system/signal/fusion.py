@@ -327,6 +327,9 @@ class SignalFusionEngine:
         raw_tpm = float(len(ticks)) if ticks is not None else 0.0
         tape_speed_tpm = raw_tpm / 100.0
 
+        # --- Feature 21: large_print_direction ---
+        large_print_direction = float(ctx.get("large_print_direction", 0.0))
+
         features = {
             "funding_rate":             funding_rate,
             "funding_rate_trend":       funding_rate_trend,
@@ -348,5 +351,6 @@ class SignalFusionEngine:
             "hourly_sr_proximity":      hourly_sr_proximity,
             "range_breakout_flag":      range_breakout_flag,
             "tape_speed_tpm":           tape_speed_tpm,
+            "large_print_direction":    large_print_direction,
         }
         return features, stale

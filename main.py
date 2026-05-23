@@ -107,6 +107,7 @@ _TRADES_COLUMN_MIGRATIONS = [
     ("range_breakout_flag",      "REAL"),
     ("tape_speed_tpm",           "REAL"),
     ("exit_reason",              "TEXT"),
+    ("large_print_direction",    "REAL"),
 ]
 
 _CREATE_TRADE_SNAPSHOTS_TABLE = """
@@ -684,12 +685,13 @@ class KronosV2:
                     candle_progress, hour_sin, hour_cos,
                     kalshi_implied_prob, funding_window_proximity,
                     trend_slope_1h, trend_r2_1h,
-                    hourly_sr_proximity, range_breakout_flag, tape_speed_tpm
+                    hourly_sr_proximity, range_breakout_flag, tape_speed_tpm,
+                    large_print_direction
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
                     ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -728,6 +730,7 @@ class KronosV2:
                     feats.get("hourly_sr_proximity"),
                     feats.get("range_breakout_flag"),
                     feats.get("tape_speed_tpm"),
+                    feats.get("large_print_direction"),
                 ),
             )
             self._db.commit()
