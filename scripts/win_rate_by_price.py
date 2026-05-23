@@ -52,22 +52,24 @@ def main():
 
     dir_label = {"yes": "YES→UP only", "no": "NO→DOWN only", "both": "All directions"}[args.dir]
     print(f"\nWin Rate by Entry Price — {dir_label}  (bucket={args.bucket}¢)")
-    print(f"  {'Price Range':<14} {'Trades':>7} {'Wins':>6} {'Win%':>7} {'Net P&L':>10} {'Avg P&L':>9}  {'Avg Price':>10}")
-    print("  " + "-" * 72)
+    print(f"  {'Price Range':<14} {'Trades':>7} {'Wins':>6} {'Win%':>7} {'Net P&L':>11} {'Avg P&L':>10}  {'Avg Price':>10}")
+    print("  " + "-" * 74)
 
     for bucket_low, bucket_high, trades, wins, net_pnl, avg_pnl, avg_price in rows:
         if trades < args.min_trades and bucket_low != 0:
             continue
         if trades == 0:
-            print(f"  {bucket_low:>3}¢ – {bucket_high:>3}¢     {'—':>7} {'—':>6} {'—':>7} {'—':>10} {'—':>9}")
+            print(f"  {bucket_low:>3}¢ – {bucket_high:>3}¢     {'—':>7} {'—':>6} {'—':>7} {'—':>11} {'—':>10}")
             continue
         win_pct = wins * 100 / trades
         bar = "█" * int(win_pct / 5)
         flag = " ✓" if win_pct >= 55 else (" ✗" if win_pct < 45 else "")
+        net_str = f"${net_pnl:+.2f}"
+        avg_str = f"${avg_pnl:+.2f}"
         print(
             f"  {bucket_low:>3}¢ – {bucket_high:>3}¢     "
             f"{trades:>7} {wins:>6} {win_pct:>6.1f}%"
-            f" {net_pnl:>10.2f} {avg_pnl:>+9.2f}  {avg_price:>8.1f}¢  {bar}{flag}"
+            f" {net_str:>11} {avg_str:>10}  {avg_price:>8.1f}¢  {bar}{flag}"
         )
 
     conn2 = sqlite3.connect(DB)
@@ -78,10 +80,12 @@ def main():
     """).fetchone()
     conn2.close()
     if total[0]:
-        print("  " + "-" * 72)
+        print("  " + "-" * 74)
+        net_str = f"${total[2]:+.2f}"
+        avg_str = f"${total[3]:+.2f}"
         print(
             f"  {'TOTAL':<14} {total[0]:>7} {total[1]:>6} {total[1]*100/total[0]:>6.1f}%"
-            f" {total[2]:>10.2f} {total[3]:>+9.2f}"
+            f" {net_str:>11} {avg_str:>10}"
         )
     print()
 
