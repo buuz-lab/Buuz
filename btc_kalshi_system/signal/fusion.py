@@ -24,9 +24,12 @@ from passing during bootstrap, stalling trade accumulation indefinitely.
 """
 
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+
+import numpy as np
 
 from loguru import logger
 
@@ -85,6 +88,9 @@ class SignalFusionEngine:
 
     def update_market_context(self, ctx: dict) -> None:
         self._market_context = ctx
+
+    def update_kalshi_mid(self, mid_cents: float) -> None:
+        self._market_context["kalshi_mid_cents"] = mid_cents
 
     def get_signal(self, timeframe: str, strike: float) -> Optional[TradingSignal]:
         ds = self._deepseek.get_current_context(self._market_context)
@@ -181,13 +187,13 @@ class SignalFusionEngine:
 
     def _regime_features(self) -> tuple[dict, bool]:
         """
-        Build the six-feature dict consumed by RegimeModel.get_regime() and the
+        Build the 20-feature dict consumed by RegimeModel.get_regime() and the
         feature-store at training time.
 
-        Returns (features, stale). `stale=True` means the upstream Binance-derived
-        regime context (funding/OI/CVD/basis) was missing or expired in Redis when
-        this snapshot was built — five of the six features fell back to 0.0 and
-        the row should be excluded from any future training X matrix.
+        Returns (features, stale). `stale=True` means one or more required upstream
+        inputs (funding/OI/CVD/basis from Redis, CVD ring buffer, BRTI OHLCV, or
+        Kalshi mid price) were missing or insufficient when this snapshot was built.
+        Stale rows must be filtered out before training the RegimeModel.
 
         We intentionally still return numeric values (0.0 fallback) even when
         stale, so XGBoost.predict_proba() doesn't blow up in the trained path.
@@ -200,21 +206,147 @@ class SignalFusionEngine:
         # row must be excluded from RegimeModel training.
         stale = not ctx or ctx.get("_lkg", False)
 
-        # brti_volatility_1h is computed locally from the OHLCV store and is
-        # independent of the Redis regime:features key. It can be valid even
-        # when ctx is empty, so we don't include it in the staleness check.
-        df = self._store.get_ohlcv("5min")
-        if df is not None and len(df) >= 12:
-            vol = float(df["close"].pct_change().tail(12).std())
+        # Read OHLCV once — reused by multiple features
+        df5 = self._store.get_ohlcv("5min")
+        df1h = self._store.get_ohlcv("1h")
+
+        # --- Features 1-6: existing ---
+        if df5 is not None and len(df5) >= 12:
+            vol = float(df5["close"].pct_change().tail(12).std())
         else:
             vol = 0.0
 
+        funding_rate = float(ctx.get("funding_rate", 0.0))
+        funding_rate_trend = float(ctx.get("funding_rate_trend", 0.0))
+        oi_delta_pct = float(ctx.get("oi_delta_pct", 0.0))
+        cvd_normalized = float(ctx.get("cvd_normalized", 0.0))
+        basis_spread_pct = float(ctx.get("basis_spread_pct", 0.0))
+        brti_volatility_1h = vol
+
+        # --- Features 7-8: cvd_velocity, cvd_acceleration ---
+        entries = self._store._redis.zrange("regime:cvd_history", 0, -1, withscores=True)
+        if len(entries) < 5:
+            cvd_velocity = 0.0
+            cvd_acceleration = 0.0
+            stale = True
+        else:
+            now_ts = time.time()
+
+            def _closest(ents, target_ts):
+                return float(min(ents, key=lambda e: abs(e[1] - target_ts))[0])
+
+            cvd_now = float(entries[-1][0])
+            cvd_5m_ago = _closest(entries, now_ts - 300)
+            cvd_10m_ago = _closest(entries, now_ts - 600)
+            cvd_velocity = (cvd_now - cvd_5m_ago) / 5.0
+            cvd_velocity_10m = (cvd_now - cvd_10m_ago) / 10.0
+            cvd_acceleration = cvd_velocity - cvd_velocity_10m
+
+        # --- Features 9-10: brti_momentum ---
+        if df5 is not None and len(df5) >= 4:
+            brti_momentum_5min = float(df5["close"].iloc[-1] / df5["close"].iloc[-2] - 1)
+            brti_momentum_15min = float(df5["close"].iloc[-1] / df5["close"].iloc[-4] - 1)
+        else:
+            brti_momentum_5min = 0.0
+            brti_momentum_15min = 0.0
+            stale = True
+
+        # --- Feature 11: candle_progress ---
+        candle_progress = float((time.time() % 900) / 900)
+
+        # --- Features 12-13: hour_sin, hour_cos ---
+        now_utc = datetime.now(timezone.utc)
+        hour_float = now_utc.hour + now_utc.minute / 60.0
+        hour_sin = float(math.sin(2 * math.pi * hour_float / 24))
+        hour_cos = float(math.cos(2 * math.pi * hour_float / 24))
+
+        # --- Feature 14: kalshi_implied_prob ---
+        mid_cents = self._market_context.get("kalshi_mid_cents")
+        if mid_cents is None:
+            kalshi_implied_prob = 0.5
+            stale = True
+        else:
+            kalshi_implied_prob = float(mid_cents) / 100.0
+
+        # --- Feature 15: funding_window_proximity ---
+        now_utc2 = datetime.now(timezone.utc)
+        secs = now_utc2.hour * 3600 + now_utc2.minute * 60 + now_utc2.second
+        funding_secs = [0, 8 * 3600, 16 * 3600]
+        min_dist = min(min(abs(secs - f), 86400 - abs(secs - f)) for f in funding_secs)
+        funding_window_proximity = float(1.0 - min(min_dist / (4 * 3600), 1.0))
+
+        # --- Features 16-17: trend_slope_1h, trend_r2_1h ---
+        if df5 is not None and len(df5) >= 4:
+            closes = df5["close"].tail(12).values.astype(float)
+            x = np.arange(len(closes), dtype=float)
+            coeffs = np.polyfit(x, closes, 1)
+            slope_raw = coeffs[0]
+            mean_price = closes.mean()
+            trend_slope_1h = float(slope_raw / mean_price) if mean_price > 0 else 0.0
+            y_pred = np.polyval(coeffs, x)
+            ss_res = float(np.sum((closes - y_pred) ** 2))
+            ss_tot = float(np.sum((closes - mean_price) ** 2))
+            trend_r2_1h = float(1.0 - ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
+        else:
+            trend_slope_1h = 0.0
+            trend_r2_1h = 0.0
+
+        # --- Feature 18: hourly_sr_proximity ---
+        if df1h is not None and len(df1h) >= 2 and df5 is not None and len(df5) >= 1:
+            current_price = float(df5["close"].iloc[-1])
+            resistance = float(df1h["high"].tail(24).max())
+            support = float(df1h["low"].tail(24).min())
+            price_range = resistance - support
+            if price_range > 1e-6:
+                hourly_sr_proximity = float((current_price - support) / price_range)
+                hourly_sr_proximity = max(0.0, min(1.0, hourly_sr_proximity))
+            else:
+                hourly_sr_proximity = 0.5
+        else:
+            hourly_sr_proximity = 0.5
+
+        # --- Feature 19: range_breakout_flag ---
+        if df5 is not None and len(df5) >= 5:
+            box = df5.iloc[-5:-2]
+            box_high = float(box["high"].max())
+            box_low = float(box["low"].min())
+            box_range = box_high - box_low
+            curr_high = float(df5["high"].iloc[-1])
+            curr_low = float(df5["low"].iloc[-1])
+            if box_range > 1e-6:
+                breakout_up = max(0.0, curr_high - box_high) / box_range
+                breakout_down = max(0.0, box_low - curr_low) / box_range
+                range_breakout_flag = float(breakout_up - breakout_down)
+            else:
+                range_breakout_flag = 0.0
+        else:
+            range_breakout_flag = 0.0
+
+        # --- Feature 20: tape_speed_tpm ---
+        ticks = self._store.get_raw_ticks(60)
+        raw_tpm = float(len(ticks)) if ticks is not None else 0.0
+        tape_speed_tpm = raw_tpm / 100.0
+
         features = {
-            "funding_rate": float(ctx.get("funding_rate", 0.0)),
-            "funding_rate_trend": float(ctx.get("funding_rate_trend", 0.0)),
-            "oi_delta_pct": float(ctx.get("oi_delta_pct", 0.0)),
-            "cvd_normalized": float(ctx.get("cvd_normalized", 0.0)),
-            "basis_spread_pct": float(ctx.get("basis_spread_pct", 0.0)),
-            "brti_volatility_1h": vol,
+            "funding_rate":             funding_rate,
+            "funding_rate_trend":       funding_rate_trend,
+            "oi_delta_pct":             oi_delta_pct,
+            "cvd_normalized":           cvd_normalized,
+            "basis_spread_pct":         basis_spread_pct,
+            "brti_volatility_1h":       brti_volatility_1h,
+            "cvd_velocity":             cvd_velocity,
+            "cvd_acceleration":         cvd_acceleration,
+            "brti_momentum_5min":       brti_momentum_5min,
+            "brti_momentum_15min":      brti_momentum_15min,
+            "candle_progress":          candle_progress,
+            "hour_sin":                 hour_sin,
+            "hour_cos":                 hour_cos,
+            "kalshi_implied_prob":      kalshi_implied_prob,
+            "funding_window_proximity": funding_window_proximity,
+            "trend_slope_1h":           trend_slope_1h,
+            "trend_r2_1h":              trend_r2_1h,
+            "hourly_sr_proximity":      hourly_sr_proximity,
+            "range_breakout_flag":      range_breakout_flag,
+            "tape_speed_tpm":           tape_speed_tpm,
         }
         return features, stale

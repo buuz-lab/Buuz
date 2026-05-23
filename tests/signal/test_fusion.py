@@ -19,6 +19,49 @@ from btc_kalshi_system.signal.fusion import _BOOTSTRAP_SHRINK, SignalFusionEngin
 
 # ── Test fixture helpers ───────────────────────────────────────────────────────
 
+def _make_feature_store_mock():
+    """Feature store mock with just enough data to avoid spurious stale=True."""
+    import pandas as pd
+    import numpy as np_
+    feature_store = MagicMock()
+
+    # Enough 5-min candles for brti_momentum and trend features
+    prices = np_.linspace(95000, 95100, 15).tolist()
+    idx = pd.date_range("2024-01-01", periods=15, freq="5min", tz="UTC")
+    df5 = pd.DataFrame({
+        "open": prices, "high": prices, "low": prices, "close": prices,
+        "volume": [0.0] * 15, "amount": [0.0] * 15,
+    }, index=idx)
+
+    # Enough 1h candles for sr_proximity
+    h_prices = np_.linspace(94000, 96000, 5).tolist()
+    h_idx = pd.date_range("2024-01-01", periods=5, freq="1h", tz="UTC")
+    df1h = pd.DataFrame({
+        "open": h_prices, "high": h_prices, "low": h_prices, "close": h_prices,
+        "volume": [0.0] * 5, "amount": [0.0] * 5,
+    }, index=h_idx)
+
+    # get_ohlcv("1h") should return df1h, ("5min") should return df5
+    def ohlcv_side_effect(tf):
+        return df1h if tf == "1h" else df5
+    feature_store.get_ohlcv.side_effect = ohlcv_side_effect
+
+    # CVD ring buffer — return 5 entries so cold-start stale is NOT triggered
+    now = 1704067200.0  # fixed timestamp for reproducibility
+    feature_store._redis.zrange.return_value = [
+        (b"0.1", now - 600),
+        (b"0.2", now - 480),
+        (b"0.3", now - 360),
+        (b"0.4", now - 240),
+        (b"0.5", now - 120),
+    ]
+
+    # Raw ticks
+    feature_store.get_raw_ticks.return_value = None
+
+    return feature_store
+
+
 def _ds_result(
     regime: str = "trending_up",
     suppress: bool = False,
@@ -45,7 +88,7 @@ def make_engine(
     if deepseek_result is None:
         deepseek_result = _ds_result()
 
-    feature_store = MagicMock()
+    feature_store = _make_feature_store_mock()
 
     kronos_engine = MagicMock()
     kronos_engine.run_monte_carlo.return_value = kronos_raw
@@ -295,14 +338,14 @@ def test_signal_carries_regime_features_dict():
         "oi_delta_pct": 0.012,
         "cvd_normalized": 0.3,
         "basis_spread_pct": 0.0008,
+        "kalshi_mid_cents": 55.0,
     })
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    # All six keys must be present and numeric (brti_volatility_1h is computed
-    # locally from feature_store, the others come from market_context).
-    for key in ("funding_rate", "funding_rate_trend", "oi_delta_pct",
-                "cvd_normalized", "basis_spread_pct", "brti_volatility_1h"):
-        assert key in result.regime_features
+    # All 20 keys must be present
+    from btc_kalshi_system.models.regime_model import _FEATURE_ORDER
+    for key in _FEATURE_ORDER:
+        assert key in result.regime_features, f"Missing key: {key}"
         assert isinstance(result.regime_features[key], float)
     assert result.regime_features["funding_rate"] == pytest.approx(0.0001)
     assert result.regime_features["cvd_normalized"] == pytest.approx(0.3)
@@ -319,7 +362,7 @@ def test_signal_features_stale_true_when_market_context_empty():
 
 def test_signal_features_stale_false_when_market_context_populated():
     engine = make_engine()
-    engine.update_market_context({"funding_rate": 0.0001})
+    engine.update_market_context({"funding_rate": 0.0001, "kalshi_mid_cents": 55.0})
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
     assert result.features_stale is False
