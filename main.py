@@ -40,6 +40,7 @@ logger.add("logs/kronos_{time}.log", rotation="1 day", retention="30 days", leve
 SIGNAL_INTERVAL_SECONDS = 300
 DEEPSEEK_REFRESH_SECONDS = 900
 RECOVERY_INTERVAL_SECONDS = 3600
+MAX_POSITIONS_PER_TICKER = 3
 
 # Per-market blackout: stop new entries this many seconds before close_time
 _BLACKOUT_SECONDS = {"15min": 3 * 60, "1h": 10 * 60}
@@ -308,6 +309,10 @@ class KronosV2:
             return
 
         # f. Pre-trade checklist
+        if self._monitor.ticker_position_count(ticker) >= MAX_POSITIONS_PER_TICKER:
+            logger.info(f"Skipping {ticker}: already {MAX_POSITIONS_PER_TICKER} open positions on this ticker")
+            return
+
         current_exposure = self._monitor.get_current_exposure()
         same_timeframe_open = self._monitor.has_timeframe_position(timeframe)
         # In paper mode Gate 4 is always open — edge tracker hasn't accumulated yet
