@@ -12,13 +12,14 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## Current Progress
 
-**As of 2026-05-23 ~12:35 UTC: 128 training-ready rows. System is live (PID 43368).**
+**As of 2026-05-23 ~14:00 UTC: 132 training-ready rows. System is live (PID 44671).**
 
 - `PAPER_TRADING=true` in `.env`
-- **~48 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~7.8 days).**
-- Stats at this handoff: 341 total trades / 128 training-ready rows, 190W / 151L (55.6%), Net P&L: +$5.64
+- **~49 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~7.5 days).**
+- Stats at this handoff: 345 total trades / 132 training-ready rows, 192W / 153L (55.6%), Net P&L: +$21.06
 - System is **running** — confirm with `ps aux | grep "[Pp]ython.*main\.py"`
-- Latest commit: `bcd3967`
+- Latest commit: `a85c349`
+- Currently in a **quiet period** — Kronos gating on Gate 2 "Kelly size rounds to 0 contracts" due to elevated volatility (brti_vol ~0.0014, 2x normal). No trades since 13:00 UTC. This is correct self-limiting behavior.
 
 **Go-live thresholds (both must be met):**
 - ≥ 500 resolved trades total — for calibrator
@@ -29,15 +30,21 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## What Worked (most recent first)
 
-- **Per-side position cap + minimum price floor (commit `bcd3967`).** Replaced
-  blanket `MAX_POSITIONS_PER_TICKER=3` with two independent controls:
-  - `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`: YES and NO positions tracked separately.
-    Kronos can now flip and enter the opposite direction on the same market if CVD
-    flips mid-candle, without being blocked by the cap.
-  - `MIN_ENTRY_PRICE_CENTS=20`: skips any entry priced below 20¢ probability.
-    Prevents catastrophic averaging into near-certain losers (e.g. 169x12¢ trade
-    cost $20.28 in one candle).
-  - Added `ticker_direction_count(ticker, direction)` to `PortfolioMonitor` (Redis-backed).
+- **Win rate by price script (`scripts/win_rate_by_price.py`, commit `a85c349`).**
+  Run anytime to see win rate, net P&L, and avg P&L per trade broken down by entry
+  price bucket. Flags: `--bucket 5` (5¢ buckets), `--dir yes/no`, `--min-trades N`.
+  Current findings: 0–19¢ = 0% win rate ($-19/trade avg), 20–49¢ = 36–39% but
+  positive avg P&L in 20–29¢ bucket due to large payouts, 60+¢ = 67–82%.
+
+- **Entry price floor removed (commit `6f74f82`).** `MIN_ENTRY_PRICE_CENTS=20` was
+  added then removed after a blocked 19¢ NO→DOWN trade would have won. Kronos appears
+  to have genuine contrarian edge at low prices. Monitor sub-20¢ win rate via the
+  script as data accumulates — if it stays at 0% consider re-adding the floor.
+
+- **Per-side position cap (commit `bcd3967`).** Replaced blanket `MAX_POSITIONS_PER_TICKER=3`
+  with `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`: YES and NO positions tracked separately.
+  Kronos can now flip and enter the opposite direction on the same market if CVD flips
+  mid-candle. Added `ticker_direction_count(ticker, direction)` to `PortfolioMonitor` (Redis-backed).
 
 - **`floor_strike` as primary strike source (commit `ee2bc31`).** Kalshi sets
   `floor_strike` to the BRTI average at market open — the canonical resolution
@@ -77,8 +84,9 @@ The pipeline is fully instrumented — just waiting on data volume.
 - **Blanket MAX_POSITIONS_PER_TICKER=3.** Prevented CVD flip recovery — when CVD
   flipped mid-candle, the cap blocked the correctly-directioned opposite trade.
   Replaced by per-side cap.
-- **Averaging into low-probability entries.** 169x12¢ NO→DOWN ($20.28 loss in one trade)
-  was the single most destructive trade. The 20¢ floor prevents this.
+- **20¢ entry price floor (added then removed).** Added to prevent 169x12¢-style trades,
+  but removed after a blocked 19¢ trade would have won. Sub-20¢ data too thin (6 trades)
+  to make a definitive call. Monitor via `scripts/win_rate_by_price.py`.
 - **In-memory position count for per-ticker cap.** Broke when multiple stale main.py
   processes ran simultaneously. Each had its own `_positions` dict, so the cap was
   per-process, not global. Always use Redis-backed count.
@@ -99,10 +107,11 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 | File | Change |
 |------|--------|
-| `main.py` | `_extract_strike`: `floor_strike` primary path with `> 0` guard. Replaced `MAX_POSITIONS_PER_TICKER=3` with `MAX_POSITIONS_PER_TICKER_PER_SIDE=2` and `MIN_ENTRY_PRICE_CENTS=20`. Price floor check and per-side cap gate added to `_process_market`. Removed duplicate `fill_price_cents` assignment. Circuit breaker drawdown disabled in paper mode. |
+| `main.py` | `_extract_strike`: `floor_strike` primary path with `> 0` guard. Replaced `MAX_POSITIONS_PER_TICKER=3` with `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`. Per-side cap gate in `_process_market`. `MIN_ENTRY_PRICE_CENTS=20` floor added then removed (see What Failed). Circuit breaker drawdown disabled in paper mode. |
 | `btc_kalshi_system/portfolio/monitor.py` | Added `ticker_direction_count(ticker, direction) -> int` (Redis-backed with in-memory fallback). |
 | `btc_kalshi_system/portfolio/circuit_breaker.py` | Daily drawdown check moved inside `if not self._paper_trading` block. |
 | `scripts/monitor_trades.py` | **NEW.** Live SQLite polling monitor (15s interval) — prints new trades, resolutions, running record, P&L, training progress bar. |
+| `scripts/win_rate_by_price.py` | **NEW.** Win rate / P&L breakdown by entry price bucket. `--bucket`, `--dir yes/no`, `--min-trades` flags. |
 
 ### Prior sessions (2026-05-22 — 2026-05-23)
 
@@ -121,23 +130,26 @@ The pipeline is fully instrumented — just waiting on data volume.
 ## Next Steps
 
 1. **Monitor training-ready row accumulation.** Run `python3 scripts/regime_health_check.py`
-   daily. Currently at 128/500 (~7.8 days to go at 48/day). Check `pgrep -af main.py` to
-   confirm only one process is running.
+   daily. Currently at 132/500 (~7.5 days to go at 49/day). Confirm one process running:
+   `ps aux | grep "[Pp]ython.*main\.py"`.
 
-2. **Consider a CVD soft gate (early regime signal).** Add a check in `_process_market`:
-   if `cvd_normalized < -0.3` skip YES→UP entries; if `cvd_normalized > +0.3` skip NO→DOWN.
-   This is a simplified preview of what Gate 2 will do. Would have prevented the majority
-   of today's losses. Discuss before implementing — it reduces training data diversity.
+2. **Watch sub-20¢ win rate.** Run `python3 scripts/win_rate_by_price.py` periodically.
+   Currently 0/6 wins at 0–19¢ ($-19/trade avg). If this stays at 0% after 20+ trades,
+   re-add `MIN_ENTRY_PRICE_CENTS=20` to `main.py`. If it climbs above 35%, Kronos has
+   genuine contrarian edge there and the floor should stay removed.
 
-3. **Add auto_retrain to crontab.** Copy the crontab line from the top of
+3. **Consider a CVD soft gate (early regime signal).** Add a check in `_process_market`:
+   if `cvd_normalized < -0.3` skip YES→UP; if `cvd_normalized > +0.3` skip NO→DOWN.
+   This is a preview of Gate 2. Would have prevented most of today's losses. Discuss
+   before implementing — it reduces training data diversity.
+
+4. **Add auto_retrain to crontab.** Copy the crontab line from the top of
    `scripts/auto_retrain.py`. Test first with `python3 scripts/auto_retrain.py --dry-run`.
 
-4. **Train the model when ready.** `python3 scripts/train_regime.py --dry-run` previews
+5. **Train the model when ready.** `python3 scripts/train_regime.py --dry-run` previews
    Brier / accuracy. If sane (Brier < 0.25, Kronos agreement > 55%), re-run without
-   `--dry-run` to save `models/regime.pkl`. Restart — it auto-loads.
-
-5. **Flip `REGIME_GATE2_ENFORCING=true` in `.env` and restart** after observing ~50
-   shadow trades with a 20-40% disagreement rate (not 50%+).
+   `--dry-run` to save `models/regime.pkl`. Restart — it auto-loads. Then flip
+   `REGIME_GATE2_ENFORCING=true` after ~50 shadow trades.
 
 ---
 
@@ -149,8 +161,8 @@ The pipeline is fully instrumented — just waiting on data volume.
   returns false positives (matches shell wrappers). Use `ps aux` for reliability.
 - **Per-side cap is Redis-backed.** `ticker_direction_count` reads `portfolio:open_positions`
   hash directly. Accurate across all processes. Do not revert to in-memory count.
-- **20¢ floor is checked before Kelly sizing.** If entry price < 20¢, the trade is skipped
-  entirely — no Kelly calculation, no checklist run.
+- **No entry price floor currently active.** `MIN_ENTRY_PRICE_CENTS` was added then removed.
+  Sub-20¢ trades are allowed. Monitor win rate via `python3 scripts/win_rate_by_price.py`.
 - **CVD does NOT influence Kronos decisions in bootstrap mode.** CVD is logged to SQLite
   for regime model training only. Kronos fires on Monte Carlo (BRTI candle price momentum).
   This is why CVD divergence causes multi-trade loss streaks. The regime model (Gate 2) is
