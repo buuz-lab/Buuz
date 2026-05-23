@@ -12,11 +12,11 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## Current Progress
 
-**As of 2026-05-23 ~06:35 UTC: 98 training-ready rows. System is live and running.**
+**As of 2026-05-23 ~09:22 UTC: 104 training-ready rows. System is live and running.**
 
 - `PAPER_TRADING=true` in `.env`
-- **~44 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~9.3 days).**
-- Stats at this session: 311 total trades / 98 training-ready rows, 177W / 134L (56%), Net P&L: +$148.50.
+- **~45 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~8.7 days).**
+- Stats at this session: 319 total trades / 104 training-ready rows, 178W / 139L (56%), Net P&L: +$62.83.
 - System is **running** (PID changes on restart — check `pgrep -f main.py`).
 - **OKX outage 14:20–21:00+ PDT 2026-05-22.** Watchdog fired ERROR continuously. Trades during
   this window fired on stale (zero) features. LKG fix addresses this for future outages.
@@ -97,6 +97,20 @@ The pipeline is fully instrumented — just waiting on data volume.
 ---
 
 ## Files Touched / Created
+
+### This session (2026-05-23 — floor_strike, circuit breaker, cap fixes)
+
+| File | Change |
+|------|--------|
+| `main.py` | `_extract_strike`: `floor_strike` from Kalshi API is now the explicit primary path with a `> 0` guard. Kalshi sets `floor_strike` to the BRTI average at market open — the canonical resolution reference price. Zero floor_strike (unset market) previously returned `0.0`, making Kronos compute P(BTC > $0) ≈ 100% and biasing all signals YES→UP. BRTI candle fallback now logs WARNING instead of DEBUG. |
+| `btc_kalshi_system/portfolio/circuit_breaker.py` | Daily drawdown check now skipped in `PAPER_TRADING=true` mode. Previously tripped at -$200 paper P&L, halting trade data collection. Drawdown check remains active in live mode. **Commit:** `bc9f988` |
+
+**Key insight from this session — why YES→UP kept losing:**
+- Win rate by price bucket: 37.8% at 35–50¢, 56.4% at 50–65¢, 72.4% at 65+¢
+- Win rate when CVD negative + YES→UP: **32.3%** (31 trades) — well below breakeven
+- BTC trended down all session; YES→UP markets priced cheaper as the move continued
+- System has no mechanism to stand down in bearish regimes without the regime model
+- NO→DOWN has 60.9% win rate all-time vs YES→UP at 51.4% — real asymmetry exists
 
 ### This session (2026-05-23 — per-ticker position cap + Redis-backed count)
 
