@@ -152,7 +152,11 @@ class PortfolioMonitor:
         return any(p.timeframe == timeframe for p in self._positions.values())
 
     def ticker_position_count(self, ticker: str) -> int:
-        return sum(1 for p in self._positions.values() if p.ticker == ticker)
+        try:
+            raw = self._redis.hgetall(OPEN_POSITIONS_KEY)
+            return sum(1 for v in raw.values() if json.loads(v).get("ticker") == ticker)
+        except redis.RedisError:
+            return sum(1 for p in self._positions.values() if p.ticker == ticker)
 
     def get_daily_pnl(self) -> float:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
