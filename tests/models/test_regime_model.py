@@ -9,7 +9,7 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 def _synthetic_features(n: int = 200, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
-    X = rng.standard_normal((n, 6))
+    X = rng.standard_normal((n, 20))
     y = (X[:, 0] > 0).astype(int)  # label = sign of first feature
     return X, y
 
@@ -17,12 +17,26 @@ def _synthetic_features(n: int = 200, seed: int = 42) -> tuple[np.ndarray, np.nd
 def _feature_dict(seed: int = 0) -> dict:
     rng = np.random.default_rng(seed)
     return {
-        "funding_rate":       float(rng.uniform(-0.01, 0.01)),
-        "funding_rate_trend": float(rng.uniform(-0.005, 0.005)),
-        "oi_delta_pct":       float(rng.uniform(-0.1, 0.1)),
-        "cvd_normalized":     float(rng.uniform(-1, 1)),
-        "basis_spread_pct":   float(rng.uniform(-0.01, 0.01)),
-        "brti_volatility_1h": float(rng.uniform(0, 0.02)),
+        "funding_rate":            float(rng.uniform(-0.01, 0.01)),
+        "funding_rate_trend":      float(rng.uniform(-0.005, 0.005)),
+        "oi_delta_pct":            float(rng.uniform(-0.1, 0.1)),
+        "cvd_normalized":          float(rng.uniform(-1, 1)),
+        "basis_spread_pct":        float(rng.uniform(-0.01, 0.01)),
+        "brti_volatility_1h":      float(rng.uniform(0, 0.02)),
+        "cvd_velocity":            float(rng.uniform(-0.1, 0.1)),
+        "cvd_acceleration":        float(rng.uniform(-0.05, 0.05)),
+        "brti_momentum_5min":      float(rng.uniform(-0.005, 0.005)),
+        "brti_momentum_15min":     float(rng.uniform(-0.01, 0.01)),
+        "candle_progress":         float(rng.uniform(0, 1)),
+        "hour_sin":                float(rng.uniform(-1, 1)),
+        "hour_cos":                float(rng.uniform(-1, 1)),
+        "kalshi_implied_prob":     float(rng.uniform(0.1, 0.9)),
+        "funding_window_proximity": float(rng.uniform(0, 1)),
+        "trend_slope_1h":          float(rng.uniform(-0.001, 0.001)),
+        "trend_r2_1h":             float(rng.uniform(0, 1)),
+        "hourly_sr_proximity":     float(rng.uniform(0, 1)),
+        "range_breakout_flag":     float(rng.uniform(-1, 1)),
+        "tape_speed_tpm":          float(rng.uniform(0, 5)),
     }
 
 

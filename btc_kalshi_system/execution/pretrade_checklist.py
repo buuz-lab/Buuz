@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
+import config
 from btc_kalshi_system.execution.kelly import KellySizer
 from btc_kalshi_system.signal.fusion import TradingSignal
 
@@ -94,6 +95,15 @@ class PreTradeChecklist:
             distance = abs(composite_price - signal.strike)
             if distance < 150:
                 return fail(6, f"Composite price ${composite_price:,.0f} within $150 of strike ${signal.strike:,.0f} (distance ${distance:.0f})")
+
+        # Gate 7 — CVD soft gate
+        # YES→UP with negative CVD = 32.3% win rate (below breakeven).
+        # Uses data already on the signal — no new infrastructure needed.
+        cvd = signal.regime_features.get("cvd_normalized", 0.0)
+        if signal.direction == 1 and cvd < -config.CVD_GATE_THRESHOLD:
+            return fail(7, f"CVD {cvd:.3f} opposes YES→UP (threshold -{config.CVD_GATE_THRESHOLD})")
+        if signal.direction == 0 and cvd > config.CVD_GATE_THRESHOLD:
+            return fail(7, f"CVD {cvd:.3f} opposes NO→DOWN (threshold +{config.CVD_GATE_THRESHOLD})")
 
         return ChecklistResult(
             passed=True,

@@ -68,9 +68,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config
 from btc_kalshi_system.models.regime_model import RegimeModel
 
-# Must match the feature key order RegimeModel.get_regime() expects so the
-# trained model's column order matches the inference-time dict iteration order.
+# Must match _FEATURE_ORDER in regime_model.py and the keys returned by
+# fusion._regime_features() — a mismatch silently corrupts the trained model.
 _FEATURE_COLS = [
+    "funding_rate",
+    "funding_rate_trend",
+    "oi_delta_pct",
+    "cvd_normalized",
+    "basis_spread_pct",
+    "brti_volatility_1h",
+    "cvd_velocity",
+    "cvd_acceleration",
+    "brti_momentum_5min",
+    "brti_momentum_15min",
+    "candle_progress",
+    "hour_sin",
+    "hour_cos",
+    "kalshi_implied_prob",
+    "funding_window_proximity",
+    "trend_slope_1h",
+    "trend_r2_1h",
+    "hourly_sr_proximity",
+    "range_breakout_flag",
+    "tape_speed_tpm",
+]
+
+_FEATURE_COLS_LEGACY = [
     "funding_rate",
     "funding_rate_trend",
     "oi_delta_pct",
@@ -79,15 +102,28 @@ _FEATURE_COLS = [
     "brti_volatility_1h",
 ]
 
-_QUERY = f"""
-SELECT {", ".join(_FEATURE_COLS)},
+_QUERY_TEMPLATE = """
+SELECT {cols},
        direction, outcome, kronos_calibrated, timestamp
 FROM trades
 WHERE features_stale = 0
   AND funding_rate IS NOT NULL
+  {extra_filters}
   AND outcome IS NOT NULL
 ORDER BY timestamp ASC
 """
+
+_EXTRA_FILTERS_20 = """AND cvd_velocity IS NOT NULL
+  AND brti_momentum_5min IS NOT NULL
+  AND kalshi_implied_prob IS NOT NULL
+  AND funding_window_proximity IS NOT NULL"""
+
+def _build_query(legacy: bool) -> str:
+    if legacy:
+        cols = ", ".join(_FEATURE_COLS_LEGACY)
+        return _QUERY_TEMPLATE.format(cols=cols, extra_filters="")
+    cols = ", ".join(_FEATURE_COLS)
+    return _QUERY_TEMPLATE.format(cols=cols, extra_filters=_EXTRA_FILTERS_20)
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,38 +141,41 @@ def parse_args() -> argparse.Namespace:
                    help="Compute and report metrics but do NOT write the model file.")
     p.add_argument("--force", action="store_true",
                    help="Skip the low-variance feature gate and train anyway.")
+    p.add_argument("--legacy", action="store_true",
+                   help="Use only the original 6 features. Allows training on rows collected "
+                        "before Phase 1 (no new IS NOT NULL filters). Pair with --force --min-rows 100.")
     return p.parse_args()
 
 
-def load_dataset(db_path: str, max_rows: int | None = None) -> list[tuple]:
+def load_dataset(db_path: str, max_rows: int | None = None, legacy: bool = False) -> list[tuple]:
     if not Path(db_path).exists():
         sys.exit(f"Database not found: {db_path}")
+    query = _build_query(legacy)
     conn = sqlite3.connect(db_path)
     try:
         if max_rows is not None:
-            # Most recent N rows, then reverse to ascending order
             rows = conn.execute(
-                _QUERY.replace("ORDER BY timestamp ASC",
-                               f"ORDER BY timestamp DESC LIMIT {max_rows}")
+                query.replace("ORDER BY timestamp ASC",
+                              f"ORDER BY timestamp DESC LIMIT {max_rows}")
             ).fetchall()
             rows = list(reversed(rows))
         else:
-            rows = conn.execute(_QUERY).fetchall()
+            rows = conn.execute(query).fetchall()
     finally:
         conn.close()
     return rows
 
 
-def build_xy(rows: list[tuple]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def build_xy(rows: list[tuple], n_features: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Returns (X, y_up, kronos_cal) where y_up=1 iff the underlying market closed
     UP (regardless of which side we bet).
     """
     arr = np.array(rows, dtype=object)
-    X = arr[:, : len(_FEATURE_COLS)].astype(np.float64)
-    direction = arr[:, len(_FEATURE_COLS)].astype(int)
-    outcome = arr[:, len(_FEATURE_COLS) + 1].astype(int)
-    kronos_cal = arr[:, len(_FEATURE_COLS) + 2].astype(np.float64)
+    X = arr[:, :n_features].astype(np.float64)
+    direction = arr[:, n_features].astype(int)
+    outcome = arr[:, n_features + 1].astype(int)
+    kronos_cal = arr[:, n_features + 2].astype(np.float64)
     y_up = (direction == outcome).astype(int)
     return X, y_up, kronos_cal
 
@@ -164,7 +203,11 @@ def brier_score(y_true: np.ndarray, proba: np.ndarray) -> float:
 def main() -> None:
     args = parse_args()
 
-    rows = load_dataset(args.db, max_rows=args.max_rows)
+    active_cols = _FEATURE_COLS_LEGACY if args.legacy else _FEATURE_COLS
+    if args.legacy:
+        print("--legacy mode: using original 6 features (no new IS NOT NULL filters)")
+
+    rows = load_dataset(args.db, max_rows=args.max_rows, legacy=args.legacy)
     n_total = len(rows)
     print(f"Qualifying rows in {args.db}: {n_total}")
     if args.max_rows is not None:
@@ -181,7 +224,7 @@ def main() -> None:
             f"test set ({args.test_size}). Increase --min-rows or wait for more data."
         )
 
-    X, y_up, kronos_cal = build_xy(rows)
+    X, y_up, kronos_cal = build_xy(rows, n_features=len(active_cols))
 
     # Time-based split — the data is already ORDER BY timestamp ASC.
     X_train, X_test = X[: -args.test_size], X[-args.test_size :]
@@ -202,7 +245,7 @@ def main() -> None:
 
     # ── Feature variance gate ─────────────────────────────────────────────────
     low_variance_features: list[tuple[str, float]] = []
-    for i, feat in enumerate(_FEATURE_COLS):
+    for i, feat in enumerate(active_cols):
         std = float(X_train[:, i].std())
         if std < 1e-6:
             print(f"WARNING: feature '{feat}' has near-zero std in X_train: {std:.2e}")
@@ -313,7 +356,7 @@ def main() -> None:
     # ── Feature importances ───────────────────────────────────────────────────
     importances = model._clf.feature_importances_
     total_importance = float(importances.sum())
-    ranked = sorted(zip(_FEATURE_COLS, importances), key=lambda x: x[1], reverse=True)
+    ranked = sorted(zip(active_cols, importances), key=lambda x: x[1], reverse=True)
     print("\nFeature importances (descending):")
     for feat, imp in ranked:
         print(f"  {feat:<25s}  {imp:.4f}")

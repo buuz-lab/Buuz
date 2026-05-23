@@ -44,3 +44,8 @@ REGIME_MODEL_PATH: str = os.getenv("REGIME_MODEL_PATH", "models/regime.pkl")
 # Has no effect while RegimeModel is untrained — Gate 2 is bypassed entirely
 # in the NotTrainedError code path regardless of this flag.
 REGIME_GATE2_ENFORCING: bool = os.getenv("REGIME_GATE2_ENFORCING", "false").lower() == "true"
+
+# Gate 7 (CVD soft gate): block YES→UP when CVD < -threshold, NO→DOWN when CVD > +threshold.
+# Statistical basis: YES→UP trades with negative CVD have a 32.3% win rate, well below
+# the ~52% breakeven for typical fill prices. This addresses CVD oscillation loss streaks.
+CVD_GATE_THRESHOLD: float = 0.3

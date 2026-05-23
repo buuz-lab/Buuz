@@ -276,11 +276,13 @@ class DerivativesFeed:
         # Also write a last-known-good copy with a 24h TTL so _get_market_context
         # can fall back to real (stale-flagged) features during exchange outages
         # instead of zeros. _lkg_written_at lets the caller log how old the data is.
-        lkg = {**features, "_lkg_written_at": time.time()}
-        self._redis.set("regime:features:lkg", json.dumps(lkg), ex=_LKG_TTL)
-        # Also persist as last-known-good so fusion can fall back to real values
-        # (rather than zeros) during exchange outages. _lkg_written_at lets the
-        # caller log the feature age for observability.
         lkg_payload = dict(features)
         lkg_payload["_lkg_written_at"] = time.time()
         self._redis.set("regime:features:lkg", json.dumps(lkg_payload), ex=_LKG_TTL)
+
+        # CVD ring buffer: used by fusion._regime_features() to compute cvd_velocity
+        # and cvd_acceleration. Score = Unix timestamp so the sorted set is ordered by
+        # recency. Keep last 90 entries (~90 minutes at one write per minute).
+        cvd_value = features.get("cvd_normalized", 0.0)
+        self._redis.zadd("regime:cvd_history", {str(float(cvd_value)): time.time()})
+        self._redis.zremrangebyrank("regime:cvd_history", 0, -91)  # keep last 90

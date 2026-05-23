@@ -11,6 +11,20 @@ _FEATURE_ORDER = [
     "cvd_normalized",
     "basis_spread_pct",
     "brti_volatility_1h",
+    "cvd_velocity",
+    "cvd_acceleration",
+    "brti_momentum_5min",
+    "brti_momentum_15min",
+    "candle_progress",
+    "hour_sin",
+    "hour_cos",
+    "kalshi_implied_prob",
+    "funding_window_proximity",
+    "trend_slope_1h",
+    "trend_r2_1h",
+    "hourly_sr_proximity",
+    "range_breakout_flag",
+    "tape_speed_tpm",
 ]
 
 

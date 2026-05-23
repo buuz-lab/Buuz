@@ -16,6 +16,7 @@ from btc_kalshi_system.data.derivatives_feed import DerivativesFeed
 from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, GeminiFeed, KrakenFeed
 from btc_kalshi_system.data.feature_store import FeatureStore
 from btc_kalshi_system.execution.kelly import KellySizer
+from btc_kalshi_system.execution.position_monitor import PositionMonitor
 from btc_kalshi_system.execution.pretrade_checklist import PreTradeChecklist
 from btc_kalshi_system.execution.router import KalshiClientRouter
 from btc_kalshi_system.models.calibrator import Calibrator
@@ -83,14 +84,62 @@ CREATE TABLE IF NOT EXISTS trades (
 # columns existed. SQLite's ALTER TABLE ADD COLUMN is fast (rewrites no rows)
 # and the OperationalError swallow makes this safe to run on every startup.
 _TRADES_COLUMN_MIGRATIONS = [
-    ("funding_rate",        "REAL DEFAULT NULL"),
-    ("funding_rate_trend",  "REAL DEFAULT NULL"),
-    ("oi_delta_pct",        "REAL DEFAULT NULL"),
-    ("cvd_normalized",      "REAL DEFAULT NULL"),
-    ("basis_spread_pct",    "REAL DEFAULT NULL"),
-    ("brti_volatility_1h",  "REAL DEFAULT NULL"),
-    ("features_stale",      "INTEGER DEFAULT 0"),
+    ("funding_rate",             "REAL DEFAULT NULL"),
+    ("funding_rate_trend",       "REAL DEFAULT NULL"),
+    ("oi_delta_pct",             "REAL DEFAULT NULL"),
+    ("cvd_normalized",           "REAL DEFAULT NULL"),
+    ("basis_spread_pct",         "REAL DEFAULT NULL"),
+    ("brti_volatility_1h",       "REAL DEFAULT NULL"),
+    ("features_stale",           "INTEGER DEFAULT 0"),
+    # Phase 1: 14 new feature columns (NULL for rows written before this migration)
+    ("cvd_velocity",             "REAL"),
+    ("cvd_acceleration",         "REAL"),
+    ("brti_momentum_5min",       "REAL"),
+    ("brti_momentum_15min",      "REAL"),
+    ("candle_progress",          "REAL"),
+    ("hour_sin",                 "REAL"),
+    ("hour_cos",                 "REAL"),
+    ("kalshi_implied_prob",      "REAL"),
+    ("funding_window_proximity", "REAL"),
+    ("trend_slope_1h",           "REAL"),
+    ("trend_r2_1h",              "REAL"),
+    ("hourly_sr_proximity",      "REAL"),
+    ("range_breakout_flag",      "REAL"),
+    ("tape_speed_tpm",           "REAL"),
+    ("exit_reason",              "TEXT"),
 ]
+
+_CREATE_TRADE_SNAPSHOTS_TABLE = """
+CREATE TABLE IF NOT EXISTS trade_snapshots (
+    trade_id                TEXT,
+    snapshot_window         TEXT,
+    snapshot_ts             TEXT,
+    funding_rate            REAL,
+    funding_rate_trend      REAL,
+    oi_delta_pct            REAL,
+    cvd_normalized          REAL,
+    basis_spread_pct        REAL,
+    brti_volatility_1h      REAL,
+    cvd_velocity            REAL,
+    cvd_acceleration        REAL,
+    brti_momentum_5min      REAL,
+    brti_momentum_15min     REAL,
+    candle_progress         REAL,
+    hour_sin                REAL,
+    hour_cos                REAL,
+    kalshi_implied_prob     REAL,
+    funding_window_proximity REAL,
+    trend_slope_1h          REAL,
+    trend_r2_1h             REAL,
+    hourly_sr_proximity     REAL,
+    range_breakout_flag     REAL,
+    tape_speed_tpm          REAL,
+    kronos_prob             REAL,
+    regime_direction        INTEGER,
+    exit_triggered          INTEGER,
+    PRIMARY KEY (trade_id, snapshot_window)
+)
+"""
 
 
 class KronosV2:
@@ -131,6 +180,16 @@ class KronosV2:
             calibrator=self._calibrator,
         )
 
+        self._position_monitor = PositionMonitor(
+            portfolio_monitor=self._monitor,
+            regime_model=self._regime,
+            kronos_engine=self._kronos,
+            feature_store=self._store,
+            router=self._router,
+            fusion_engine=self._fusion,
+            db_path="trades.db",
+        )
+
         # Preload Kronos here — single-threaded, no event loop, no concurrent I/O.
         # Loading it later (inside asyncio.to_thread while WebSocket feeds run) causes
         # a segfault on Apple Silicon because PyTorch's Accelerate-framework init races
@@ -150,6 +209,7 @@ class KronosV2:
             except sqlite3.OperationalError:
                 # "duplicate column name" — column already exists. Safe to ignore.
                 pass
+        self._db.execute(_CREATE_TRADE_SNAPSHOTS_TABLE)
         self._db.commit()
 
         self._running = False
@@ -179,6 +239,7 @@ class KronosV2:
             deriv.run(),
             self._main_loop(),
             self._regime_watchdog(),
+            self._position_monitor.run(),
         )
 
     async def _main_loop(self) -> None:
@@ -289,26 +350,31 @@ class KronosV2:
 
         timeframe = market.get("market_type", "15min")
 
-        # c. Signal
-        signal = self._fusion.get_signal(timeframe=timeframe, strike=strike)
-        if signal is None:
-            logger.debug(f"No signal for {ticker} (gated out)")
-            return
-
-        # d. Orderbook
+        # c. Orderbook (fetched before signal so kalshi_implied_prob is available)
         try:
             orderbook_resp = self._router.get_orderbook(ticker)
         except Exception as exc:
             logger.warning(f"Failed to fetch orderbook for {ticker}: {exc}")
             return
 
-        # e. Parse orderbook
+        # d. Parse orderbook
         best_bid_cents, best_ask_cents, available_contracts = self._parse_orderbook(orderbook_resp)
         if best_ask_cents == 0:
             logger.debug(f"Empty orderbook for {ticker}, skipping")
             return
 
-        # f. Pre-trade checklist
+        # e. Inject current Kalshi mid-price so fusion._regime_features() can
+        #    compute kalshi_implied_prob for the signal and the training row.
+        mid_cents = (best_bid_cents + best_ask_cents) / 2.0
+        self._fusion.update_kalshi_mid(mid_cents)
+
+        # f. Signal
+        signal = self._fusion.get_signal(timeframe=timeframe, strike=strike)
+        if signal is None:
+            logger.debug(f"No signal for {ticker} (gated out)")
+            return
+
+        # g. Pre-trade checklist
         fill_price_cents = best_ask_cents if signal.direction == 1 else (100 - best_bid_cents)
 
         side_count = self._monitor.ticker_direction_count(ticker, signal.direction)
@@ -612,8 +678,19 @@ class KronosV2:
                     fill_price_cents,
                     funding_rate, funding_rate_trend, oi_delta_pct,
                     cvd_normalized, basis_spread_pct, brti_volatility_1h,
-                    features_stale
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    features_stale,
+                    cvd_velocity, cvd_acceleration,
+                    brti_momentum_5min, brti_momentum_15min,
+                    candle_progress, hour_sin, hour_cos,
+                    kalshi_implied_prob, funding_window_proximity,
+                    trend_slope_1h, trend_r2_1h,
+                    hourly_sr_proximity, range_breakout_flag, tape_speed_tpm
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     trade_id,
@@ -637,6 +714,20 @@ class KronosV2:
                     feats.get("basis_spread_pct"),
                     feats.get("brti_volatility_1h"),
                     1 if signal.features_stale else 0,
+                    feats.get("cvd_velocity"),
+                    feats.get("cvd_acceleration"),
+                    feats.get("brti_momentum_5min"),
+                    feats.get("brti_momentum_15min"),
+                    feats.get("candle_progress"),
+                    feats.get("hour_sin"),
+                    feats.get("hour_cos"),
+                    feats.get("kalshi_implied_prob"),
+                    feats.get("funding_window_proximity"),
+                    feats.get("trend_slope_1h"),
+                    feats.get("trend_r2_1h"),
+                    feats.get("hourly_sr_proximity"),
+                    feats.get("range_breakout_flag"),
+                    feats.get("tape_speed_tpm"),
                 ),
             )
             self._db.commit()
