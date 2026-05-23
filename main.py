@@ -40,7 +40,8 @@ logger.add("logs/kronos_{time}.log", rotation="1 day", retention="30 days", leve
 SIGNAL_INTERVAL_SECONDS = 300
 DEEPSEEK_REFRESH_SECONDS = 900
 RECOVERY_INTERVAL_SECONDS = 3600
-MAX_POSITIONS_PER_TICKER = 3
+MAX_POSITIONS_PER_TICKER_PER_SIDE = 2
+MIN_ENTRY_PRICE_CENTS = 20
 
 # Per-market blackout: stop new entries this many seconds before close_time
 _BLACKOUT_SECONDS = {"15min": 3 * 60, "1h": 10 * 60}
@@ -309,8 +310,18 @@ class KronosV2:
             return
 
         # f. Pre-trade checklist
-        if self._monitor.ticker_position_count(ticker) >= MAX_POSITIONS_PER_TICKER:
-            logger.info(f"Skipping {ticker}: already {MAX_POSITIONS_PER_TICKER} open positions on this ticker")
+        fill_price_cents = best_ask_cents if signal.direction == 1 else (100 - best_bid_cents)
+        if fill_price_cents < MIN_ENTRY_PRICE_CENTS:
+            logger.info(
+                f"Skipping {ticker}: entry price {fill_price_cents}¢ below floor {MIN_ENTRY_PRICE_CENTS}¢"
+            )
+            return
+
+        side_count = self._monitor.ticker_direction_count(ticker, signal.direction)
+        if side_count >= MAX_POSITIONS_PER_TICKER_PER_SIDE:
+            logger.info(
+                f"Skipping {ticker}: already {side_count} open {'YES' if signal.direction == 1 else 'NO'} positions on this ticker"
+            )
             return
 
         current_exposure = self._monitor.get_current_exposure()
@@ -337,8 +348,6 @@ class KronosV2:
         # h. Place order (or simulate in paper mode)
         trade_id = str(uuid.uuid4())
         side = "yes" if signal.direction == 1 else "no"
-        # "yes" contracts cost ask_cents; "no" contracts cost (100 - bid_cents).
-        fill_price_cents = best_ask_cents if signal.direction == 1 else (100 - best_bid_cents)
         if config.PAPER_TRADING:
             logger.info(
                 f"[PAPER] Simulated fill: {ticker} {side} {result.kelly_contracts}@{fill_price_cents}¢ "

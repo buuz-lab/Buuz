@@ -158,6 +158,19 @@ class PortfolioMonitor:
         except redis.RedisError:
             return sum(1 for p in self._positions.values() if p.ticker == ticker)
 
+    def ticker_direction_count(self, ticker: str, direction: int) -> int:
+        try:
+            raw = self._redis.hgetall(OPEN_POSITIONS_KEY)
+            return sum(
+                1 for v in raw.values()
+                if (d := json.loads(v)).get("ticker") == ticker and d.get("direction") == direction
+            )
+        except redis.RedisError:
+            return sum(
+                1 for p in self._positions.values()
+                if p.ticker == ticker and p.direction == direction
+            )
+
     def get_daily_pnl(self) -> float:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         try:
