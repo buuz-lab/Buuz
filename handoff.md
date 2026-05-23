@@ -12,11 +12,11 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## Current Progress
 
-**As of 2026-05-23 ~06:10 UTC: 89 training-ready rows. System is live and running.**
+**As of 2026-05-23 ~06:35 UTC: 98 training-ready rows. System is live and running.**
 
 - `PAPER_TRADING=true` in `.env`
-- **~43 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-02 (~9.5 days).**
-- Stats at this session: 304 total trades / 89 training-ready rows, 177W / 125L (59%), Net P&L: +$289.63.
+- **~44 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~9.3 days).**
+- Stats at this session: 311 total trades / 98 training-ready rows, 177W / 134L (56%), Net P&L: +$148.50.
 - System is **running** (PID changes on restart — check `pgrep -f main.py`).
 - **OKX outage 14:20–21:00+ PDT 2026-05-22.** Watchdog fired ERROR continuously. Trades during
   this window fired on stale (zero) features. LKG fix addresses this for future outages.
@@ -98,11 +98,11 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## Files Touched / Created
 
-### This session (2026-05-23 — per-ticker position cap)
+### This session (2026-05-23 — per-ticker position cap + Redis-backed count)
 
 | File | Change |
 |------|--------|
-| `btc_kalshi_system/portfolio/monitor.py` | Added `ticker_position_count(ticker) -> int` method — counts open positions for a specific ticker. |
+| `btc_kalshi_system/portfolio/monitor.py` | Added `ticker_position_count(ticker) -> int` — first counts via Redis `hgetall` (cross-process accurate), falls back to in-memory on `RedisError`. |
 | `main.py` | Added `MAX_POSITIONS_PER_TICKER = 3` constant. Added gate before pre-trade checklist: skips market if `ticker_position_count(ticker) >= 3`. |
 
 **Why:** Without this cap the system was averaging-down into every price dip on the same
@@ -113,7 +113,17 @@ cap didn't trigger because each trade was small in dollar terms at low prices. T
 per market" behavior that previously existed was emergent from the exposure math at typical
 prices (~50¢), not an explicit rule. This commit makes it explicit.
 
-**Commit:** `2e7480f`
+**Redis read is mandatory:** The initial implementation used `self._positions` (in-memory).
+This failed because multiple stale main.py processes (PIDs from prior sessions) were running
+simultaneously, each with their own in-memory dict — so each process saw only its own
+positions and the cap was effectively per-process. Fix: read directly from `portfolio:open_positions`
+Redis hash on every `ticker_position_count` call. This is authoritative across all processes.
+
+**Stale process gotcha:** Always verify only one main.py is running: `pgrep -af main.py`.
+If multiple appear, `kill -9` all but the newest, then restart the newest so it reloads
+Redis state cleanly. Stale processes from prior sessions can persist indefinitely.
+
+**Commits:** `2e7480f` (initial cap), `82375d3` (Redis-backed count)
 
 ### This session (2026-05-22, late evening — Coinglass + Kraken fallbacks)
 
@@ -206,6 +216,10 @@ prices (~50¢), not an explicit rule. This commit makes it explicit.
   not the strict 6-column filter.
 - **Gate 2 starts in SHADOW mode after loading a model.** Set
   `REGIME_GATE2_ENFORCING=true` only after observing ~50 trades. Default `false`.
+- **Always check for stale main.py processes before starting.** Run `pgrep -af main.py`
+  — if more than one appears, `kill -9` all but the newest, then restart so it reloads
+  Redis cleanly. Stale processes from prior sessions persist indefinitely and each
+  maintains its own in-memory position state, breaking the per-ticker cap.
 - **`dump.rdb` is in git but must NOT be staged in commits.** Stage code files
   explicitly. Same for `trades.db.bak.*`.
 - **`prev_oi` in `DerivativesFeed` is an instance attribute.** One false-zero
