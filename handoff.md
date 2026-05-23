@@ -12,11 +12,11 @@ The pipeline is fully instrumented — just waiting on data volume.
 
 ## Current Progress
 
-**As of 2026-05-23 ~09:22 UTC: 104 training-ready rows. System is live and running.**
+**As of 2026-05-23 ~09:39 UTC: 107 training-ready rows. System is live and running.**
 
 - `PAPER_TRADING=true` in `.env`
-- **~45 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~8.7 days).**
-- Stats at this session: 319 total trades / 104 training-ready rows, 178W / 139L (56%), Net P&L: +$62.83.
+- **~45.7 trades/day resolved rate. Expected to hit 500 training-ready rows ~2026-06-01 (~8.6 days).**
+- Stats at this session: 321 total trades / 107 training-ready rows, 180W / 140L (56%), Net P&L: +$64.87.
 - System is **running** (PID changes on restart — check `pgrep -f main.py`).
 - **OKX outage 14:20–21:00+ PDT 2026-05-22.** Watchdog fired ERROR continuously. Trades during
   this window fired on stale (zero) features. LKG fix addresses this for future outages.
