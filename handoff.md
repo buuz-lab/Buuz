@@ -15,9 +15,10 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - `PAPER_TRADING=true` in `.env`
 - **~54 trades/day. 500 rows by ~June 2.**
 - Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
-- System running on PID 55789 — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
-- Latest commit: `4072ee4` (feature/20-features-position-monitor branch — **restart main.py after merging**)
+- System running on PID 60865 — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
+- Latest commit: `43f1c53` (main, pushed to GitHub)
 - Test suite: **275 passing**
+- Merged `feature/20-features-position-monitor` → `main` (fast-forward, 6 commits, 747 lines across 8 files). Restarted clean — DerivativesFeed writing all 21 features, paper trading mode active, no errors.
 
 **All phases complete:**
 - Phase 0: CVD soft gate (Gate 7)
@@ -153,7 +154,9 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 5. **After ~50 shadow trades with regime model live:** Flip `PAPER_TRADING=false` in `.env` and restart to go live.
 
-6. **Post-go-live (deferred):** Kalshi intra-cycle YES momentum (needs new polling infra). Slippage gate for 15min markets (needs 200+ spread samples first). Gate 8 candle_progress gate deferred — only 33/384 trades have candle_progress populated, zero above 0.85.
+6. **Post-go-live (deferred):** Kalshi intra-cycle YES momentum (needs new polling infra). Slippage gate for 15min markets (needs 200+ spread samples first).
+
+   **Gate 8 (candle_progress / UTC dark gate) — DEFERRED until more data:** Only 33/384 trades have `candle_progress` populated, zero above 0.85. Revisit once we have ≥200 trades with valid candle_progress values. Do not implement until data density justifies it.
 
 ---
 
