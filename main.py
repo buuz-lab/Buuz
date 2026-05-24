@@ -13,6 +13,7 @@ from loguru import logger
 
 from btc_kalshi_system.data.brti_aggregator import BRTIAggregator
 from btc_kalshi_system.data.derivatives_feed import DerivativesFeed
+from btc_kalshi_system.data.deribit_options_feed import DeribitOptionsFeed
 from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, GeminiFeed, KrakenFeed
 from btc_kalshi_system.data.feature_store import FeatureStore
 from btc_kalshi_system.execution.kelly import KellySizer
@@ -110,6 +111,14 @@ _TRADES_COLUMN_MIGRATIONS = [
     ("tape_speed_tpm",           "REAL"),
     ("exit_reason",              "TEXT"),
     ("large_print_direction",    "REAL"),
+    # Session 6: Deribit options features (22-27)
+    ("atm_iv",                   "REAL DEFAULT NULL"),
+    ("iv_rv_spread",             "REAL DEFAULT NULL"),
+    ("pcr_oi",                   "REAL DEFAULT NULL"),
+    ("term_structure_slope",     "REAL DEFAULT NULL"),
+    ("skew_25d",                 "REAL DEFAULT NULL"),
+    ("kalshi_spread_normalized", "REAL DEFAULT NULL"),
+    ("deribit_stale",            "INTEGER DEFAULT 1"),
 ]
 
 _CREATE_TRADE_SNAPSHOTS_TABLE = """
@@ -264,6 +273,7 @@ class KronosV2:
         agg = BRTIAggregator()
         feeds = [CoinbaseFeed(), KrakenFeed(), BitstampFeed(), GeminiFeed()]
         deriv = DerivativesFeed()
+        deribit_feed = DeribitOptionsFeed()
 
         await asyncio.gather(
             feeds[0].run(queues[0]),
@@ -273,6 +283,7 @@ class KronosV2:
             agg.run(queues),
             self._store.run(agg.out_queue),
             deriv.run(),
+            deribit_feed.run(),
             self._main_loop(),
             self._regime_watchdog(),
             self._position_monitor.run(),
@@ -404,9 +415,11 @@ class KronosV2:
             logger.debug(f"Empty orderbook for {ticker}, skipping")
             return
 
-        # e. Inject current Kalshi mid-price so fusion._regime_features() can
-        #    compute kalshi_implied_prob for the signal and the training row.
+        # e. Inject current Kalshi mid-price and bid-ask spread so fusion._regime_features()
+        #    can compute kalshi_implied_prob and kalshi_spread_normalized.
         mid_cents = (best_bid_cents + best_ask_cents) / 2.0
+        kalshi_spread_normalized = (best_ask_cents - best_bid_cents) / 100.0
+        self._fusion.update_kalshi_spread(kalshi_spread_normalized)
         self._fusion.update_kalshi_mid(mid_cents)
 
         # f. Signal
@@ -588,6 +601,35 @@ class KronosV2:
                     for k, v in derived.items():
                         if k not in ctx:
                             ctx[k] = v
+            except Exception:
+                pass
+
+            # Merge options features from DeribitOptionsFeed
+            try:
+                opts_raw = r.get("options:features")
+                if opts_raw:
+                    opts = json.loads(opts_raw)
+                    ctx.update({k: v for k, v in opts.items() if k not in ctx})
+                else:
+                    opts_lkg_raw = r.get("options:features:lkg")
+                    if opts_lkg_raw:
+                        opts_lkg = json.loads(opts_lkg_raw)
+                        age_s = _time.time() - opts_lkg.pop("_lkg_written_at", _time.time())
+                        logger.warning(
+                            f"options:features expired — using LKG "
+                            f"({age_s / 3600:.1f}h old); row will be deribit_stale"
+                        )
+                        opts_lkg["_deribit_lkg"] = True
+                        ctx.update({k: v for k, v in opts_lkg.items() if k not in ctx})
+            except Exception:
+                pass
+
+            # Derive iv_rv_spread from merged context (requires both sources present)
+            try:
+                atm_iv = ctx.get("atm_iv")
+                rv = ctx.get("brti_volatility_1h")
+                if atm_iv is not None and rv is not None and rv > 0:
+                    ctx["iv_rv_spread"] = float(atm_iv) - float(rv)
             except Exception:
                 pass
 
@@ -808,12 +850,15 @@ class KronosV2:
                     kalshi_implied_prob, funding_window_proximity,
                     trend_slope_1h, trend_r2_1h,
                     hourly_sr_proximity, range_breakout_flag, tape_speed_tpm,
-                    large_print_direction
+                    large_print_direction,
+                    atm_iv, iv_rv_spread, pcr_oi, term_structure_slope,
+                    skew_25d, kalshi_spread_normalized, deribit_stale
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
                     ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -853,6 +898,13 @@ class KronosV2:
                     feats.get("range_breakout_flag"),
                     feats.get("tape_speed_tpm"),
                     feats.get("large_print_direction"),
+                    feats.get("atm_iv"),
+                    feats.get("iv_rv_spread"),
+                    feats.get("pcr_oi"),
+                    feats.get("term_structure_slope"),
+                    feats.get("skew_25d"),
+                    feats.get("kalshi_spread_normalized"),
+                    1 if signal.deribit_stale else 0,
                 ),
             )
             self._db.commit()

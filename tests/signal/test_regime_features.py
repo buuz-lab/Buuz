@@ -78,7 +78,7 @@ def _make_engine(
 def test_cvd_velocity_cold_start_returns_zeros_and_stale():
     """Fewer than 5 CVD entries → velocity=0, acceleration=0, stale=True."""
     engine = _make_engine(cvd_entries=[(_time.time() - 60, 0.1), (_time.time(), 0.2)])
-    features, stale = engine._regime_features()
+    features, stale, _ = engine._regime_features()
     assert features["cvd_velocity"] == pytest.approx(0.0)
     assert features["cvd_acceleration"] == pytest.approx(0.0)
     assert stale is True
@@ -100,7 +100,7 @@ def test_cvd_velocity_math():
         (0.6, now),         # now
     ]
     engine = _make_engine(cvd_entries=entries)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     # velocity = (cvd_now - cvd_5m_ago) / 5 = (0.6 - 0.1) / 5
     assert features["cvd_velocity"] == pytest.approx((0.6 - 0.1) / 5.0, abs=1e-6)
 
@@ -112,7 +112,7 @@ def test_cvd_five_entries_not_stale():
     engine = _make_engine(cvd_entries=entries, ctx={
         "funding_rate": 0.0001, "cvd_normalized": 0.3, "kalshi_mid_cents": 55.0
     })
-    features, stale = engine._regime_features()
+    features, stale, _ = engine._regime_features()
     # CVD buffer has 5 entries — not cold. brti_momentum and kalshi present → not stale
     # (stale may still be True if ctx is not fully populated, but CVD alone won't cause it)
     # Just verify velocity is non-zero / computable (not forced to 0.0 cold-start)
@@ -126,7 +126,7 @@ def test_brti_momentum_5min_correct():
     df5 = _make_df5(n=10, base_price=100.0, slope=1.0)
     # close[-1] = 109.0, close[-2] = 108.0
     engine = _make_engine(df5=df5)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     expected = 109.0 / 108.0 - 1.0
     assert features["brti_momentum_5min"] == pytest.approx(expected, rel=1e-6)
 
@@ -136,7 +136,7 @@ def test_brti_momentum_15min_correct():
     df5 = _make_df5(n=10, base_price=100.0, slope=1.0)
     # close[-1] = 109.0, close[-4] = 106.0
     engine = _make_engine(df5=df5)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     expected = 109.0 / 106.0 - 1.0
     assert features["brti_momentum_15min"] == pytest.approx(expected, rel=1e-6)
 
@@ -145,7 +145,7 @@ def test_brti_momentum_insufficient_data_returns_zeros_and_stale():
     """< 4 rows → momentum = 0.0 and stale = True."""
     df5 = _make_df5(n=3)
     engine = _make_engine(df5=df5)
-    features, stale = engine._regime_features()
+    features, stale, _ = engine._regime_features()
     assert features["brti_momentum_5min"] == pytest.approx(0.0)
     assert features["brti_momentum_15min"] == pytest.approx(0.0)
     assert stale is True
@@ -157,7 +157,7 @@ def test_trend_slope_positive_for_rising_closes():
     """Perfectly rising close series → slope > 0."""
     df5 = _make_df5(n=15, slope=10.0)  # each candle +10
     engine = _make_engine(df5=df5)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert features["trend_slope_1h"] > 0.0
 
 
@@ -165,7 +165,7 @@ def test_trend_r2_perfect_linear_is_one():
     """Perfectly linear close series → R² = 1.0."""
     df5 = _make_df5(n=15, slope=1.0)
     engine = _make_engine(df5=df5)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert features["trend_r2_1h"] == pytest.approx(1.0, abs=1e-6)
 
 
@@ -173,7 +173,7 @@ def test_trend_slope_flat_series_near_zero():
     """Flat close series → slope ≈ 0 and R² ≈ 0."""
     df5 = _make_df5(n=15, slope=0.0)
     engine = _make_engine(df5=df5)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert abs(features["trend_slope_1h"]) < 1e-9
     # R² undefined when ss_tot ≈ 0 — should return 0.0
     assert features["trend_r2_1h"] == pytest.approx(0.0, abs=1e-6)
@@ -187,7 +187,7 @@ def test_hourly_sr_proximity_at_support_is_zero():
     # Override close of df5 to equal the support level
     df5 = _make_df5(n=15, base_price=90000.0, slope=0.0)
     engine = _make_engine(df5=df5, df1h=df1h)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert features["hourly_sr_proximity"] == pytest.approx(0.0, abs=1e-6)
 
 
@@ -196,14 +196,14 @@ def test_hourly_sr_proximity_at_resistance_is_one():
     df1h = _make_df1h(lo=90000.0, hi=100000.0)
     df5 = _make_df5(n=15, base_price=100000.0, slope=0.0)
     engine = _make_engine(df5=df5, df1h=df1h)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert features["hourly_sr_proximity"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_hourly_sr_proximity_in_unit_interval():
     """sr_proximity must always be in [0, 1]."""
     engine = _make_engine()
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert 0.0 <= features["hourly_sr_proximity"] <= 1.0
 
 
@@ -222,7 +222,7 @@ def test_range_breakout_flag_bullish_breakout_is_positive():
         "volume": [0.0] * 5, "amount": [0.0] * 5,
     }, index=idx)
     engine = _make_engine(df5=df5)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert features["range_breakout_flag"] > 0.0
 
 
@@ -238,7 +238,7 @@ def test_range_breakout_flag_bearish_breakout_is_negative():
         "volume": [0.0] * 5, "amount": [0.0] * 5,
     }, index=idx)
     engine = _make_engine(df5=df5)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert features["range_breakout_flag"] < 0.0
 
 
@@ -254,7 +254,7 @@ def test_range_breakout_flag_inside_box_is_zero():
         "volume": [0.0] * 5, "amount": [0.0] * 5,
     }, index=idx)
     engine = _make_engine(df5=df5)
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert features["range_breakout_flag"] == pytest.approx(0.0)
 
 
@@ -269,7 +269,7 @@ def test_funding_window_proximity_at_settlement_is_one():
     with patch("btc_kalshi_system.signal.fusion.datetime") as mock_dt:
         mock_dt.now.return_value = fixed_dt
         mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
-        features, _ = engine._regime_features()
+        features, _, _ = engine._regime_features()
     assert features["funding_window_proximity"] == pytest.approx(1.0, abs=1e-6)
 
 
@@ -282,7 +282,7 @@ def test_funding_window_proximity_at_midpoint_is_zero():
     with patch("btc_kalshi_system.signal.fusion.datetime") as mock_dt:
         mock_dt.now.return_value = fixed_dt
         mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
-        features, _ = engine._regime_features()
+        features, _, _ = engine._regime_features()
     assert features["funding_window_proximity"] == pytest.approx(0.0, abs=1e-6)
 
 
@@ -291,7 +291,7 @@ def test_funding_window_proximity_at_midpoint_is_zero():
 def test_kalshi_implied_prob_missing_sets_stale():
     """kalshi_mid_cents absent → implied_prob = 0.5 and stale = True."""
     engine = _make_engine(ctx={"funding_rate": 0.0001, "cvd_normalized": 0.3})
-    features, stale = engine._regime_features()
+    features, stale, _ = engine._regime_features()
     assert features["kalshi_implied_prob"] == pytest.approx(0.5)
     assert stale is True
 
@@ -301,7 +301,7 @@ def test_kalshi_implied_prob_correct_conversion():
     engine = _make_engine(ctx={
         "funding_rate": 0.0001, "cvd_normalized": 0.3, "kalshi_mid_cents": 65.0
     })
-    features, _ = engine._regime_features()
+    features, _, _ = engine._regime_features()
     assert features["kalshi_implied_prob"] == pytest.approx(0.65)
 
 
@@ -314,7 +314,7 @@ def test_cvd_stale_buffer_marks_stale_and_zeros_velocity():
     entries = [(0.1, old_ts - 400), (0.2, old_ts - 300), (0.3, old_ts - 200),
                (0.4, old_ts - 100), (0.5, old_ts)]
     engine = _make_engine(cvd_entries=entries)
-    features, stale = engine._regime_features()
+    features, stale, _ = engine._regime_features()
     assert features["cvd_velocity"] == pytest.approx(0.0)
     assert features["cvd_acceleration"] == pytest.approx(0.0)
     assert stale is True
@@ -330,7 +330,7 @@ def test_cvd_fresh_buffer_within_threshold_not_stale_from_buffer():
     engine = _make_engine(cvd_entries=entries, ctx={
         "funding_rate": 0.0001, "cvd_normalized": 0.3, "kalshi_mid_cents": 55.0,
     })
-    features, stale = engine._regime_features()
+    features, stale, _ = engine._regime_features()
     # Buffer check passes; velocity should be non-zero
     assert isinstance(features["cvd_velocity"], float)
     assert features["cvd_velocity"] != pytest.approx(0.0)

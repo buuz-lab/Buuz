@@ -26,6 +26,13 @@ _FEATURE_ORDER = [
     "range_breakout_flag",
     "tape_speed_tpm",
     "large_print_direction",
+    # Features 22-27: Deribit options + Kalshi spread (session 6)
+    "atm_iv",
+    "iv_rv_spread",
+    "pcr_oi",
+    "term_structure_slope",
+    "skew_25d",
+    "kalshi_spread_normalized",
 ]
 
 

@@ -92,6 +92,13 @@ _FEATURE_COLS = [
     "range_breakout_flag",
     "tape_speed_tpm",
     "large_print_direction",
+    # Features 22-27: Deribit options + Kalshi spread (session 6)
+    "atm_iv",
+    "iv_rv_spread",
+    "pcr_oi",
+    "term_structure_slope",
+    "skew_25d",
+    "kalshi_spread_normalized",
 ]
 
 _FEATURE_COLS_LEGACY = [
@@ -120,12 +127,15 @@ _EXTRA_FILTERS_20 = """AND cvd_velocity IS NOT NULL
   AND funding_window_proximity IS NOT NULL
   AND large_print_direction IS NOT NULL"""
 
-def _build_query(legacy: bool) -> str:
+_EXTRA_FILTERS_27 = _EXTRA_FILTERS_20 + "\n  AND deribit_stale = 0\n  AND atm_iv IS NOT NULL"
+
+def _build_query(legacy: bool, use_27: bool = False) -> str:
     if legacy:
         cols = ", ".join(_FEATURE_COLS_LEGACY)
         return _QUERY_TEMPLATE.format(cols=cols, extra_filters="")
     cols = ", ".join(_FEATURE_COLS)
-    return _QUERY_TEMPLATE.format(cols=cols, extra_filters=_EXTRA_FILTERS_20)
+    extra = _EXTRA_FILTERS_27 if use_27 else _EXTRA_FILTERS_20
+    return _QUERY_TEMPLATE.format(cols=cols, extra_filters=extra)
 
 
 def parse_args() -> argparse.Namespace:

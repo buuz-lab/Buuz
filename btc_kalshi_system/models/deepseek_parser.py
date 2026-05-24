@@ -71,6 +71,14 @@ DERIVATIVES
 - Large-print direction: {large_print} (-1.0=whale selling, +1.0=whale buying)
 - 1h volatility: {volatility}
 
+OPTIONS MARKET (Deribit)
+- ATM implied vol (near-term): {atm_iv}
+- IV vs realized vol spread: {iv_rv_spread} (positive=options expensive vs realised, negative=vol cheap)
+- Put/call ratio (OI): {pcr_oi} (>1.0=put-heavy positioning, <1.0=call-dominated)
+- Vol term structure: {term_structure_slope} (positive=contango/normal, negative=backwardation/stress)
+- 25Δ skew: {skew_25d} (negative=puts at premium=downside hedging, positive=call premium)
+- Kalshi bid-ask spread: {kalshi_spread}¢ (wide=uncertain/thin market, narrow=consensus)
+
 SENTIMENT & POSITIONING
 - Fear & Greed Index: {fear_greed}
 - Kalshi implied probability: {kalshi_prob} (prediction market's UP probability)
@@ -227,6 +235,25 @@ class DeepSeekContextParser:
         else:
             recent_outcomes = "n/a (insufficient history)"
 
+        # Options market fields
+        atm_iv_raw = market_context.get("atm_iv")
+        atm_iv_str = f"{float(atm_iv_raw):.1f}%" if atm_iv_raw is not None else "n/a"
+
+        iv_rv_raw = market_context.get("iv_rv_spread")
+        iv_rv_str = f"{float(iv_rv_raw):.2f}" if iv_rv_raw is not None else "n/a"
+
+        pcr_raw = market_context.get("pcr_oi")
+        pcr_str = f"{float(pcr_raw):.2f}" if pcr_raw is not None else "n/a"
+
+        tss_raw = market_context.get("term_structure_slope")
+        tss_str = f"{float(tss_raw):.3f}" if tss_raw is not None else "n/a"
+
+        skew_raw = market_context.get("skew_25d")
+        skew_str = f"{float(skew_raw):.3f}" if skew_raw is not None else "n/a"
+
+        spread_raw = market_context.get("kalshi_spread_normalized")
+        kalshi_spread_str = f"{float(spread_raw) * 100:.1f}" if spread_raw is not None else "n/a"
+
         return _PROMPT_TEMPLATE.format(
             utc_time=utc_time,
             session=session,
@@ -244,6 +271,12 @@ class DeepSeekContextParser:
             cvd_velocity=fmt_f("cvd_velocity", decimals=4),
             large_print=fmt_f("large_print_direction", decimals=2),
             volatility=fmt_f("brti_volatility_1h"),
+            atm_iv=atm_iv_str,
+            iv_rv_spread=iv_rv_str,
+            pcr_oi=pcr_str,
+            term_structure_slope=tss_str,
+            skew_25d=skew_str,
+            kalshi_spread=kalshi_spread_str,
             fear_greed=fear_greed,
             kalshi_prob=kalshi_prob,
             volume_ratio=volume_ratio,

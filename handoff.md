@@ -10,6 +10,30 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-24 session 6: Deribit Options Feed COMPLETE — 6 new regime features (22–27) live, `deribit_stale=0` accumulation started.**
+
+**Session 6 design decisions (implemented 2026-05-24):**
+- **Feature expansion: 21 → 27 features.** Six new features added to `_FEATURE_ORDER` (features 22–27):
+  - `atm_iv` — Deribit near-term at-the-money implied vol (interpolated between bracketing strikes, annualised %)
+  - `iv_rv_spread` — ATM IV minus `brti_volatility_1h` (derived in `_get_market_context`, not written by the feed)
+  - `pcr_oi` — Put/call ratio by open interest for the near expiry (neutral fallback = 1.0)
+  - `term_structure_slope` — (far_atm_iv − near_atm_iv) / near_atm_iv; positive = contango, negative = backwardation
+  - `skew_25d` — 25Δ put IV minus 25Δ call IV; negative = market hedging downside
+  - `kalshi_spread_normalized` — Kalshi bid-ask spread in cents / 100; injected inline in `_process_market` via new `update_kalshi_spread()` on SignalFusionEngine
+- **New file:** `btc_kalshi_system/data/deribit_options_feed.py` — isolated async feed, no auth, Deribit public REST
+  - Redis: `options:features` (TTL 600s) + `options:features:lkg` (TTL 14400s = 4h)
+  - Flat-interval retry on failure (same pattern as derivatives_feed); stateless REST, no reconnect complexity
+  - On failure: skip write, let key expire, LKG survives, rows get `deribit_stale=1`
+- **Stale policy: STRICT.** New `deribit_stale INTEGER DEFAULT 1` column in `trades.db`. Historical rows default to 1. `train_regime.py` adds `_EXTRA_FILTERS_27` requiring `deribit_stale = 0` alongside the existing NOT NULL checks. Old 21-feature retrain path unchanged.
+- **Integration (Approach A):** `_get_market_context()` reads and merges `options:features` into the context dict (same pattern as `regime:derived_context`). `_deribit_lkg=True` marker added when LKG is used — triggers `deribit_stale=True` in `_regime_features()`.
+- **ATM IV computation:** interpolate between two bracketing strikes; skip expiries with < 3 days to expiry; filter strikes with OI < 10.
+- **Term structure:** compare ATM IV for nearest two valid expiries (both must have ≥ 3 days remaining).
+- **25Δ skew:** use `spot × (1 ± 0.25 × atm_iv/100 × sqrt(T))` to approximate 25Δ strike locations, then look up nearest listed IV. `skew_25d = put_iv − call_iv`.
+- **DeepSeek prompt:** add OPTIONS MARKET section between DERIVATIVES and SENTIMENT.
+- **Feature order contract:** `_FEATURE_ORDER` in `regime_model.py`, `_FEATURE_COLS` in `train_regime.py`, and `_regime_features()` dict in `fusion.py` must all be updated consistently (existing test `test_feature_order` enforces this).
+
+---
+
 **As of 2026-05-24 session 5: DeepSeek enrichment complete — ~15 real signals now sent to DeepSeek V3. System live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
@@ -36,26 +60,30 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 **Go-live thresholds (both must be met):**
 - ≥ 500 resolved trades total → calibrator (~May 27, nearly there)
 - ≥ 500 new 21-feature training rows → regime model (~June 2)
+- ≥ 500 rows with `deribit_stale=0` → 27-feature model retrain (deferred; collect after Deribit feed is live)
 
 **Timeline:**
 | Date | Milestone |
 |------|-----------|
 | ~May 26–27 | 500 total trades → train calibrator |
-| ~June 2–3 | 500 new 21-feature rows → `python3 scripts/train_regime.py` |
-| ~June 2–3 | Deploy regime model → flip `REGIME_GATE2_ENFORCING=true` |
+| ~June 2–3 | 500 new 21-feature rows → `python3 scripts/train_regime.py` (21-feature model) |
+| ~June 2–3 | Deploy 21-feature regime model → flip `REGIME_GATE2_ENFORCING=true` |
 | ~June 5–7 | ~50 shadow trades observed → flip `PAPER_TRADING=false` |
+| ~June 10+ | Deribit feed live long enough → retrain with 27-feature model when ≥500 `deribit_stale=0` rows |
 
 ---
 
 ## Architecture
 
-**21-feature `_FEATURE_ORDER`** (identical in `regime_model.py`, `train_regime.py`, and `fusion._regime_features()` dict keys — mismatch silently corrupts training):
+**27-feature `_FEATURE_ORDER`** (identical in `regime_model.py`, `train_regime.py`, and `fusion._regime_features()` dict keys — mismatch silently corrupts training). Features 1–21 are live; features 22–27 added in session 6:
 ```
 funding_rate, funding_rate_trend, oi_delta_pct, cvd_normalized, basis_spread_pct,
 brti_volatility_1h, cvd_velocity, cvd_acceleration, brti_momentum_5min,
 brti_momentum_15min, candle_progress, hour_sin, hour_cos, kalshi_implied_prob,
 funding_window_proximity, trend_slope_1h, trend_r2_1h, hourly_sr_proximity,
-range_breakout_flag, tape_speed_tpm, large_print_direction
+range_breakout_flag, tape_speed_tpm, large_print_direction,
+atm_iv, iv_rv_spread, pcr_oi, term_structure_slope, skew_25d,
+kalshi_spread_normalized
 ```
 
 **Feature sources:**
@@ -68,6 +96,9 @@ range_breakout_flag, tape_speed_tpm, large_print_direction
 | `large_print_direction` | `derivatives_feed.py` fetch_trades (net dir from prints > 2× avg size) |
 | `kalshi_implied_prob` | `market_context["kalshi_mid_cents"]` / 100 |
 | `funding_window_proximity` | UTC time proximity to 00/08/16h funding |
+| `atm_iv`, `pcr_oi`, `term_structure_slope`, `skew_25d` | `deribit_options_feed.py` → Redis `options:features` |
+| `iv_rv_spread` | Derived in `_get_market_context()`: `atm_iv − brti_volatility_1h` |
+| `kalshi_spread_normalized` | Inline in `_process_market()` via `update_kalshi_spread()` |
 
 **Dynamic Kelly shrinks** (multiplicative, applied after existing cap):
 | Condition | Shrink |
@@ -108,7 +139,31 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ---
 
-## Files Touched This Session (2026-05-24, session 5)
+## Files Touched This Session (2026-05-24, session 6)
+
+**Session 6 (Deribit Options Feed — features 22–27):**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/data/deribit_options_feed.py` | **New** — async Deribit public REST feed; computes `atm_iv`, `pcr_oi`, `term_structure_slope`, `skew_25d`; writes `options:features` (TTL 600s) + `options:features:lkg` (TTL 14400s); retries on failure |
+| `btc_kalshi_system/signal/fusion.py` | Added `update_kalshi_spread()`; added 6 new features (22–27) at bottom of `_regime_features()`; changed return type to `tuple[dict, bool, bool]` (adds `deribit_stale`); added `deribit_stale: bool` to `TradingSignal` |
+| `btc_kalshi_system/models/regime_model.py` | Added 6 new keys to `_FEATURE_ORDER` (now 27 entries) |
+| `scripts/train_regime.py` | Added 6 new keys to `_FEATURE_COLS` (now 27); added `_EXTRA_FILTERS_27`; updated `_build_query()` to accept `use_27` flag |
+| `btc_kalshi_system/models/deepseek_parser.py` | Added OPTIONS MARKET section to `_PROMPT_TEMPLATE` and 6 corresponding format vars in `_build_prompt()` |
+| `btc_kalshi_system/execution/position_monitor.py` | Updated `_regime_features()` unpack to 3-tuple |
+| `main.py` | Import + instantiate `DeribitOptionsFeed`; add to `asyncio.gather()`; `update_kalshi_spread()` call before `update_kalshi_mid()`; `options:features` + LKG merge in `_get_market_context()`; `iv_rv_spread` derivation; 7 new `_TRADES_COLUMN_MIGRATIONS` entries; 7 new columns in `_record_trade_sqlite()` INSERT |
+| `tests/data/test_deribit_options_feed.py` | **New** — 11 TDD tests for DeribitOptionsFeed (feed writes, LKG, expiry filtering, pcr_oi, interpolation, failure handling) |
+| `tests/signal/test_fusion_deribit_features.py` | **New** — 11 TDD tests for fusion deribit features (27-key check, stale flags, kalshi_spread, pcr_oi default) |
+| `tests/signal/test_feature_order.py` | Updated to 27 features; 3-tuple unpack |
+| `tests/signal/test_regime_features.py` | Updated all `_regime_features()` unpacks to 3-tuple |
+| `tests/models/test_regime_model.py` | Updated `_synthetic_features` to 27 cols; added 6 new keys to `_feature_dict()` |
+| `handoff.md` | Session 6 update |
+
+**Test suite: 312 passing (was 290).**
+
+**`deribit_stale=0` rows begin accumulating from 2026-05-24. Do NOT retrain the 27-feature model until ≥500 `deribit_stale=0` rows are collected.**
+
+---
 
 **Session 4 (StratifiedEdgeTracker + CalibrationDriftMonitor bugfixes):**
 
@@ -160,6 +215,8 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 ---
 
 ## Next Steps
+
+0. ✅ **Deribit Options Feed implemented (session 6).** Restart main.py now: `ps aux | grep "[Pp]ython.*main\.py"` → kill PID → restart. Within 5 minutes verify: `redis-cli get options:features` returns a JSON dict with `atm_iv`, `pcr_oi`, `term_structure_slope`, `skew_25d`; `redis-cli ttl options:features` returns 400–600; `options:features:lkg` also populated. After one trade cycle, `trades.db` will have 7 new columns. **Do NOT retrain the 27-feature model until ≥500 `deribit_stale=0` rows accumulated — this is separate from the 21-feature retrain gate.**
 
 1. **Wire StratifiedEdgeTracker into Gate 4 after ~50 trades.** After session 4 fixes land, run ~50 trades and check `self._stratified_edge.summary()`. Wire `is_above_threshold(signal.deepseek_regime)` into Gate 4 — if a regime has fewer than 1 recorded trade, `is_above_threshold` returns `False` (blocks). **Important:** do NOT compare `summary()` against `self._edge_tracker.current_edge()` for parity — they measure the same metric (realized edge) but over different populations (global vs per-regime). A difference is expected and not a bug. Instead, validate that `"unknown"` bucket has low count and non-`"unknown"` buckets are accumulating.
 
@@ -232,6 +289,20 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 - **CalibrationDriftMonitor has a ZeroDivision guard in `_recompute_window()`.** If Redis partially writes (total_count written, history lost), `_history` can be empty while `_total_count % 20 == 0` on restart, triggering `_mean_brier` on an empty deque. Guard: `if not self._history: return` at the top of `_recompute_window()`.
 
 - **`regime:derived_context` (TTL 120s)** — written by `_process_market` after each signal; DeepSeek reads it one cycle later via `_get_market_context`. One-cycle lag on momentum/trend/range data is intentional and acceptable.
+
+- **Deribit feed uses LKG with 4h TTL** (`options:features:lkg`). When LKG is used, context dict carries `_deribit_lkg=True` — `_regime_features()` must detect this and set `deribit_stale=True`. Unlike `regime:features` (LKG rows still trade), Deribit LKG rows trade but are excluded from the 27-feature retrain (strict stale policy).
+
+- **`deribit_stale INTEGER DEFAULT 1`** — ALL historical rows start as stale. The 27-feature retrain requires `features_stale=0 AND deribit_stale=0`. The 21-feature retrain (running first) only requires `features_stale=0`. Do not conflate the two stale flags.
+
+- **`iv_rv_spread` is NOT written by `deribit_options_feed.py`** — it is a derived field computed in `_get_market_context()` from `ctx["atm_iv"] - ctx["brti_volatility_1h"]`. Both keys must be present; if either is missing, `iv_rv_spread` defaults to 0.0 and `deribit_stale=True`.
+
+- **Deribit ATM IV is annualised percentage** (e.g., `55.2` = 55.2% annualised). Do not divide by 100 when writing to Redis — store as the raw percentage float. `_regime_features()` reads and uses it as-is.
+
+- **Skip Deribit expiries with < 3 days to expiry** — front-month IV spikes near expiry due to theta, not regime. Standard expiry is Friday. Parse expiry from instrument name (e.g., `BTC-27JUN25-100000-C` → 27 Jun 2025).
+
+- **`pcr_oi` neutral fallback = 1.0** (not 0.0). A ratio of 1.0 means equal put and call positioning — true neutral. 0.0 would imply zero put OI which is misleading.
+
+- **`_FEATURE_COLS_LEGACY` in `train_regime.py` stays at 6 features.** Do not modify it. The legacy path is for very old rows — not related to the Deribit expansion.
 
 - **`dump.rdb` and `trades.db.bak.*` must NOT be committed.**
 

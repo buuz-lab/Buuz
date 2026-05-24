@@ -67,6 +67,10 @@ class TradingSignal:
     # this signal was built. Stale rows are still tradeable in bootstrap mode
     # (regime features are unused), but they must be filtered out before training.
     features_stale: bool = False
+    # True when Deribit options data was absent or an LKG fallback was used.
+    # Rows with deribit_stale=True are excluded from the 27-feature retrain.
+    # Independent from features_stale — do NOT combine them.
+    deribit_stale: bool = False
 
 
 class SignalFusionEngine:
@@ -91,6 +95,9 @@ class SignalFusionEngine:
 
     def update_kalshi_mid(self, mid_cents: float) -> None:
         self._market_context["kalshi_mid_cents"] = mid_cents
+
+    def update_kalshi_spread(self, spread: float) -> None:
+        self._market_context["kalshi_spread_normalized"] = spread
 
     def get_signal(self, timeframe: str, strike: float) -> Optional[TradingSignal]:
         ds = self._deepseek.get_current_context(self._market_context)
@@ -123,7 +130,7 @@ class SignalFusionEngine:
         # Compute features ONCE per signal so the values we feed the regime model
         # match the values we persist in trades.db. This is the snapshot used both
         # at inference time and (later) as the training row for this trade.
-        regime_features, features_stale = self._regime_features()
+        regime_features, features_stale, deribit_stale = self._regime_features()
 
         try:
             regime_result = self._regime.get_regime(regime_features)
@@ -183,21 +190,21 @@ class SignalFusionEngine:
             timestamp=datetime.now(timezone.utc),
             regime_features=regime_features,
             features_stale=features_stale,
+            deribit_stale=deribit_stale,
         )
 
-    def _regime_features(self) -> tuple[dict, bool]:
+    def _regime_features(self) -> tuple[dict, bool, bool]:
         """
-        Build the 20-feature dict consumed by RegimeModel.get_regime() and the
+        Build the 27-feature dict consumed by RegimeModel.get_regime() and the
         feature-store at training time.
 
-        Returns (features, stale). `stale=True` means one or more required upstream
-        inputs (funding/OI/CVD/basis from Redis, CVD ring buffer, BRTI OHLCV, or
-        Kalshi mid price) were missing or insufficient when this snapshot was built.
-        Stale rows must be filtered out before training the RegimeModel.
+        Returns (features, stale, deribit_stale).
+        - stale=True when regime:features Redis key was missing/LKG used.
+        - deribit_stale=True when options:features was absent or LKG used.
+        Both flags are independent — do NOT combine them.
 
         We intentionally still return numeric values (0.0 fallback) even when
         stale, so XGBoost.predict_proba() doesn't blow up in the trained path.
-        The caller is expected to consult `stale` to decide whether to bail out.
         """
         ctx = self._market_context
         # stale=True when: (a) ctx is empty — Redis key was expired and no LKG
@@ -337,6 +344,21 @@ class SignalFusionEngine:
         # --- Feature 21: large_print_direction ---
         large_print_direction = float(ctx.get("large_print_direction", 0.0))
 
+        # --- Features 22-27: Deribit options + Kalshi spread ---
+        atm_iv = float(ctx.get("atm_iv") or 0.0)
+        iv_rv_spread = float(ctx.get("iv_rv_spread") or 0.0)
+        pcr_oi = float(ctx.get("pcr_oi") or 1.0)          # 1.0 not 0.0 — neutral ratio
+        term_structure_slope = float(ctx.get("term_structure_slope") or 0.0)
+        skew_25d = float(ctx.get("skew_25d") or 0.0)
+        kalshi_spread_normalized = float(self._market_context.get("kalshi_spread_normalized") or 0.0)
+
+        # deribit_stale=True when: (a) options:features absent (Deribit down and LKG expired),
+        # OR (b) LKG was used (_deribit_lkg=True in ctx). Independent from stale.
+        deribit_stale = (
+            ctx.get("atm_iv") is None
+            or ctx.get("_deribit_lkg", False)
+        )
+
         features = {
             "funding_rate":             funding_rate,
             "funding_rate_trend":       funding_rate_trend,
@@ -359,5 +381,11 @@ class SignalFusionEngine:
             "range_breakout_flag":      range_breakout_flag,
             "tape_speed_tpm":           tape_speed_tpm,
             "large_print_direction":    large_print_direction,
+            "atm_iv":                   atm_iv,
+            "iv_rv_spread":             iv_rv_spread,
+            "pcr_oi":                   pcr_oi,
+            "term_structure_slope":     term_structure_slope,
+            "skew_25d":                 skew_25d,
+            "kalshi_spread_normalized": kalshi_spread_normalized,
         }
-        return features, stale
+        return features, stale, deribit_stale
