@@ -44,6 +44,7 @@ _FEATURE_COLS = [
     "hourly_sr_proximity",
     "range_breakout_flag",
     "tape_speed_tpm",
+    "large_print_direction",
 ]
 
 # Legacy 6-feature filter: used to count post-instrumentation rows (all rows since
@@ -58,13 +59,14 @@ _LEGACY_FILTER = (
     " AND brti_volatility_1h IS NOT NULL"
 )
 
-# 20-feature filter: rows eligible for regime model training.
+# 21-feature filter: rows eligible for regime model training.
 _FRESH_FILTER = (
     _LEGACY_FILTER
     + " AND cvd_velocity IS NOT NULL"
     + " AND brti_momentum_5min IS NOT NULL"
     + " AND kalshi_implied_prob IS NOT NULL"
     + " AND funding_window_proximity IS NOT NULL"
+    + " AND large_print_direction IS NOT NULL"
 )
 
 
@@ -123,8 +125,8 @@ def section_training_progress(conn: sqlite3.Connection) -> None:
     print(f"Total rows in trades.db        : {total_rows}")
     print(f"Post-instrumentation rows      : {post_instr}  (funding_rate IS NOT NULL)")
     print(f"Training-ready (6-feature)     : {training_ready_6}  (features_stale=0, resolved)")
-    print(f"Training-ready (20-feature)    : {training_ready_20}  (all new cols NOT NULL)")
-    print(f"Progress to 500 (20-feature)   : {_progress_bar(training_ready_20, 500)}")
+    print(f"Training-ready (21-feature)    : {training_ready_20}  (all new cols NOT NULL)")
+    print(f"Progress to 500 (21-feature)   : {_progress_bar(training_ready_20, 500)}")
 
     # Resolved rate over last 7 days (or full window if less data)
     recent_resolved = conn.execute(
