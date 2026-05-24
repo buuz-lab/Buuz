@@ -10,14 +10,14 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-24 session 2: 12 training-ready 21-feature rows. System live and collecting.**
+**As of 2026-05-24 session 5: DeepSeek enrichment complete — ~15 real signals now sent to DeepSeek V3. System live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
 - **~54 trades/day. 500 rows by ~June 2.**
 - Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
 - System running on PID 55789 — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
 - Latest commit: `4072ee4` (feature/20-features-position-monitor branch — **restart main.py after merging**)
-- Test suite: **275 passing**
+- Test suite: **282 passing**
 
 **All phases complete:**
 - Phase 0: CVD soft gate (Gate 7)
@@ -29,6 +29,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Phase 3a: P&L formula explicit direction branch (auditable, math unchanged)
 - Phase 3b: CalibrationDriftMonitor (rolling 20-trade Brier score drift detection)
 - Phase 3c: StratifiedEdgeTracker (per-regime edge observability, not yet gating)
+- Session 5: DeepSeek enrichment — switch to V3 (deepseek-chat), ~15-signal prompt, Fear & Greed, volume ratio, composite price, derived context ring, recent outcomes
 
 **Go-live thresholds (both must be met):**
 - ≥ 500 resolved trades total → calibrator (~May 27, nearly there)
@@ -105,21 +106,19 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ---
 
-## Files Touched This Session (2026-05-24)
+## Files Touched This Session (2026-05-24, session 5)
 
 | File | Change |
 |------|--------|
-| `btc_kalshi_system/data/derivatives_feed.py` | Removed 403-only branch; re-resolve exchange on ANY fetch exception |
-| `btc_kalshi_system/portfolio/monitor.py` | P&L explicit direction branch in `resolve_trade()`; `deepseek_regime: str = "unknown"` added to `OpenPosition` |
-| `btc_kalshi_system/signal/calibration_drift_monitor.py` | **New** — rolling 20-trade Brier score drift detector |
-| `btc_kalshi_system/signal/stratified_edge_tracker.py` | **New** — per-regime rolling edge tracker (4 regimes, 50-trade deques) |
-| `tests/portfolio/test_monitor.py` | 2 new NO-bet P&L tests |
-| `tests/signal/test_calibration_drift_monitor.py` | **New** — 6 tests (incl. Redis restart test) |
-| `tests/signal/test_stratified_edge_tracker.py` | **New** — 4 tests |
-| `main.py` | Wire CalibrationDriftMonitor + StratifiedEdgeTracker; pass `deepseek_regime` to `OpenPosition` |
-| `handoff.md` | exit_reason diagnosis + session update |
+| `btc_kalshi_system/models/deepseek_parser.py` | Switch to deepseek-chat (V3); add `response_format`+`max_tokens`; replace prompt with 15-signal template; rewrite `_build_prompt` |
+| `btc_kalshi_system/data/fear_greed.py` | **New** — Fear & Greed fetcher with Redis caching (TTL 1h) |
+| `btc_kalshi_system/data/derivatives_feed.py` | Add `_fetch_volume_ratio()` + Fear & Greed call; write `volume_ratio_1h`, `fear_greed_value`, `fear_greed_label` to `regime:features` |
+| `main.py` | Move `composite_price` before `update_market_context`; write `regime:derived_context` (TTL 120s) after each signal; extend `_get_market_context` to merge derived context, fear_greed nested dict, recent Kalshi outcomes |
+| `tests/data/test_fear_greed.py` | **New** — 3 tests (cache hit, live fetch+cache write, failure→None) |
+| `tests/models/test_deepseek_parser.py` | Update `_good_context()`; update `test_prompt_includes_market_context_values`; add 4 new prompt tests (CVD, fear_greed, recent_outcomes, graceful n/a) |
+| `handoff.md` | Session 5 update |
 
-*(All prior session files documented in git log — see commits `befb381` and earlier.)*
+**Prior session files documented in git log — see commits `befb381` and earlier.**
 
 ---
 
@@ -169,7 +168,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Context / Gotchas
 
-- **Test suite: 259 pass.** `python3 -m pytest` from project root.
+- **Test suite: 282 pass.** `python3 -m pytest` from project root.
 
 - **Feature order is a 3-file contract.** `regime_model.py` / `train_regime.py` / `fusion._regime_features()` must match exactly. Test: `python3 -m pytest tests/ -k "feature_order"`.
 
@@ -196,6 +195,8 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 - **Loss streak Redis key:** `trading:loss_streak`. Integer. Cleared on win (`DELETE`), incremented on loss (`INCR`). Read by `PreTradeChecklist` before Kelly call.
 
 - **Stale rows excluded from training.** `features_stale=1` rows are written with real values (0.0 fallback) but excluded from regime model training. Currently ~10 stale rows (~6%) — frozen since last restart, no new stale rows being generated.
+
+- **`regime:derived_context` (TTL 120s)** — written by `_process_market` after each signal; DeepSeek reads it one cycle later via `_get_market_context`. One-cycle lag on momentum/trend/range data is intentional and acceptable.
 
 - **`dump.rdb` and `trades.db.bak.*` must NOT be committed.**
 
