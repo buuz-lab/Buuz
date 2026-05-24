@@ -129,6 +129,50 @@ def test_resolve_trade_loss_pnl():
     assert trade.outcome == 0
 
 
+def test_resolve_trade_no_bet_win():
+    mon = make_monitor()
+    # NO bet with direction=0: 10 contracts at 30 cents → win pays (100 - 30) / 100 * 10 = $7.00
+    pos = OpenPosition(
+        trade_id="trade-no-win",
+        ticker="KXBTC-25JUN-T95000",
+        timeframe="same_day",
+        direction=0,
+        strike=95000.0,
+        contracts=10,
+        entry_price_cents=30,
+        kelly_dollars=20.0,
+        timestamp=time.time(),
+    )
+    mon.add_position(pos)
+    trade = mon.resolve_trade("trade-no-win", outcome=1)
+    assert trade is not None
+    assert trade.pnl_dollars == pytest.approx(7.00)
+    assert trade.outcome == 1
+    assert trade.direction == 0
+
+
+def test_resolve_trade_no_bet_loss():
+    mon = make_monitor()
+    # NO bet with direction=0: 10 contracts at 30 cents → loss costs 0.30 * 10 = $3.00
+    pos = OpenPosition(
+        trade_id="trade-no-loss",
+        ticker="KXBTC-25JUN-T95000",
+        timeframe="same_day",
+        direction=0,
+        strike=95000.0,
+        contracts=10,
+        entry_price_cents=30,
+        kelly_dollars=20.0,
+        timestamp=time.time(),
+    )
+    mon.add_position(pos)
+    trade = mon.resolve_trade("trade-no-loss", outcome=0)
+    assert trade is not None
+    assert trade.pnl_dollars == pytest.approx(-3.00)
+    assert trade.outcome == 0
+    assert trade.direction == 0
+
+
 def test_resolve_trade_removes_from_open_positions():
     mon = make_monitor()
     mon.add_position(make_position())

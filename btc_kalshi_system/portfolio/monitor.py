@@ -118,10 +118,18 @@ class PortfolioMonitor:
         if position is None:
             return None
 
-        if outcome == 1:
-            pnl = position.contracts * (100 - position.entry_price_cents) / 100
+        if position.direction == 1:
+            # YES contract: paid fill_price_cents, collects 100¢ on win
+            if outcome == 1:
+                pnl = position.contracts * (100 - position.entry_price_cents) / 100
+            else:
+                pnl = -position.contracts * position.entry_price_cents / 100
         else:
-            pnl = -position.contracts * position.entry_price_cents / 100
+            # NO contract: paid fill_price_cents (= 100 - YES_bid), collects 100¢ on win
+            if outcome == 1:
+                pnl = position.contracts * (100 - position.entry_price_cents) / 100
+            else:
+                pnl = -position.contracts * position.entry_price_cents / 100
 
         trade = ResolvedTrade(
             trade_id=position.trade_id,
