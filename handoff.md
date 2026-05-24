@@ -10,14 +10,14 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-24 ~10:30 UTC: 12 training-ready 21-feature rows. System live and collecting.**
+**As of 2026-05-24 session 2: 12 training-ready 21-feature rows. System live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
 - **~54 trades/day. 500 rows by ~June 2.**
 - Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
 - System running on PID 55789 — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
-- Latest commit: `229b88b` (main branch, pushed to GitHub)
-- Test suite: **259 passing**
+- Latest commit: `4072ee4` (feature/20-features-position-monitor branch — **restart main.py after merging**)
+- Test suite: **275 passing**
 
 **All phases complete:**
 - Phase 0: CVD soft gate (Gate 7)
@@ -26,6 +26,9 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Phase 2b: `large_print_direction` (21st feature) + Dynamic Kelly (chop/tape/streak shrinks)
 - Bugfix: CVD ring buffer stale-timestamp detection
 - Bugfix: DerivativesFeed reconnection on any fetch failure (not just 403)
+- Phase 3a: P&L formula explicit direction branch (auditable, math unchanged)
+- Phase 3b: CalibrationDriftMonitor (rolling 20-trade Brier score drift detection)
+- Phase 3c: StratifiedEdgeTracker (per-regime edge observability, not yet gating)
 
 **Go-live thresholds (both must be met):**
 - ≥ 500 resolved trades total → calibrator (~May 27, nearly there)
@@ -107,30 +110,50 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 | File | Change |
 |------|--------|
 | `btc_kalshi_system/data/derivatives_feed.py` | Removed 403-only branch; re-resolve exchange on ANY fetch exception |
+| `btc_kalshi_system/portfolio/monitor.py` | P&L explicit direction branch in `resolve_trade()`; `deepseek_regime: str = "unknown"` added to `OpenPosition` |
+| `btc_kalshi_system/signal/calibration_drift_monitor.py` | **New** — rolling 20-trade Brier score drift detector |
+| `btc_kalshi_system/signal/stratified_edge_tracker.py` | **New** — per-regime rolling edge tracker (4 regimes, 50-trade deques) |
+| `tests/portfolio/test_monitor.py` | 2 new NO-bet P&L tests |
+| `tests/signal/test_calibration_drift_monitor.py` | **New** — 6 tests (incl. Redis restart test) |
+| `tests/signal/test_stratified_edge_tracker.py` | **New** — 4 tests |
+| `main.py` | Wire CalibrationDriftMonitor + StratifiedEdgeTracker; pass `deepseek_regime` to `OpenPosition` |
+| `handoff.md` | exit_reason diagnosis + session update |
 
-*(All prior session files documented in git log — see commits `57277f6` and earlier.)*
+*(All prior session files documented in git log — see commits `befb381` and earlier.)*
+
+---
+
+## Path to Going Live / Pre-go-live Checklist
+
+| Item | Status |
+|------|--------|
+| CalibrationDriftMonitor | ✅ COMPLETE — wired, tests passing |
+| StratifiedEdgeTracker | 🔄 IN PROGRESS — wired for observability; not yet gating |
+| Merge feature/20-features-position-monitor → main | ⬜ PENDING — restart main.py after merge |
 
 ---
 
 ## Next Steps
 
-1. **Wait for ~May 26–27:** Total resolved trades will hit 500 → train the calibrator. Check: `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL` — need ≥ 500.
+1. **Confirm StratifiedEdgeTracker parity with EdgeTracker on 50+ shared trades, then switch Gate 4 to use stratified edge for current regime.** After merging and running ~50 trades, compare `self._stratified_edge.summary()` vs `self._edge_tracker.current_edge()` — if they agree within noise, wire `is_above_threshold(signal.deepseek_regime)` into Gate 4.
 
-2. **Monitor 21-feature row accumulation daily:**
+2. **Wait for ~May 26–27:** Total resolved trades will hit 500 → train the calibrator. Check: `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL` — need ≥ 500.
+
+3. **Monitor 21-feature row accumulation daily:**
    ```
    python3 scripts/regime_health_check.py
    ```
    Need `Training-ready (21-feature): 500`. Target ~June 2 at current rate.
 
-3. **Train regime model when 21-feature rows ≥ 500:**
+4. **Train regime model when 21-feature rows ≥ 500:**
    ```
    python3 scripts/train_regime.py --dry-run
    ```
    Check Brier < 0.25, Kronos agreement > 55%. If sane, run without `--dry-run` → `models/regime.pkl`. Restart main.py. Gate 2 runs shadow mode by default — observe ~50 trades before flipping `REGIME_GATE2_ENFORCING=true`.
 
-4. **After ~50 shadow trades with regime model live:** Flip `PAPER_TRADING=false` in `.env` and restart to go live.
+5. **After ~50 shadow trades with regime model live:** Flip `PAPER_TRADING=false` in `.env` and restart to go live.
 
-5. **Post-go-live (deferred):** Kalshi intra-cycle YES momentum (needs new polling infra). Slippage gate for 15min markets (needs 200+ spread samples first).
+6. **Post-go-live (deferred):** Kalshi intra-cycle YES momentum (needs new polling infra). Slippage gate for 15min markets (needs 200+ spread samples first). Gate 8 candle_progress gate deferred — only 33/384 trades have candle_progress populated, zero above 0.85.
 
 ---
 
