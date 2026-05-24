@@ -10,16 +10,15 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-24 session 3: gate_rejections table live and verified writing rows. 12 training-ready 21-feature rows. System live and collecting.**
+**As of 2026-05-24 session 5: DeepSeek enrichment complete — ~15 real signals now sent to DeepSeek V3. System live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
 - **~54 trades/day. 500 rows by ~June 2.**
 - Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
-- System running on PID 61960 (restarted session 3 to pick up new schema) — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
-- Latest commit: `42f2548` (main, pushed to GitHub)
-- Test suite: **283 passing**
-- Merged `feature/20-features-position-monitor` → `main` (fast-forward, 6 commits, 747 lines across 8 files). Restarted clean — DerivativesFeed writing all 21 features, paper trading mode active, no errors.
-- **gate_rejections verified:** 2 rows written within first signal cycle post-restart. All 21 features captured in `features` JSON. `outcome=NULL`, `aged_out=0` correct on new rows. Schema confirmed: `aged_out` column added via migration (appears at end of schema as expected for ALTER TABLE ADD COLUMN).
+- System running on PID 61960 — confirm: `ps aux | grep "[Pp]ython.*main\.py"` (**restart main.py after this merge to pick up session 5 changes**)
+- Latest commit: merge of session 5 DeepSeek enrichment
+- Test suite: **290 passing**
+- gate_rejections verified (session 3): 2 rows written within first signal cycle post-restart, all 21 features captured.
 
 **All phases complete:**
 - Phase 0: CVD soft gate (Gate 7)
@@ -32,6 +31,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Phase 3b: CalibrationDriftMonitor (rolling 20-trade Brier score drift detection)
 - Phase 3c: StratifiedEdgeTracker (per-regime edge observability, not yet gating) — ✅ FIXED session 4: `"unknown"` bucket added, CalibrationDriftMonitor ZeroDivision guard added
 - Phase 3d: gate_rejections table — logs every blocked trade with full 21-feature vector + counterfactual outcome resolution ~15min later
+- Session 5: DeepSeek enrichment — switch to V3 (deepseek-chat), ~15-signal prompt, Fear & Greed, volume ratio, composite price, derived context ring, recent outcomes
 
 **Go-live thresholds (both must be met):**
 - ≥ 500 resolved trades total → calibrator (~May 27, nearly there)
@@ -108,7 +108,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ---
 
-## Files Touched This Session (2026-05-24)
+## Files Touched This Session (2026-05-24, session 5)
 
 **Session 4 (StratifiedEdgeTracker + CalibrationDriftMonitor bugfixes):**
 
@@ -136,17 +136,15 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 | File | Change |
 |------|--------|
-| `btc_kalshi_system/data/derivatives_feed.py` | Removed 403-only branch; re-resolve exchange on ANY fetch exception |
-| `btc_kalshi_system/portfolio/monitor.py` | P&L explicit direction branch in `resolve_trade()`; `deepseek_regime: str = "unknown"` added to `OpenPosition` |
-| `btc_kalshi_system/signal/calibration_drift_monitor.py` | **New** — rolling 20-trade Brier score drift detector |
-| `btc_kalshi_system/signal/stratified_edge_tracker.py` | **New** — per-regime rolling edge tracker (4 regimes, 50-trade deques) |
-| `tests/portfolio/test_monitor.py` | 2 new NO-bet P&L tests |
-| `tests/signal/test_calibration_drift_monitor.py` | **New** — 6 tests (incl. Redis restart test) |
-| `tests/signal/test_stratified_edge_tracker.py` | **New** — 4 tests |
-| `main.py` | Wire CalibrationDriftMonitor + StratifiedEdgeTracker; pass `deepseek_regime` to `OpenPosition` |
-| `handoff.md` | exit_reason diagnosis + session update |
+| `btc_kalshi_system/models/deepseek_parser.py` | Switch to deepseek-chat (V3); add `response_format`+`max_tokens`; replace prompt with 15-signal template; rewrite `_build_prompt` |
+| `btc_kalshi_system/data/fear_greed.py` | **New** — Fear & Greed fetcher with Redis caching (TTL 1h) |
+| `btc_kalshi_system/data/derivatives_feed.py` | Add `_fetch_volume_ratio()` + Fear & Greed call; write `volume_ratio_1h`, `fear_greed_value`, `fear_greed_label` to `regime:features` |
+| `main.py` | Move `composite_price` before `update_market_context`; write `regime:derived_context` (TTL 120s) after each signal; extend `_get_market_context` to merge derived context, fear_greed nested dict, recent Kalshi outcomes |
+| `tests/data/test_fear_greed.py` | **New** — 3 tests (cache hit, live fetch+cache write, failure→None) |
+| `tests/models/test_deepseek_parser.py` | Update `_good_context()`; update `test_prompt_includes_market_context_values`; add 4 new prompt tests (CVD, fear_greed, recent_outcomes, graceful n/a) |
+| `handoff.md` | Session 5 update |
 
-*(All prior session files documented in git log — see commits `befb381` and earlier.)*
+**Prior session files documented in git log — see commits `befb381` and earlier.**
 
 ---
 
@@ -199,7 +197,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Context / Gotchas
 
-- **Test suite: 259 pass.** `python3 -m pytest` from project root.
+- **Test suite: 290 pass.** `python3 -m pytest` from project root.
 
 - **Feature order is a 3-file contract.** `regime_model.py` / `train_regime.py` / `fusion._regime_features()` must match exactly. Test: `python3 -m pytest tests/ -k "feature_order"`.
 
@@ -232,6 +230,8 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 - **StratifiedEdgeTracker measures realized edge, not calibration.** `current_edge(regime)` = `mean(outcome - market_price)`. Read it as "are we buying at prices that beat the market in this regime?" The `predicted_prob` field is stored in Redis but never used in any computation — do not treat `current_edge` as a calibration metric.
 
 - **CalibrationDriftMonitor has a ZeroDivision guard in `_recompute_window()`.** If Redis partially writes (total_count written, history lost), `_history` can be empty while `_total_count % 20 == 0` on restart, triggering `_mean_brier` on an empty deque. Guard: `if not self._history: return` at the top of `_recompute_window()`.
+
+- **`regime:derived_context` (TTL 120s)** — written by `_process_market` after each signal; DeepSeek reads it one cycle later via `_get_market_context`. One-cycle lag on momentum/trend/range data is intentional and acceptable.
 
 - **`dump.rdb` and `trades.db.bak.*` must NOT be committed.**
 

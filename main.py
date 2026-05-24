@@ -339,14 +339,13 @@ class KronosV2:
         #    then always load the latest from Redis for this cycle.
         now = time.time()
         ctx = self._get_market_context()
+        composite_price = self._get_composite_price()
+        ctx["composite_price"] = composite_price
         if now - self._last_deepseek_refresh >= DEEPSEEK_REFRESH_SECONDS:
             self._last_deepseek_refresh = now
             logger.debug("DeepSeek context refreshed")
         # Always push the latest context once per cycle
         self._fusion.update_market_context(ctx)
-
-        # 4. Composite price
-        composite_price = self._get_composite_price()
 
         # 5. Active markets
         markets = self._get_active_markets()
@@ -415,6 +414,26 @@ class KronosV2:
         if signal is None:
             logger.debug(f"No signal for {ticker} (gated out)")
             return
+
+        # Write derived context features to Redis so the next DeepSeek refresh
+        # can include momentum/trend/range data (one-cycle lag is intentional).
+        _DERIVED_CONTEXT_FIELDS = (
+            "brti_momentum_5min", "brti_momentum_15min",
+            "trend_slope_1h", "trend_r2_1h", "range_breakout_flag",
+            "cvd_velocity", "cvd_acceleration", "tape_speed_tpm",
+        )
+        try:
+            derived = {k: signal.regime_features.get(k)
+                       for k in _DERIVED_CONTEXT_FIELDS
+                       if signal.regime_features.get(k) is not None}
+            if derived:
+                self._redis.set(
+                    "regime:derived_context",
+                    json.dumps(derived),
+                    ex=120,
+                )
+        except Exception:
+            pass
 
         # g. Pre-trade checklist
         fill_price_cents = best_ask_cents if signal.direction == 1 else (100 - best_bid_cents)
@@ -541,21 +560,58 @@ class KronosV2:
             r = _redis.from_url(config.REDIS_URL, decode_responses=True)
             raw_features = r.get("regime:features")
             if raw_features:
-                return json.loads(raw_features)
-            # Primary key expired (exchange outage) — try last-known-good fallback.
-            # LKG features are still better than zeros for Gate 2 inference, but
-            # the row is still marked stale (features_stale=1) so it never enters
-            # RegimeModel training. _lkg sentinel is checked in fusion._regime_features().
-            lkg_raw = r.get("regime:features:lkg")
-            if lkg_raw:
-                lkg = json.loads(lkg_raw)
-                age_s = _time.time() - lkg.pop("_lkg_written_at", _time.time())
-                logger.warning(
-                    f"regime:features expired — falling back to LKG features "
-                    f"({age_s / 3600:.1f}h old); row will be marked stale"
-                )
-                lkg["_lkg"] = True
-                return lkg
+                ctx = json.loads(raw_features)
+            else:
+                # Primary key expired (exchange outage) — try last-known-good fallback.
+                # LKG features are still better than zeros for Gate 2 inference, but
+                # the row is still marked stale (features_stale=1) so it never enters
+                # RegimeModel training. _lkg sentinel is checked in fusion._regime_features().
+                lkg_raw = r.get("regime:features:lkg")
+                if lkg_raw:
+                    lkg = json.loads(lkg_raw)
+                    age_s = _time.time() - lkg.pop("_lkg_written_at", _time.time())
+                    logger.warning(
+                        f"regime:features expired — falling back to LKG features "
+                        f"({age_s / 3600:.1f}h old); row will be marked stale"
+                    )
+                    lkg["_lkg"] = True
+                    ctx = lkg
+                else:
+                    ctx = {}
+
+            # Merge derived context (momentum/trend/range written by _process_market).
+            # Existing keys from regime:features take precedence; derived only fills gaps.
+            try:
+                derived_raw = r.get("regime:derived_context")
+                if derived_raw:
+                    derived = json.loads(derived_raw)
+                    for k, v in derived.items():
+                        if k not in ctx:
+                            ctx[k] = v
+            except Exception:
+                pass
+
+            # Build nested fear_greed dict from flat keys written by derivatives_feed.
+            if ctx.get("fear_greed_value") is not None:
+                ctx["fear_greed"] = {
+                    "value": ctx["fear_greed_value"],
+                    "label": ctx.get("fear_greed_label", ""),
+                }
+
+            # Recent Kalshi outcomes (last 5 resolved trades, chronological order).
+            try:
+                rows = self._db.execute(
+                    """SELECT direction, outcome FROM trades
+                       WHERE outcome IS NOT NULL
+                       ORDER BY rowid DESC LIMIT 5"""
+                ).fetchall()
+                ctx["recent_outcomes"] = [
+                    1 if row[1] == 1 else 0 for row in rows
+                ][::-1]
+            except Exception:
+                ctx["recent_outcomes"] = []
+
+            return ctx
         except Exception as exc:
             logger.debug(f"Failed to read regime features from Redis: {exc}")
         return {}

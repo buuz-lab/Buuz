@@ -8,6 +8,7 @@ import redis
 from loguru import logger
 
 from config import COINGLASS_API_KEY, REDIS_URL
+from btc_kalshi_system.data.fear_greed import fetch_fear_greed
 
 _REFRESH_INTERVAL = 300   # 5 minutes
 _FEATURES_TTL = 600       # 2x refresh interval — tolerates one missed cycle without expiring
@@ -112,10 +113,13 @@ class DerivativesFeed:
         results = await asyncio.gather(
             self._fetch_funding_and_oi(),
             self._fetch_trades_data(),
+            self._fetch_volume_ratio(),
         )
         curr_funding, trend, oi_delta = results[0]
         cvd, basis, large_print = results[1]
+        volume_ratio = results[2]
         vol = self._brti_volatility_1h()
+        fg = fetch_fear_greed(self._redis)
         return {
             "funding_rate":          curr_funding,
             "funding_rate_trend":    trend,
@@ -124,6 +128,9 @@ class DerivativesFeed:
             "basis_spread_pct":      basis,
             "brti_volatility_1h":    vol,
             "large_print_direction": large_print,
+            "volume_ratio_1h":       volume_ratio,
+            "fear_greed_value":      fg["value"] if fg else None,
+            "fear_greed_label":      fg["label"] if fg else None,
         }
 
     async def _fetch_funding_and_oi(self) -> tuple[float, float, float]:
@@ -281,6 +288,21 @@ class DerivativesFeed:
     def _get_brti_estimate(self) -> float | None:
         val = self._redis.get("brti:resolution_estimate")
         return float(val) if val else None
+
+    async def _fetch_volume_ratio(self) -> float:
+        """1h volume as a multiple of the 30-day hourly average. 1.0 = normal."""
+        try:
+            candles = await self._exchange.fetch_ohlcv(_SYMBOL, "1h", limit=721)
+            if len(candles) < 30:
+                return 1.0
+            avg_volume = sum(c[5] for c in candles[:-1]) / len(candles[:-1])
+            if avg_volume == 0:
+                return 1.0
+            current_volume = candles[-1][5]
+            return round(current_volume / avg_volume, 3)
+        except Exception as exc:
+            logger.warning(f"DerivativesFeed: volume_ratio fetch failed — {exc}")
+            return 1.0
 
     # ── Redis write ────────────────────────────────────────────────────────────
 

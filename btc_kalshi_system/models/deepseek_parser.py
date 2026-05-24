@@ -23,7 +23,7 @@ import requests
 from loguru import logger
 
 _DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
-_DEEPSEEK_MODEL = "deepseek-reasoner"
+_DEEPSEEK_MODEL = "deepseek-chat"
 _DEFAULT_CACHE_MINUTES = 15
 _HTTP_TIMEOUT_SECONDS = 30
 
@@ -49,23 +49,45 @@ SAFE_DEFAULT: dict[str, Any] = {
     "notes": "Falling back to safe default — DeepSeek call failed or returned malformed data.",
 }
 
-_PROMPT_TEMPLATE = """You are a BTC market regime classifier for an automated trading system. Given the following market context, output ONLY a JSON object with no preamble, no explanation, and no markdown fencing.
+_PROMPT_TEMPLATE = """You are a BTC market regime classifier for an automated
+15-minute prediction market trading system. Given the market snapshot below,
+output ONLY a JSON object with no preamble, no explanation, no markdown.
 
-Context:
-- Funding rate: {funding_rate}% (trend: {funding_trend})
+Market snapshot — {utc_time} UTC ({session}):
+
+PRICE & MOMENTUM
+- BTC price: {btc_price}
+- 5-min momentum: {momentum_5min}
+- 15-min momentum: {momentum_15min}
+- 1h trend: slope={trend_slope}, fit R²={trend_r2} (1.0=perfect trend, 0.0=noise)
+- Range: {range_breakout} (+1=breaking up, -1=breaking down, 0=ranging/inside)
+
+DERIVATIVES
+- Funding rate: {funding_rate}% (4h trend: {funding_trend}%)
 - Open interest change (4h): {oi_delta}%
-- Recent liquidations (1h): ${liquidations_usd}M
 - Basis spread: {basis_spread}%
-- Recent headlines: {headlines}
-- Upcoming macro events (2h): {macro_events}
+- CVD (buy/sell pressure): {cvd} (-1.0=heavy selling, +1.0=heavy buying)
+- CVD velocity: {cvd_velocity} (rate of change)
+- Large-print direction: {large_print} (-1.0=whale selling, +1.0=whale buying)
+- 1h volatility: {volatility}
 
-IMPORTANT — suppress_trading rules:
-- Set suppress_trading=false for ALL normal market conditions, including calm, ranging, low-volatility, or uncertain markets. The trading system is DESIGNED to operate in these conditions.
-- Set suppress_trading=true ONLY for extraordinary, imminent market-disrupting events: active exchange hacks, ongoing flash crashes, imminent Fed/FOMC announcements within 30 minutes, confirmed major protocol exploits, or similar one-in-a-month events.
-- Low funding rate, flat OI, quiet headlines = suppress_trading=false (this is normal and tradeable).
-- Insufficient data = suppress_trading=false (default to allowing trades; do not suppress on uncertainty alone).
+SENTIMENT & POSITIONING
+- Fear & Greed Index: {fear_greed}
+- Kalshi implied probability: {kalshi_prob} (prediction market's UP probability)
+- Volume vs 30-day avg: {volume_ratio}
 
-Output exactly this JSON structure:
+RECENT KALSHI OUTCOMES (last 5 resolved 15-min markets):
+{recent_outcomes}
+
+IMPORTANT suppress_trading rules:
+- Set suppress_trading=false for ALL normal conditions including ranging,
+  low-volatility, high-uncertainty, or thin data. This system trades in
+  these conditions by design.
+- Set suppress_trading=true ONLY for extraordinary imminent events: active
+  exchange hacks, ongoing flash crashes, FOMC announcement within 30 minutes,
+  confirmed major exploits. One-in-a-month events only.
+
+Output exactly this JSON:
 {{
   "regime": "trending_up" | "trending_down" | "ranging" | "high_uncertainty",
   "confidence": 0.0-1.0,
@@ -142,18 +164,90 @@ class DeepSeekContextParser:
         return (time.time() - self._cache_time) < (self._cache_minutes * 60)
 
     def _build_prompt(self, market_context: dict) -> str:
-        # Key names must match what DerivativesFeed writes to Redis (regime:features).
-        # Previous mismatch (e.g. "funding_trend" vs "funding_rate_trend") caused
-        # DeepSeek to receive "n/a" for most fields and suppress trading due to
-        # "insufficient data" — even though the data existed in Redis.
+        from datetime import datetime, timezone
+
+        utc_now = datetime.now(timezone.utc)
+        hour = utc_now.hour
+        if 0 <= hour < 8:
+            session = "Asian session"
+        elif 8 <= hour < 13:
+            session = "London session"
+        elif 13 <= hour < 17:
+            session = "NY session"
+        else:
+            session = "NY close / off-hours"
+        utc_time = utc_now.strftime("%H:%M")
+
+        def fmt_pct(ctx, key):
+            val = ctx.get(key)
+            if val is None or val == "n/a":
+                return "n/a"
+            try:
+                return f"{float(val):+.3%}"
+            except (TypeError, ValueError):
+                return "n/a"
+
+        def fmt_f(key, decimals=4):
+            val = market_context.get(key)
+            if val is None or val == "n/a":
+                return "n/a"
+            try:
+                return f"{float(val):.{decimals}f}"
+            except (TypeError, ValueError):
+                return "n/a"
+
+        btc_raw = market_context.get("composite_price")
+        btc_price = f"${float(btc_raw):,.0f}" if btc_raw else "n/a"
+
+        range_raw = market_context.get("range_breakout_flag")
+        if range_raw is None or range_raw == "n/a":
+            range_breakout = "n/a"
+        else:
+            v = float(range_raw)
+            range_breakout = "+1 (breaking up)" if v > 0.5 else (
+                "-1 (breaking down)" if v < -0.5 else "0 (ranging)"
+            )
+
+        fg = market_context.get("fear_greed")
+        if fg and isinstance(fg, dict):
+            fear_greed = f"{fg.get('value', 'n/a')} ({fg.get('label', 'n/a')})"
+        else:
+            fear_greed = "n/a"
+
+        vr = market_context.get("volume_ratio_1h")
+        volume_ratio = f"{float(vr):.2f}x 30-day avg" if vr else "n/a"
+
+        kp = market_context.get("kalshi_implied_prob")
+        kalshi_prob = f"{float(kp):.0%}" if kp else "n/a"
+
+        recent = market_context.get("recent_outcomes", [])
+        if recent:
+            labels = ["UP" if o == 1 else "DOWN" for o in recent]
+            recent_outcomes = " → ".join(labels) + f" ({sum(recent)}/{len(recent)} UP)"
+        else:
+            recent_outcomes = "n/a (insufficient history)"
+
         return _PROMPT_TEMPLATE.format(
-            funding_rate=market_context.get("funding_rate", "n/a"),
-            funding_trend=market_context.get("funding_rate_trend", "n/a"),
-            oi_delta=market_context.get("oi_delta_pct", "n/a"),
-            liquidations_usd=market_context.get("liquidations_usd", "n/a"),  # not yet collected
-            basis_spread=market_context.get("basis_spread_pct", "n/a"),
-            headlines=market_context.get("headlines", []),       # not yet collected
-            macro_events=market_context.get("macro_events", []), # not yet collected
+            utc_time=utc_time,
+            session=session,
+            btc_price=btc_price,
+            momentum_5min=fmt_pct(market_context, "brti_momentum_5min"),
+            momentum_15min=fmt_pct(market_context, "brti_momentum_15min"),
+            trend_slope=fmt_f("trend_slope_1h"),
+            trend_r2=fmt_f("trend_r2_1h", decimals=2),
+            range_breakout=range_breakout,
+            funding_rate=fmt_f("funding_rate"),
+            funding_trend=fmt_f("funding_rate_trend"),
+            oi_delta=fmt_f("oi_delta_pct", decimals=2),
+            basis_spread=fmt_f("basis_spread_pct"),
+            cvd=fmt_f("cvd_normalized", decimals=3),
+            cvd_velocity=fmt_f("cvd_velocity", decimals=4),
+            large_print=fmt_f("large_print_direction", decimals=2),
+            volatility=fmt_f("brti_volatility_1h"),
+            fear_greed=fear_greed,
+            kalshi_prob=kalshi_prob,
+            volume_ratio=volume_ratio,
+            recent_outcomes=recent_outcomes,
         )
 
     def _call_api(self, prompt: str) -> str:
@@ -166,6 +260,8 @@ class DeepSeekContextParser:
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
+            "response_format": {"type": "json_object"},
+            "max_tokens": 400,
         }
         response = requests.post(
             _DEEPSEEK_URL,

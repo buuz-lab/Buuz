@@ -14,12 +14,12 @@ def _good_context() -> dict:
     """Synthetic market context the parser would receive."""
     return {
         "funding_rate": 0.012,
-        "funding_trend": 0.002,
-        "oi_delta": 0.05,
-        "liquidations_usd": 1.2,
-        "basis_spread": -0.001,
-        "headlines": ["BTC ETF inflow $300M", "Fed minutes due Wed"],
-        "macro_events": ["FOMC 2pm Wednesday"],
+        "funding_rate_trend": 0.002,
+        "oi_delta_pct": 0.05,
+        "basis_spread_pct": -0.001,
+        "cvd_normalized": 0.3,
+        "brti_volatility_1h": 0.004,
+        "large_print_direction": 0.1,
     }
 
 
@@ -140,9 +140,35 @@ def test_safe_default_not_cached():
 def test_prompt_includes_market_context_values():
     parser = DeepSeekContextParser(api_key="test-key")
     prompt = parser._build_prompt(_good_context())
-    assert "0.012" in prompt or "1.2" in prompt  # at least one numeric value passed through
-    assert "BTC ETF inflow $300M" in prompt
-    assert "FOMC 2pm Wednesday" in prompt
+    assert "0.0120" in prompt  # funding_rate value present
+
+
+def test_prompt_contains_cvd():
+    parser = DeepSeekContextParser(api_key="test-key")
+    ctx = {"cvd_normalized": 0.7}
+    prompt = parser._build_prompt(ctx)
+    assert "0.700" in prompt
+
+
+def test_prompt_contains_fear_greed():
+    parser = DeepSeekContextParser(api_key="test-key")
+    ctx = {"fear_greed": {"value": 72, "label": "Greed"}}
+    prompt = parser._build_prompt(ctx)
+    assert "72" in prompt
+    assert "Greed" in prompt
+
+
+def test_prompt_contains_recent_outcomes():
+    parser = DeepSeekContextParser(api_key="test-key")
+    ctx = {"recent_outcomes": [1, 1, 0, 1]}
+    prompt = parser._build_prompt(ctx)
+    assert "UP → UP → DOWN → UP" in prompt
+
+
+def test_prompt_graceful_na():
+    parser = DeepSeekContextParser(api_key="test-key")
+    prompt = parser._build_prompt({})
+    assert "n/a" in prompt
 
 
 # ── Construction ──────────────────────────────────────────────────────────────
