@@ -27,6 +27,7 @@ from btc_kalshi_system.portfolio.circuit_breaker import CircuitBreaker
 from btc_kalshi_system.portfolio.monitor import OpenPosition, PortfolioMonitor
 from btc_kalshi_system.signal.calibration_drift_monitor import CalibrationDriftMonitor
 from btc_kalshi_system.signal.edge_tracker import EdgeTracker
+from btc_kalshi_system.signal.stratified_edge_tracker import StratifiedEdgeTracker
 from btc_kalshi_system.signal.fusion import SignalFusionEngine
 import config
 
@@ -172,6 +173,7 @@ class KronosV2:
         )
         self._edge_tracker = EdgeTracker()
         self._drift_monitor = CalibrationDriftMonitor()
+        self._stratified_edge = StratifiedEdgeTracker()
         self._kelly = KellySizer()
         self._checklist = PreTradeChecklist(self._kelly)
         self._router = KalshiClientRouter()
@@ -448,6 +450,7 @@ class KronosV2:
             kelly_dollars=result.kelly_dollars,
             timestamp=time.time(),
             calibrated_prob=signal.calibrated_prob,
+            deepseek_regime=signal.deepseek_regime,
         )
         self._monitor.add_position(position)
 
@@ -802,6 +805,12 @@ class KronosV2:
                     market_price=position.entry_price_cents / 100,
                 )
                 self._drift_monitor.record(position.calibrated_prob, outcome)
+                self._stratified_edge.record(
+                    position.deepseek_regime,
+                    position.calibrated_prob,
+                    outcome,
+                    position.entry_price_cents / 100,
+                )
                 if self._drift_monitor.is_drifting():
                     _baseline = self._drift_monitor.baseline_brier()
                     _baseline_str = f"{_baseline:.4f}" if _baseline is not None else "unknown"

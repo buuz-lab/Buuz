@@ -27,6 +27,7 @@ class OpenPosition:
     kelly_dollars: float
     timestamp: float
     calibrated_prob: float = 0.0
+    deepseek_regime: str = "unknown"
 
 
 @dataclass
