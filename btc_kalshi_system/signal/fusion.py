@@ -229,6 +229,13 @@ class SignalFusionEngine:
             cvd_velocity = 0.0
             cvd_acceleration = 0.0
             stale = True
+        elif time.time() - entries[-1][1] > 360:
+            # Most recent entry is > 1.5× the 240s refresh interval — feed has missed
+            # at least one full cycle. Count check passes but timestamps are stale,
+            # so velocity math would use wrong time windows. Mark stale.
+            cvd_velocity = 0.0
+            cvd_acceleration = 0.0
+            stale = True
         else:
             now_ts = time.time()
 

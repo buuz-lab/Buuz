@@ -299,4 +299,5 @@ class DerivativesFeed:
         # recency. Keep last 90 entries (~90 minutes at one write per minute).
         cvd_value = features.get("cvd_normalized", 0.0)
         self._redis.zadd("regime:cvd_history", {str(float(cvd_value)): time.time()})
-        self._redis.zremrangebyrank("regime:cvd_history", 0, -91)  # keep last 90
+        self._redis.zremrangebyscore("regime:cvd_history", 0, time.time() - 7200)  # drop entries > 2h old
+        self._redis.zremrangebyrank("regime:cvd_history", 0, -91)  # keep last 90 by count

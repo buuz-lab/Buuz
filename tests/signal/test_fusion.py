@@ -46,8 +46,10 @@ def _make_feature_store_mock():
         return df1h if tf == "1h" else df5
     feature_store.get_ohlcv.side_effect = ohlcv_side_effect
 
-    # CVD ring buffer — return 5 entries so cold-start stale is NOT triggered
-    now = 1704067200.0  # fixed timestamp for reproducibility
+    # CVD ring buffer — return 5 entries so cold-start stale is NOT triggered.
+    # Use time.time() so the freshness check (> 360s) doesn't fire.
+    import time as _time
+    now = _time.time()
     feature_store._redis.zrange.return_value = [
         (b"0.1", now - 600),
         (b"0.2", now - 480),

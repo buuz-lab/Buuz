@@ -303,3 +303,34 @@ def test_kalshi_implied_prob_correct_conversion():
     })
     features, _ = engine._regime_features()
     assert features["kalshi_implied_prob"] == pytest.approx(0.65)
+
+
+# ── CVD buffer stale-timestamp detection ──────────────────────────────────────
+
+def test_cvd_stale_buffer_marks_stale_and_zeros_velocity():
+    """5 entries present but most recent is > 360s old → stale buffer, velocity=0."""
+    now = _time.time()
+    old_ts = now - 400  # 400s ago — beyond the 360s threshold
+    entries = [(0.1, old_ts - 400), (0.2, old_ts - 300), (0.3, old_ts - 200),
+               (0.4, old_ts - 100), (0.5, old_ts)]
+    engine = _make_engine(cvd_entries=entries)
+    features, stale = engine._regime_features()
+    assert features["cvd_velocity"] == pytest.approx(0.0)
+    assert features["cvd_acceleration"] == pytest.approx(0.0)
+    assert stale is True
+
+
+def test_cvd_fresh_buffer_within_threshold_not_stale_from_buffer():
+    """5 entries, most recent 300s old (within 360s threshold) → buffer not stale."""
+    now = _time.time()
+    entries = [
+        (0.1, now - 600), (0.2, now - 480), (0.3, now - 360),
+        (0.4, now - 240), (0.5, now - 300),
+    ]
+    engine = _make_engine(cvd_entries=entries, ctx={
+        "funding_rate": 0.0001, "cvd_normalized": 0.3, "kalshi_mid_cents": 55.0,
+    })
+    features, stale = engine._regime_features()
+    # Buffer check passes; velocity should be non-zero
+    assert isinstance(features["cvd_velocity"], float)
+    assert features["cvd_velocity"] != pytest.approx(0.0)
