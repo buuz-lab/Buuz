@@ -11,5 +11,5 @@ keys/
 logs/
 *.log
 dump.rdb
-*.db.bak.*
+*.db.bak*
 .claude/
