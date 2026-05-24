@@ -83,21 +83,20 @@ class DerivativesFeed:
                     success = True
                 except Exception as exc:
                     logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
-                    # If this exchange started geo-blocking mid-session, try to failover
-                    if "403" in str(exc) or "Forbidden" in str(exc):
-                        logger.warning("DerivativesFeed: 403 detected — attempting exchange failover")
-                        await self._exchange.close()
-                        self._exchange = None
-                        if not await self._resolve_exchange():
-                            # All exchanges unavailable right now — don't exit, keep
-                            # retrying so a temporary OKX maintenance window doesn't
-                            # permanently kill the feed for the rest of the session.
-                            logger.warning(
-                                "DerivativesFeed: all exchanges unavailable — "
-                                f"will retry in {_REFRESH_INTERVAL}s"
-                            )
-                            await asyncio.sleep(_REFRESH_INTERVAL)
-                            continue
+                    # Any failure may indicate a dead session (timeout, reset, rate limit,
+                    # geo-block, etc.) — always close and re-resolve to get a fresh instance.
+                    await self._exchange.close()
+                    self._exchange = None
+                    if not await self._resolve_exchange():
+                        # All exchanges unavailable right now — don't exit, keep
+                        # retrying so a temporary OKX maintenance window doesn't
+                        # permanently kill the feed for the rest of the session.
+                        logger.warning(
+                            "DerivativesFeed: all exchanges unavailable — "
+                            f"will retry in {_REFRESH_INTERVAL}s"
+                        )
+                        await asyncio.sleep(_REFRESH_INTERVAL)
+                        continue
                 # On success, refresh 60s early so the key (TTL=600s) is always
                 # renewed with headroom to spare even if the fetch runs long.
                 # On failure, wait the full interval before retrying.
