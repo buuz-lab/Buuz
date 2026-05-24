@@ -17,7 +17,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
 - System running on PID 61960 (restarted session 3 to pick up new schema) — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
 - Latest commit: `42f2548` (main, pushed to GitHub)
-- Test suite: **280 passing**
+- Test suite: **283 passing**
 - Merged `feature/20-features-position-monitor` → `main` (fast-forward, 6 commits, 747 lines across 8 files). Restarted clean — DerivativesFeed writing all 21 features, paper trading mode active, no errors.
 - **gate_rejections verified:** 2 rows written within first signal cycle post-restart. All 21 features captured in `features` JSON. `outcome=NULL`, `aged_out=0` correct on new rows. Schema confirmed: `aged_out` column added via migration (appears at end of schema as expected for ALTER TABLE ADD COLUMN).
 
@@ -30,7 +30,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Bugfix: DerivativesFeed reconnection on any fetch failure (not just 403)
 - Phase 3a: P&L formula explicit direction branch (auditable, math unchanged)
 - Phase 3b: CalibrationDriftMonitor (rolling 20-trade Brier score drift detection)
-- Phase 3c: StratifiedEdgeTracker (per-regime edge observability, not yet gating)
+- Phase 3c: StratifiedEdgeTracker (per-regime edge observability, not yet gating) — ✅ FIXED session 4: `"unknown"` bucket added, CalibrationDriftMonitor ZeroDivision guard added
 - Phase 3d: gate_rejections table — logs every blocked trade with full 21-feature vector + counterfactual outcome resolution ~15min later
 
 **Go-live thresholds (both must be met):**
@@ -110,6 +110,15 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Files Touched This Session (2026-05-24)
 
+**Session 4 (StratifiedEdgeTracker + CalibrationDriftMonitor bugfixes):**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/signal/stratified_edge_tracker.py` | Added `"unknown"` to `REGIMES` — positions resolving with `deepseek_regime="unknown"` now tracked in their own bucket instead of silently dropped |
+| `btc_kalshi_system/signal/calibration_drift_monitor.py` | Added `if not self._history: return` guard at top of `_recompute_window()` — prevents ZeroDivisionError when Redis partially writes `_KEY_TOTAL_COUNT` but `_KEY_HISTORY` is lost |
+| `tests/signal/test_stratified_edge_tracker.py` | 2 new tests: `"unknown"` bucket records + appears in `summary()` |
+| `tests/signal/test_calibration_drift_monitor.py` | 1 new test: `_recompute_window()` with empty history does not raise |
+
 **Session 3 (gate_rejections):**
 
 | File | Change |
@@ -148,12 +157,13 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 | CalibrationDriftMonitor | ✅ COMPLETE — wired, tests passing |
 | StratifiedEdgeTracker | 🔄 IN PROGRESS — wired for observability; not yet gating |
 | Merge feature/20-features-position-monitor → main | ✅ COMPLETE — fast-forward merge, main.py restarted, all 21 features confirmed |
+| StratifiedEdgeTracker `"unknown"` bucket + CalibrationDriftMonitor guard | ✅ COMPLETE |
 
 ---
 
 ## Next Steps
 
-1. **Confirm StratifiedEdgeTracker parity with EdgeTracker on 50+ shared trades, then switch Gate 4 to use stratified edge for current regime.** After merging and running ~50 trades, compare `self._stratified_edge.summary()` vs `self._edge_tracker.current_edge()` — if they agree within noise, wire `is_above_threshold(signal.deepseek_regime)` into Gate 4.
+1. **Wire StratifiedEdgeTracker into Gate 4 after ~50 trades.** After session 4 fixes land, run ~50 trades and check `self._stratified_edge.summary()`. Wire `is_above_threshold(signal.deepseek_regime)` into Gate 4 — if a regime has fewer than 1 recorded trade, `is_above_threshold` returns `False` (blocks). **Important:** do NOT compare `summary()` against `self._edge_tracker.current_edge()` for parity — they measure the same metric (realized edge) but over different populations (global vs per-regime). A difference is expected and not a bug. Instead, validate that `"unknown"` bucket has low count and non-`"unknown"` buckets are accumulating.
 
 2. **Wait for ~May 26–27:** Total resolved trades will hit 500 → train the calibrator. Check: `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL` — need ≥ 500.
 
@@ -216,6 +226,12 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 - **Loss streak Redis key:** `trading:loss_streak`. Integer. Cleared on win (`DELETE`), incremented on loss (`INCR`). Read by `PreTradeChecklist` before Kelly call.
 
 - **Stale rows excluded from training.** `features_stale=1` rows are written with real values (0.0 fallback) but excluded from regime model training. Currently ~10 stale rows (~6%) — frozen since last restart, no new stale rows being generated.
+
+- **StratifiedEdgeTracker has 5 regimes:** `trending_up`, `trending_down`, `ranging`, `high_uncertainty`, `"unknown"`. Trades where DeepSeek context is stale (`OpenPosition.deepseek_regime = "unknown"`) go into the `"unknown"` bucket rather than being silently dropped. Without this, the global EdgeTracker and stratified totals diverge, making parity checks misleading, and Gate 4 would silently block any trade arriving with a stale regime.
+
+- **StratifiedEdgeTracker measures realized edge, not calibration.** `current_edge(regime)` = `mean(outcome - market_price)`. Read it as "are we buying at prices that beat the market in this regime?" The `predicted_prob` field is stored in Redis but never used in any computation — do not treat `current_edge` as a calibration metric.
+
+- **CalibrationDriftMonitor has a ZeroDivision guard in `_recompute_window()`.** If Redis partially writes (total_count written, history lost), `_history` can be empty while `_total_count % 20 == 0` on restart, triggering `_mean_brier` on an empty deque. Guard: `if not self._history: return` at the top of `_recompute_window()`.
 
 - **`dump.rdb` and `trades.db.bak.*` must NOT be committed.**
 

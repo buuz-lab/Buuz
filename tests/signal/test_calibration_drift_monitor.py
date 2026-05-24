@@ -174,3 +174,21 @@ def test_persistence_survives_restart():
         # No spurious alert on window boundary
         assert monitor2.is_drifting() is False
         assert int(monitor2._redis.get(_KEY_ALERT_COUNT)) == 0
+
+
+# ── Test 7 ─────────────────────────────────────────────────────────────────────
+
+def test_recompute_window_empty_history_does_not_raise():
+    """_recompute_window() must return silently when _history is empty.
+
+    Reproduces a crash path: Redis partially writes _KEY_TOTAL_COUNT but
+    loses _KEY_HISTORY. If total_count % DRIFT_WINDOW == 0, _recompute_window()
+    is triggered on the next record() call with an empty deque → ZeroDivisionError.
+    """
+    monitor = make_monitor()
+    monitor._total_count = DRIFT_WINDOW  # simulate desync: multiple-of-20 but no history
+    # _history is empty (make_monitor() leaves it empty)
+    assert len(monitor._history) == 0
+
+    # Must not raise
+    monitor._recompute_window()

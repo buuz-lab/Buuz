@@ -91,6 +91,8 @@ class CalibrationDriftMonitor:
 
     def _recompute_window(self) -> None:
         """Called at each non-overlapping window boundary."""
+        if not self._history:
+            return
         brier = _mean_brier(self._history)
         baseline = self.baseline_brier()
 

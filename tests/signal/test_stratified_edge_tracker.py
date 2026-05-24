@@ -90,6 +90,28 @@ def test_summary_returns_all_four_regimes():
     assert result["ranging"] == pytest.approx(0.0)
 
 
+# ── test_unknown_regime_records_into_own_bucket ───────────────────────────────
+
+def test_unknown_regime_records_into_own_bucket():
+    """record('unknown', ...) must track into its own bucket, not get dropped."""
+    tracker = make_tracker()
+    # outcome=1 at market_price=0.55 → realized edge = 1 - 0.55 = 0.45
+    tracker.record("unknown", predicted_prob=0.6, outcome=1, market_price=0.55)
+    assert tracker.current_edge("unknown") != 0.0, "expected trade to be recorded in 'unknown' bucket"
+    assert tracker.is_above_threshold("unknown"), "edge 0.45 >> 0.005 threshold — should be above"
+
+
+# ── test_unknown_regime_in_summary ────────────────────────────────────────────
+
+def test_unknown_regime_in_summary():
+    """'unknown' must appear in summary() and reflect recorded trades."""
+    tracker = make_tracker()
+    tracker.record("unknown", predicted_prob=0.6, outcome=1, market_price=0.55)
+    result = tracker.summary()
+    assert "unknown" in result, "summary() must include the 'unknown' bucket"
+    assert result["unknown"] != 0.0, "summary()['unknown'] must reflect the recorded trade"
+
+
 # ── test_redis_persistence_survives_new_instance ───────────────────────────────
 
 def test_redis_persistence_survives_new_instance():

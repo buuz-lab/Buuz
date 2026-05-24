@@ -36,7 +36,7 @@ class StratifiedEdgeTracker:
     deepseek_regime label. Allows detecting regime-conditional edge collapse.
     """
 
-    REGIMES = ("trending_up", "trending_down", "ranging", "high_uncertainty")
+    REGIMES = ("trending_up", "trending_down", "ranging", "high_uncertainty", "unknown")
 
     def __init__(
         self,
