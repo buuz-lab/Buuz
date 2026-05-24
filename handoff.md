@@ -10,15 +10,16 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-24 session 3: gate_rejections table live. 12 training-ready 21-feature rows. System live and collecting.**
+**As of 2026-05-24 session 3: gate_rejections table live and verified writing rows. 12 training-ready 21-feature rows. System live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
 - **~54 trades/day. 500 rows by ~June 2.**
 - Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
-- System running on PID 60865 — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
-- Latest commit: `43f1c53` (main, pushed to GitHub)
+- System running on PID 61960 (restarted session 3 to pick up new schema) — confirm: `ps aux | grep "[Pp]ython.*main\.py"`
+- Latest commit: `42f2548` (main, pushed to GitHub)
 - Test suite: **280 passing**
 - Merged `feature/20-features-position-monitor` → `main` (fast-forward, 6 commits, 747 lines across 8 files). Restarted clean — DerivativesFeed writing all 21 features, paper trading mode active, no errors.
+- **gate_rejections verified:** 2 rows written within first signal cycle post-restart. All 21 features captured in `features` JSON. `outcome=NULL`, `aged_out=0` correct on new rows. Schema confirmed: `aged_out` column added via migration (appears at end of schema as expected for ALTER TABLE ADD COLUMN).
 
 **All phases complete:**
 - Phase 0: CVD soft gate (Gate 7)
@@ -30,6 +31,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Phase 3a: P&L formula explicit direction branch (auditable, math unchanged)
 - Phase 3b: CalibrationDriftMonitor (rolling 20-trade Brier score drift detection)
 - Phase 3c: StratifiedEdgeTracker (per-regime edge observability, not yet gating)
+- Phase 3d: gate_rejections table — logs every blocked trade with full 21-feature vector + counterfactual outcome resolution ~15min later
 
 **Go-live thresholds (both must be met):**
 - ≥ 500 resolved trades total → calibrator (~May 27, nearly there)
