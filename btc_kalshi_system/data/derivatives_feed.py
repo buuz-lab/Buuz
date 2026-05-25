@@ -139,26 +139,69 @@ class DerivativesFeed:
             features["_okx_partial"] = True
         return features
 
+    async def _fetch_okx_funding_and_oi(self) -> tuple[float, float, float]:
+        """Returns (curr_funding_8h, funding_trend, oi_delta_pct) from the active ccxt exchange (OKX/Bybit)."""
+        funding_history, oi_data = await asyncio.gather(
+            self._exchange.fetch_funding_rate_history(_SYMBOL, limit=10),
+            self._exchange.fetch_open_interest(_SYMBOL),
+        )
+        curr_funding = float(funding_history[-1]["fundingRate"]) if funding_history else 0.0
+        trend = self._funding_rate_trend(funding_history)
+        curr_oi = float(oi_data.get("openInterestAmount", 0.0))
+        oi_delta = self._oi_delta_pct(self._prev_oi["okx"], curr_oi)
+        self._prev_oi["okx"] = curr_oi
+        return curr_funding, trend, oi_delta
+
     async def _fetch_funding_and_oi(self) -> tuple[float, float, float, bool]:
         """Returns (curr_funding, funding_trend, oi_delta_pct, okx_partial).
-        Tries OKX first; falls back to Coinglass REST on any exception.
-        okx_partial=True when fallback returns zeros (no Coinglass key)."""
-        try:
-            funding_history, oi_data = await asyncio.gather(
-                self._exchange.fetch_funding_rate_history(_SYMBOL, limit=10),
-                self._exchange.fetch_open_interest(_SYMBOL),
-            )
-            curr_funding = float(funding_history[-1]["fundingRate"]) if funding_history else 0.0
-            trend = self._funding_rate_trend(funding_history)
-            curr_oi = float(oi_data.get("openInterestAmount", 0.0))
-            oi_delta = self._oi_delta_pct(self._prev_oi, curr_oi)
-            self._prev_oi = curr_oi
-            return curr_funding, trend, oi_delta, False
-        except Exception as exc:
-            logger.warning(
-                f"DerivativesFeed: OKX funding/OI fetch failed — using Coinglass fallback ({exc})"
-            )
-            return await self._coinglass_funding_and_oi()
+
+        Queries OKX (via ccxt), Hyperliquid, and Kraken Futures in parallel.
+        Averages results from whichever sources succeed. okx_partial=True only
+        when ALL three sources fail — that is the only case worth marking stale.
+        """
+        results = await asyncio.gather(
+            self._fetch_okx_funding_and_oi(),
+            self._fetch_hyperliquid_funding_and_oi(),
+            self._fetch_kraken_futures_funding_and_oi(),
+            return_exceptions=True,
+        )
+        okx_result, hl_result, kf_result = results
+
+        fundings: list[float] = []
+        oi_deltas: list[float] = []
+        trend = 0.0
+
+        if not isinstance(okx_result, Exception):
+            f, t, d = okx_result
+            fundings.append(f)
+            oi_deltas.append(d)
+            trend = t  # only OKX provides history-based trend
+        else:
+            logger.warning(f"DerivativesFeed: OKX source failed — {okx_result}")
+
+        if not isinstance(hl_result, Exception):
+            f, d = hl_result
+            fundings.append(f)
+            oi_deltas.append(d)
+        else:
+            logger.warning(f"DerivativesFeed: Hyperliquid source failed — {hl_result}")
+
+        if not isinstance(kf_result, Exception):
+            f, d = kf_result
+            fundings.append(f)
+            oi_deltas.append(d)
+        else:
+            logger.warning(f"DerivativesFeed: Kraken Futures source failed — {kf_result}")
+
+        if not fundings:
+            logger.error("DerivativesFeed: all derivative sources failed — funding/OI will be zeros")
+            return 0.0, 0.0, 0.0, True
+
+        avg_funding = sum(fundings) / len(fundings)
+        avg_oi_delta = sum(oi_deltas) / len(oi_deltas)
+        sources_used = len(fundings)
+        logger.info(f"DerivativesFeed: funding/OI from {sources_used}/3 sources — funding={avg_funding:.6f} oi_delta={avg_oi_delta:.4f}")
+        return avg_funding, trend, avg_oi_delta, False
 
     async def _coinglass_funding_and_oi(self) -> tuple[float, float, float, bool]:
         if not COINGLASS_API_KEY:
@@ -191,9 +234,9 @@ class DerivativesFeed:
             None,
         )
         curr_oi = float(okx_row["open_interest_quantity"]) if okx_row else 0.0
-        oi_delta = self._oi_delta_pct(self._prev_oi, curr_oi)
+        oi_delta = self._oi_delta_pct(self._prev_oi["okx"], curr_oi)
         if curr_oi:
-            self._prev_oi = curr_oi
+            self._prev_oi["okx"] = curr_oi
         return curr_funding, trend, oi_delta, False
 
     async def _fetch_hyperliquid_funding_and_oi(self) -> tuple[float, float]:

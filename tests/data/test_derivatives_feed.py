@@ -16,7 +16,7 @@ def make_feed() -> DerivativesFeed:
     feed._exchange = MagicMock()
     feed._kraken_exchange = None
     feed._ccxt_async = MagicMock()
-    feed._prev_oi = 0.0
+    feed._prev_oi = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0}
     return feed
 
 
@@ -205,21 +205,48 @@ def test_lkg_key_written_on_successful_write():
 # ── Fallback paths ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_coinglass_fallback_when_okx_funding_oi_fails():
-    """When OKX funding/OI raises, _coinglass_funding_and_oi() is called and values are non-zero."""
+async def test_coinglass_returns_values_when_api_key_set():
+    """_coinglass_funding_and_oi returns funding and OI delta when the API key is set."""
     feed = make_feed()
-    feed._prev_oi = 1000.0
-    feed._exchange = AsyncMock()
-    feed._exchange.fetch_funding_rate_history.side_effect = Exception("OKX unreachable")
-    feed._exchange.fetch_open_interest.side_effect = Exception("OKX unreachable")
+    feed._prev_oi = {"okx": 1000.0, "hyperliquid": 0.0, "kraken_futures": 0.0}
 
-    coinglass_result = (0.0035, 0.0012, 0.05, False)
-    with patch.object(feed, "_coinglass_funding_and_oi", new=AsyncMock(return_value=coinglass_result)):
-        curr_funding, trend, oi_delta, okx_partial = await feed._fetch_funding_and_oi()
+    fr_payload = {"data": [
+        {"time": 0, "close": "0.003"},
+        {"time": 4 * 3600_000, "close": "0.0035"},
+    ]}
+    oi_payload = {"data": [
+        {"exchange": "OKX", "open_interest_quantity": "1050.0"},
+    ]}
+
+    mock_resp_fr = AsyncMock()
+    mock_resp_fr.__aenter__ = AsyncMock(return_value=mock_resp_fr)
+    mock_resp_fr.__aexit__ = AsyncMock(return_value=False)
+    mock_resp_fr.json = AsyncMock(return_value=fr_payload)
+
+    mock_resp_oi = AsyncMock()
+    mock_resp_oi.__aenter__ = AsyncMock(return_value=mock_resp_oi)
+    mock_resp_oi.__aexit__ = AsyncMock(return_value=False)
+    mock_resp_oi.json = AsyncMock(return_value=oi_payload)
+
+    call_count = 0
+
+    def mock_get(url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return mock_resp_fr if call_count == 1 else mock_resp_oi
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.get = MagicMock(side_effect=mock_get)
+
+    import btc_kalshi_system.data.derivatives_feed as df_module
+    with patch.object(df_module, "COINGLASS_API_KEY", "fake-key"), \
+         patch("aiohttp.ClientSession", return_value=mock_session):
+        curr_funding, trend, oi_delta, okx_partial = await feed._coinglass_funding_and_oi()
 
     assert curr_funding == pytest.approx(0.0035)
-    assert trend == pytest.approx(0.0012)
-    assert oi_delta == pytest.approx(0.05)
+    assert oi_delta == pytest.approx(0.05)   # (1050 - 1000) / 1000
     assert okx_partial is False
 
 
@@ -390,3 +417,62 @@ async def test_kraken_futures_fetcher_returns_normalized_funding_and_oi():
     assert funding == pytest.approx(0.0001)
     # (550k - 500k) / 500k = 0.10
     assert oi_delta == pytest.approx(0.10)
+
+
+@pytest.mark.asyncio
+async def test_multi_source_averages_when_all_succeed():
+    """When all 3 sources return data, funding and oi_delta are averaged."""
+    feed = make_feed()
+    feed._prev_oi = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0}
+
+    with (
+        patch.object(feed, "_fetch_okx_funding_and_oi", new=AsyncMock(return_value=(0.0002, 0.001, 0.05))),
+        patch.object(feed, "_fetch_hyperliquid_funding_and_oi", new=AsyncMock(return_value=(0.0004, 0.02))),
+        patch.object(feed, "_fetch_kraken_futures_funding_and_oi", new=AsyncMock(return_value=(0.0003, 0.04))),
+    ):
+        funding, trend, oi_delta, okx_partial = await feed._fetch_funding_and_oi()
+
+    # funding avg: (0.0002 + 0.0004 + 0.0003) / 3
+    assert funding == pytest.approx((0.0002 + 0.0004 + 0.0003) / 3)
+    # trend only from OKX (HL and KF provide no history-based trend)
+    assert trend == pytest.approx(0.001)
+    # oi_delta avg: (0.05 + 0.02 + 0.04) / 3
+    assert oi_delta == pytest.approx((0.05 + 0.02 + 0.04) / 3)
+    assert okx_partial is False
+
+
+@pytest.mark.asyncio
+async def test_multi_source_uses_available_when_okx_fails():
+    """When OKX fails, HL and KF results are averaged; okx_partial stays False."""
+    feed = make_feed()
+    feed._prev_oi = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0}
+
+    with (
+        patch.object(feed, "_fetch_okx_funding_and_oi", new=AsyncMock(side_effect=Exception("geo-blocked"))),
+        patch.object(feed, "_fetch_hyperliquid_funding_and_oi", new=AsyncMock(return_value=(0.0004, 0.02))),
+        patch.object(feed, "_fetch_kraken_futures_funding_and_oi", new=AsyncMock(return_value=(0.0003, 0.04))),
+    ):
+        funding, trend, oi_delta, okx_partial = await feed._fetch_funding_and_oi()
+
+    assert funding == pytest.approx((0.0004 + 0.0003) / 2)
+    assert trend == pytest.approx(0.0)   # no OKX → no history-based trend
+    assert oi_delta == pytest.approx((0.02 + 0.04) / 2)
+    assert okx_partial is False
+
+
+@pytest.mark.asyncio
+async def test_multi_source_okx_partial_only_when_all_fail():
+    """okx_partial=True only when every source throws."""
+    feed = make_feed()
+    feed._prev_oi = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0}
+
+    with (
+        patch.object(feed, "_fetch_okx_funding_and_oi", new=AsyncMock(side_effect=Exception("blocked"))),
+        patch.object(feed, "_fetch_hyperliquid_funding_and_oi", new=AsyncMock(side_effect=Exception("timeout"))),
+        patch.object(feed, "_fetch_kraken_futures_funding_and_oi", new=AsyncMock(side_effect=Exception("error"))),
+    ):
+        funding, trend, oi_delta, okx_partial = await feed._fetch_funding_and_oi()
+
+    assert funding == pytest.approx(0.0)
+    assert oi_delta == pytest.approx(0.0)
+    assert okx_partial is True
