@@ -10,6 +10,23 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-25 session 7: Multi-source derivatives feed COMPLETE. DerivativesFeed now queries OKX + Hyperliquid + Kraken Futures in parallel; `okx_partial=True` only when all three fail. Kraken spot fallback added for `_fetch_volume_ratio`. Training filter excludes `okx_stale` rows. 326 tests pass.**
+
+**Session 7 (2026-05-25): Multi-source derivatives feed**
+
+| File | Change |
+|------|--------|
+| `config.py` | Added `HYPERLIQUID_BASE_URL`, `KRAKEN_FUTURES_BASE_URL` constants |
+| `btc_kalshi_system/data/derivatives_feed.py` | `_prev_oi` changed `float` → `dict[str, float]` with `"okx"`, `"hyperliquid"`, `"kraken_futures"` keys; OKX logic extracted to `_fetch_okx_funding_and_oi()`; `_fetch_funding_and_oi()` replaced with 3-source parallel gather + averaging; new `_fetch_hyperliquid_funding_and_oi()` (1h→8h normalization); new `_fetch_kraken_futures_funding_and_oi()` (annualized→8h via ÷1095); `_coinglass_funding_and_oi()` updated to use `_prev_oi["okx"]`; `_fetch_volume_ratio()` now falls back to Kraken spot; `_get_kraken_exchange()` lazy-init helper added; `_kraken_trades_data()` uses `_get_kraken_exchange()` |
+| `scripts/train_regime.py` | `_EXTRA_FILTERS_20` + `_EXTRA_FILTERS_27` now include `AND COALESCE(okx_stale, 0) = 0` |
+| `tests/data/test_derivatives_feed.py` | `make_feed()` updated to use dict `_prev_oi`; `test_coinglass_fallback_when_okx_funding_oi_fails` rewritten to test `_coinglass_funding_and_oi` directly; 6 new tests for HL fetcher, KF fetcher, 3 multi-source fusion scenarios, volume ratio Kraken fallback |
+
+**Kraken Futures funding rate note:** `fundingRate` in their API is annualized. Divide by 1095 (= 365 × 3 funding periods/day) to get 8h equivalent. Verified: live rate 0.0349 → 0.0000319 per 8h (in line with OKX's typical 0.0001–0.0003 range). Test mock uses 0.1095 / 1095 = 0.0001 for clarity.
+
+**Test suite: 326 passing (was 318).**
+
+---
+
 **As of 2026-05-25 session 6 (continued): Deribit Options Feed COMPLETE and verified. First `deribit_stale=0` trade confirmed at 2026-05-25T05:40Z (`atm_iv=30.9`). Both feeds healthy. Accumulation underway: 1/500 fresh rows.**
 
 **Session 6 design decisions (implemented 2026-05-24):**
@@ -280,7 +297,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Context / Gotchas
 
-- **Test suite: 318 pass.** `python3 -m pytest` from project root.
+- **Test suite: 326 pass.** `python3 -m pytest` from project root.
 
 - **Feature order is a 3-file contract.** `regime_model.py` / `train_regime.py` / `fusion._regime_features()` must match exactly. Test: `python3 -m pytest tests/ -k "feature_order"`.
 
@@ -337,6 +354,8 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 - **DeepSeek returns `NEUTRAL_DEFAULT` on 402, not `SAFE_DEFAULT`.**
 
 - **DerivativesFeed re-resolves on ANY exception** (commit `229b88b`). Prior to this fix, only 403/Forbidden triggered failover; timeouts/resets silently kept a dead session alive. If the feed goes quiet again, check `redis-cli ttl regime:features` — TTL of -2 means it expired and feed is down. Restart main.py to recover.
+
+- **Multi-source derivatives feed (session 7):** `_fetch_funding_and_oi()` now queries OKX, Hyperliquid, and Kraken Futures in parallel; averages whichever succeed. `okx_partial=True` only when ALL three fail. Hyperliquid reports 1h funding (multiply × 8 for 8h equiv). Kraken reports annualized funding (divide by 1095 for 8h equiv). `_prev_oi` is now a dict `{"okx": float, "hyperliquid": float, "kraken_futures": float}` — each source tracks its own prev OI for delta computation. `_coinglass_funding_and_oi` is preserved but no longer in the main fallback chain; it can be called directly for debugging.
 
 - **Restart procedure:** `ps aux | grep "[Pp]ython.*main\.py"` → kill PID → `cd /Users/ezrakornberg/Kronos\ V2 && python3 main.py > /tmp/kronos_restart.log 2>&1 &` — verify first DerivativesFeed log shows all 21 features including `large_print_direction`.
 
