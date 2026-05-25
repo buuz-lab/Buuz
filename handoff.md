@@ -372,7 +372,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 - **`_FEATURE_COLS_LEGACY` in `train_regime.py` stays at 6 features.** Do not modify it. The legacy path is for very old rows — not related to the Deribit expansion.
 
-- **Gate 7 is shadow-only** (`shadow=1` in `gate_rejections`). It no longer blocks trades. The original 32.3% YES→UP win-rate calibration was regime-specific; live data showed 80% win rate on blocked YES→UP trades and 56% on NO→DOWN, both net-negative for the gate. Re-evaluate periodically with the shadow query above. Do NOT re-enable without fresh regime-specific data.
+- **Gate 7 is shadow-only** (`shadow=1` in `gate_rejections`). It no longer blocks trades. The original 32.3% YES→UP win-rate calibration was regime-specific; live data showed 80% win rate on blocked YES→UP trades and 56% on NO→DOWN, both net-negative for the gate. **Sample sizes are small (5 YES→UP, 16 NO→DOWN resolved blocks)** — shadow tracking is kept running specifically because the data may not be conclusive yet. Re-evaluate once shadow rows accumulate (target: 50+ per side). Gate could be reimplemented as-is, recalibrated to a different threshold, or replaced with a different regime stat entirely (e.g. `large_print_direction` instead of CVD). Do NOT re-enable without fresh regime-specific data.
 
 - **`gate_rejections.shadow` column** — added via migration (`_GATE_REJECTIONS_COLUMN_MIGRATIONS`). Historical real blocks have `shadow=0` (default). Shadow observations have `shadow=1`. Always filter by `shadow` when analyzing gate effectiveness to avoid mixing the two populations.
 
