@@ -7,7 +7,7 @@ import numpy as np
 import redis
 from loguru import logger
 
-from config import COINGLASS_API_KEY, REDIS_URL
+from config import COINGLASS_API_KEY, HYPERLIQUID_BASE_URL, KRAKEN_FUTURES_BASE_URL, REDIS_URL
 from btc_kalshi_system.data.fear_greed import fetch_fear_greed
 
 _REFRESH_INTERVAL = 300   # 5 minutes
@@ -17,6 +17,8 @@ _FUNDING_LOOKBACK_MS = 4 * 3600_000  # 4 hours in milliseconds
 _SYMBOL = "BTC/USDT:USDT"
 _KRAKEN_SYMBOL = "BTC/USD"
 _COINGLASS_BASE = "https://open-api-v4.coinglass.com"
+_HYPERLIQUID_BASE = HYPERLIQUID_BASE_URL
+_KRAKEN_FUTURES_BASE = KRAKEN_FUTURES_BASE_URL
 
 
 class DerivativesFeed:
@@ -38,7 +40,7 @@ class DerivativesFeed:
         self._ccxt_async = ccxt_async
         self._exchange = None   # resolved lazily on first fetch
         self._exchange_name: str = ""
-        self._prev_oi: float = 0.0
+        self._prev_oi: dict[str, float] = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0}
         self._kraken_exchange = None  # lazy init for Kraken trade fallback
 
     # ── Public entry point ─────────────────────────────────────────────────────
@@ -193,6 +195,32 @@ class DerivativesFeed:
         if curr_oi:
             self._prev_oi = curr_oi
         return curr_funding, trend, oi_delta, False
+
+    async def _fetch_hyperliquid_funding_and_oi(self) -> tuple[float, float]:
+        """Returns (funding_rate_8h_equiv, oi_delta_pct) from Hyperliquid DEX.
+        Funding is 1h rate normalized to 8h. Never geo-blocked (it's a DEX)."""
+        url = f"{_HYPERLIQUID_BASE}/info"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json={"type": "metaAndAssetCtxs"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json()
+
+        universe = data[0]["universe"]
+        btc_idx = next(i for i, u in enumerate(universe) if u["name"] == "BTC")
+        ctx = data[1][btc_idx]
+
+        funding_1h = float(ctx["funding"])
+        funding_8h = funding_1h * 8
+
+        curr_oi = float(ctx["openInterest"])
+        prev = self._prev_oi["hyperliquid"]
+        oi_delta = self._oi_delta_pct(prev, curr_oi)
+        self._prev_oi["hyperliquid"] = curr_oi
+
+        return funding_8h, oi_delta
 
     async def _fetch_trades_data(self) -> tuple[float, float, float]:
         """Returns (cvd_normalized, basis_spread_pct, large_print_direction).

@@ -330,3 +330,31 @@ def test_large_print_direction_mixed():
 def test_large_print_direction_empty_trades():
     feed = make_feed()
     assert feed._large_print_direction([]) == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_hyperliquid_fetcher_returns_normalized_funding_and_oi():
+    """_fetch_hyperliquid_funding_and_oi normalizes 1h→8h funding and returns BTC OI."""
+    feed = make_feed()
+    feed._prev_oi = {"okx": 0.0, "hyperliquid": 1000.0, "kraken_futures": 0.0}
+
+    hl_response = [
+        {"universe": [{"name": "BTC", "szDecimals": 5}]},
+        [{"funding": "0.0000125", "openInterest": "1100.0", "markPx": "67000.0"}],
+    ]
+
+    mock_resp = AsyncMock()
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_resp.json = AsyncMock(return_value=hl_response)
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.post = MagicMock(return_value=mock_resp)
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        funding, oi_delta = await feed._fetch_hyperliquid_funding_and_oi()
+
+    assert funding == pytest.approx(0.0000125 * 8)   # normalized to 8h
+    assert oi_delta == pytest.approx(0.10)            # (1100 - 1000) / 1000
