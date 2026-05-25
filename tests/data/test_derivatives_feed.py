@@ -213,13 +213,14 @@ async def test_coinglass_fallback_when_okx_funding_oi_fails():
     feed._exchange.fetch_funding_rate_history.side_effect = Exception("OKX unreachable")
     feed._exchange.fetch_open_interest.side_effect = Exception("OKX unreachable")
 
-    coinglass_result = (0.0035, 0.0012, 0.05)
+    coinglass_result = (0.0035, 0.0012, 0.05, False)
     with patch.object(feed, "_coinglass_funding_and_oi", new=AsyncMock(return_value=coinglass_result)):
-        curr_funding, trend, oi_delta = await feed._fetch_funding_and_oi()
+        curr_funding, trend, oi_delta, okx_partial = await feed._fetch_funding_and_oi()
 
     assert curr_funding == pytest.approx(0.0035)
     assert trend == pytest.approx(0.0012)
     assert oi_delta == pytest.approx(0.05)
+    assert okx_partial is False
 
 
 @pytest.mark.asyncio
@@ -257,11 +258,12 @@ async def test_coinglass_fallback_skipped_when_api_key_empty():
 
     import btc_kalshi_system.data.derivatives_feed as df_module
     with patch.object(df_module, "COINGLASS_API_KEY", ""):
-        curr_funding, trend, oi_delta = await feed._coinglass_funding_and_oi()
+        curr_funding, trend, oi_delta, okx_partial = await feed._coinglass_funding_and_oi()
 
     assert curr_funding == pytest.approx(0.0)
     assert trend == pytest.approx(0.0)
     assert oi_delta == pytest.approx(0.0)
+    assert okx_partial is True
 
 
 # ── _large_print_direction ─────────────────────────────────────────────────────

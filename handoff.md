@@ -144,6 +144,21 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Files Touched This Session (2026-05-24, session 6)
 
+**Session 6 (continued): OKX stale flag**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/data/derivatives_feed.py` | `_coinglass_funding_and_oi()` + `_fetch_funding_and_oi()` return 4-tuple with `okx_partial: bool`; `_fetch_features()` embeds `_okx_partial=True` when partial; `run()` pops flag before writing; `_write_features(okx_partial=)` skips LKG update on partial, always writes CVD ring buffer |
+| `btc_kalshi_system/signal/fusion.py` | `TradingSignal.okx_stale: bool = False` field added; `_regime_features()` returns 4-tuple `(features, stale, deribit_stale, okx_stale)`; `generate_signal()` unpacks and passes `okx_stale` to signal |
+| `btc_kalshi_system/execution/position_monitor.py` | `_regime_features()` unpack updated to 4-tuple |
+| `main.py` | `_TRADES_COLUMN_MIGRATIONS`: `okx_stale INTEGER DEFAULT 0` added; trades INSERT includes `okx_stale` column and value |
+| `tests/data/test_derivatives_feed_okx_stale.py` | **New** — 3 tests: LKG not updated on partial, `_okx_partial` embedded in primary key, LKG written on success |
+| `tests/signal/test_fusion_okx_stale.py` | **New** — 3 tests: `okx_stale` true on LKG, true on partial, false when fresh |
+| `tests/data/test_derivatives_feed.py` | Existing fallback tests updated for 4-tuple return |
+| `tests/signal/test_*.py` | All `_regime_features()` 3-tuple unpacks updated to 4-tuple |
+
+**Test suite: 318 passing (was 312).**
+
 **Session 6 (continued): trade_snapshots schema fix**
 
 | File | Change |
@@ -265,7 +280,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Context / Gotchas
 
-- **Test suite: 312 pass.** `python3 -m pytest` from project root.
+- **Test suite: 318 pass.** `python3 -m pytest` from project root.
 
 - **Feature order is a 3-file contract.** `regime_model.py` / `train_regime.py` / `fusion._regime_features()` must match exactly. Test: `python3 -m pytest tests/ -k "feature_order"`.
 

@@ -118,7 +118,7 @@ class PositionMonitor:
                 f"PositionMonitor: orderbook fetch failed for {position.ticker}: {exc}"
             )
 
-        features, stale, _ = self.fusion_engine._regime_features()
+        features, stale, _, _ = self.fusion_engine._regime_features()
 
         snapshot: dict = {
             "trade_id":       position.trade_id,

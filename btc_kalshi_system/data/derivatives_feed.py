@@ -79,7 +79,8 @@ class DerivativesFeed:
                 success = False
                 try:
                     features = await self._fetch_features()
-                    self._write_features(features)
+                    okx_partial = features.pop("_okx_partial", False)
+                    self._write_features(features, okx_partial=okx_partial)
                     logger.info(f"DerivativesFeed: wrote regime:features — {features}")
                     success = True
                 except Exception as exc:
@@ -115,12 +116,12 @@ class DerivativesFeed:
             self._fetch_trades_data(),
             self._fetch_volume_ratio(),
         )
-        curr_funding, trend, oi_delta = results[0]
+        curr_funding, trend, oi_delta, okx_partial = results[0]
         cvd, basis, large_print = results[1]
         volume_ratio = results[2]
         vol = self._brti_volatility_1h()
         fg = fetch_fear_greed(self._redis)
-        return {
+        features: dict = {
             "funding_rate":          curr_funding,
             "funding_rate_trend":    trend,
             "oi_delta_pct":          oi_delta,
@@ -132,10 +133,14 @@ class DerivativesFeed:
             "fear_greed_value":      fg["value"] if fg else None,
             "fear_greed_label":      fg["label"] if fg else None,
         }
+        if okx_partial:
+            features["_okx_partial"] = True
+        return features
 
-    async def _fetch_funding_and_oi(self) -> tuple[float, float, float]:
-        """Returns (curr_funding, funding_trend, oi_delta_pct).
-        Tries OKX first; falls back to Coinglass REST on any exception."""
+    async def _fetch_funding_and_oi(self) -> tuple[float, float, float, bool]:
+        """Returns (curr_funding, funding_trend, oi_delta_pct, okx_partial).
+        Tries OKX first; falls back to Coinglass REST on any exception.
+        okx_partial=True when fallback returns zeros (no Coinglass key)."""
         try:
             funding_history, oi_data = await asyncio.gather(
                 self._exchange.fetch_funding_rate_history(_SYMBOL, limit=10),
@@ -146,17 +151,17 @@ class DerivativesFeed:
             curr_oi = float(oi_data.get("openInterestAmount", 0.0))
             oi_delta = self._oi_delta_pct(self._prev_oi, curr_oi)
             self._prev_oi = curr_oi
-            return curr_funding, trend, oi_delta
+            return curr_funding, trend, oi_delta, False
         except Exception as exc:
             logger.warning(
                 f"DerivativesFeed: OKX funding/OI fetch failed — using Coinglass fallback ({exc})"
             )
             return await self._coinglass_funding_and_oi()
 
-    async def _coinglass_funding_and_oi(self) -> tuple[float, float, float]:
+    async def _coinglass_funding_and_oi(self) -> tuple[float, float, float, bool]:
         if not COINGLASS_API_KEY:
             logger.warning("DerivativesFeed: COINGLASS_API_KEY not set — Coinglass fallback skipped")
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, True
 
         headers = {"CG-API-KEY": COINGLASS_API_KEY}
         fr_url = f"{_COINGLASS_BASE}/api/futures/funding-rate/history"
@@ -187,7 +192,7 @@ class DerivativesFeed:
         oi_delta = self._oi_delta_pct(self._prev_oi, curr_oi)
         if curr_oi:
             self._prev_oi = curr_oi
-        return curr_funding, trend, oi_delta
+        return curr_funding, trend, oi_delta, False
 
     async def _fetch_trades_data(self) -> tuple[float, float, float]:
         """Returns (cvd_normalized, basis_spread_pct, large_print_direction).
@@ -306,20 +311,22 @@ class DerivativesFeed:
 
     # ── Redis write ────────────────────────────────────────────────────────────
 
-    def _write_features(self, features: dict) -> None:
-        serialized = json.dumps(features)
-        self._redis.set("regime:features", serialized, ex=_FEATURES_TTL)
-        # Also write a last-known-good copy with a 24h TTL so _get_market_context
-        # can fall back to real (stale-flagged) features during exchange outages
-        # instead of zeros. _lkg_written_at lets the caller log how old the data is.
-        lkg_payload = dict(features)
-        lkg_payload["_lkg_written_at"] = time.time()
-        self._redis.set("regime:features:lkg", json.dumps(lkg_payload), ex=_LKG_TTL)
+    def _write_features(self, features: dict, okx_partial: bool = False) -> None:
+        # Embed the partial flag in the primary key so fusion.py can detect it.
+        payload = dict(features)
+        if okx_partial:
+            payload["_okx_partial"] = True
+        self._redis.set("regime:features", json.dumps(payload), ex=_FEATURES_TTL)
 
-        # CVD ring buffer: used by fusion._regime_features() to compute cvd_velocity
-        # and cvd_acceleration. Score = Unix timestamp so the sorted set is ordered by
-        # recency. Keep last 90 entries (~90 minutes at one write per minute).
+        # Only update LKG with clean data — do NOT overwrite a good LKG with zeros.
+        # CVD comes from OKX/Kraken trades (not funding/OI), so it is valid even on
+        # a partial write and the ring buffer is always updated.
+        if not okx_partial:
+            lkg_payload = dict(features)
+            lkg_payload["_lkg_written_at"] = time.time()
+            self._redis.set("regime:features:lkg", json.dumps(lkg_payload), ex=_LKG_TTL)
+
         cvd_value = features.get("cvd_normalized", 0.0)
         self._redis.zadd("regime:cvd_history", {str(float(cvd_value)): time.time()})
-        self._redis.zremrangebyscore("regime:cvd_history", 0, time.time() - 7200)  # drop entries > 2h old
-        self._redis.zremrangebyrank("regime:cvd_history", 0, -91)  # keep last 90 by count
+        self._redis.zremrangebyscore("regime:cvd_history", 0, time.time() - 7200)
+        self._redis.zremrangebyrank("regime:cvd_history", 0, -91)

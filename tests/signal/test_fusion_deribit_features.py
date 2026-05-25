@@ -79,7 +79,7 @@ def _base_ctx() -> dict:
 def test_regime_features_includes_all_27_keys():
     """_regime_features() must return exactly 27 keys in the correct order."""
     engine = _make_engine(_base_ctx())
-    features, stale, deribit_stale = engine._regime_features()
+    features, stale, deribit_stale, _ = engine._regime_features()
     keys = list(features.keys())
     assert keys == _ALL_27_KEYS, (
         f"Key mismatch.\nExpected: {_ALL_27_KEYS}\nGot:      {keys}"
@@ -92,7 +92,7 @@ def test_regime_features_includes_all_27_keys():
 def test_deribit_stale_true_when_options_features_absent():
     """Context without atm_iv → deribit_stale=True."""
     engine = _make_engine(_base_ctx())  # no atm_iv
-    _, _, deribit_stale = engine._regime_features()
+    _, _, deribit_stale, _ = engine._regime_features()
     assert deribit_stale is True
 
 
@@ -100,7 +100,7 @@ def test_deribit_stale_true_when_lkg_used():
     """Context with _deribit_lkg=True → deribit_stale=True."""
     ctx = {**_base_ctx(), "atm_iv": 55.0, "_deribit_lkg": True}
     engine = _make_engine(ctx)
-    _, _, deribit_stale = engine._regime_features()
+    _, _, deribit_stale, _ = engine._regime_features()
     assert deribit_stale is True
 
 
@@ -108,7 +108,7 @@ def test_deribit_stale_false_when_options_fresh():
     """Context with valid atm_iv and no _deribit_lkg → deribit_stale=False."""
     ctx = {**_base_ctx(), "atm_iv": 55.0, "pcr_oi": 1.1}
     engine = _make_engine(ctx)
-    _, _, deribit_stale = engine._regime_features()
+    _, _, deribit_stale, _ = engine._regime_features()
     assert deribit_stale is False
 
 
@@ -121,7 +121,7 @@ def test_iv_rv_spread_in_features():
     # iv_rv_spread = atm_iv - brti_volatility_1h (from ctx)
     ctx = {**_base_ctx(), "atm_iv": 60.0, "iv_rv_spread": 59.99}
     engine = _make_engine(ctx)
-    features, _, _ = engine._regime_features()
+    features, _, _, _ = engine._regime_features()
     assert "iv_rv_spread" in features
     # Should use ctx's iv_rv_spread (already merged by _get_market_context)
     assert features["iv_rv_spread"] == pytest.approx(59.99, rel=1e-4)
@@ -131,7 +131,7 @@ def test_iv_rv_spread_defaults_to_zero_when_absent():
     """Missing iv_rv_spread in ctx → 0.0 in features (no crash)."""
     ctx = {**_base_ctx(), "atm_iv": 60.0}  # no iv_rv_spread
     engine = _make_engine(ctx)
-    features, _, _ = engine._regime_features()
+    features, _, _, _ = engine._regime_features()
     assert features["iv_rv_spread"] == pytest.approx(0.0)
 
 
@@ -141,14 +141,14 @@ def test_kalshi_spread_in_regime_features():
     """update_kalshi_spread(0.05) → kalshi_spread_normalized == 0.05 in features."""
     engine = _make_engine(_base_ctx())
     engine.update_kalshi_spread(0.05)
-    features, _, _ = engine._regime_features()
+    features, _, _, _ = engine._regime_features()
     assert features["kalshi_spread_normalized"] == pytest.approx(0.05)
 
 
 def test_kalshi_spread_defaults_to_zero():
     """No update_kalshi_spread call → kalshi_spread_normalized == 0.0."""
     engine = _make_engine(_base_ctx())
-    features, _, _ = engine._regime_features()
+    features, _, _, _ = engine._regime_features()
     assert features["kalshi_spread_normalized"] == pytest.approx(0.0)
 
 
@@ -158,7 +158,7 @@ def test_pcr_oi_default_is_one():
     """ctx missing pcr_oi → pcr_oi == 1.0 in features (not 0.0)."""
     ctx = {**_base_ctx(), "atm_iv": 55.0}  # no pcr_oi
     engine = _make_engine(ctx)
-    features, _, _ = engine._regime_features()
+    features, _, _, _ = engine._regime_features()
     assert features["pcr_oi"] == pytest.approx(1.0)
 
 
@@ -170,7 +170,7 @@ def test_deribit_stale_independent_of_features_stale():
     ctx = {"_lkg": True, "atm_iv": 55.0, "pcr_oi": 1.0,
            "kalshi_mid_cents": 55.0}
     engine = _make_engine(ctx)
-    features, features_stale, deribit_stale = engine._regime_features()
+    features, features_stale, deribit_stale, _ = engine._regime_features()
     assert features_stale is True    # regime LKG used
     assert deribit_stale is False    # Deribit data is fresh
 
@@ -180,7 +180,7 @@ def test_deribit_stale_independent_of_features_stale():
 def test_numeric_fallbacks_are_floats():
     """All 6 new features must be floats (not None) even when ctx provides nothing."""
     engine = _make_engine(_base_ctx())  # no deribit data at all
-    features, _, _ = engine._regime_features()
+    features, _, _, _ = engine._regime_features()
     for key in ("atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope",
                 "skew_25d", "kalshi_spread_normalized"):
         v = features[key]

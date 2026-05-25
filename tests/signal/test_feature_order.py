@@ -74,7 +74,7 @@ def _get_fusion_feature_keys():
         "basis_spread_pct": 0.0005,
         "kalshi_mid_cents": 55.0,
     })
-    features, _, _ = engine._regime_features()
+    features, _, _, _ = engine._regime_features()
     return list(features.keys())
 
 

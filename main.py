@@ -119,6 +119,7 @@ _TRADES_COLUMN_MIGRATIONS = [
     ("skew_25d",                 "REAL DEFAULT NULL"),
     ("kalshi_spread_normalized", "REAL DEFAULT NULL"),
     ("deribit_stale",            "INTEGER DEFAULT 1"),
+    ("okx_stale",                "INTEGER DEFAULT 0"),
 ]
 
 _TRADE_SNAPSHOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
@@ -883,7 +884,7 @@ class KronosV2:
                     hourly_sr_proximity, range_breakout_flag, tape_speed_tpm,
                     large_print_direction,
                     atm_iv, iv_rv_spread, pcr_oi, term_structure_slope,
-                    skew_25d, kalshi_spread_normalized, deribit_stale
+                    skew_25d, kalshi_spread_normalized, deribit_stale, okx_stale
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
@@ -936,6 +937,7 @@ class KronosV2:
                     feats.get("skew_25d"),
                     feats.get("kalshi_spread_normalized"),
                     1 if signal.deribit_stale else 0,
+                    1 if signal.okx_stale else 0,
                 ),
             )
             self._db.commit()

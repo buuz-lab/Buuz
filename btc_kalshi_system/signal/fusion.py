@@ -71,6 +71,10 @@ class TradingSignal:
     # Rows with deribit_stale=True are excluded from the 27-feature retrain.
     # Independent from features_stale — do NOT combine them.
     deribit_stale: bool = False
+    # True when OKX funding/OI used the zero fallback (_okx_partial), or when
+    # regime:features expired and LKG was used (_lkg). Parallel to deribit_stale.
+    # Independent from features_stale — do NOT combine them.
+    okx_stale: bool = False
 
 
 class SignalFusionEngine:
@@ -130,7 +134,7 @@ class SignalFusionEngine:
         # Compute features ONCE per signal so the values we feed the regime model
         # match the values we persist in trades.db. This is the snapshot used both
         # at inference time and (later) as the training row for this trade.
-        regime_features, features_stale, deribit_stale = self._regime_features()
+        regime_features, features_stale, deribit_stale, okx_stale = self._regime_features()
 
         try:
             regime_result = self._regime.get_regime(regime_features)
@@ -191,14 +195,15 @@ class SignalFusionEngine:
             regime_features=regime_features,
             features_stale=features_stale,
             deribit_stale=deribit_stale,
+            okx_stale=okx_stale,
         )
 
-    def _regime_features(self) -> tuple[dict, bool, bool]:
+    def _regime_features(self) -> tuple[dict, bool, bool, bool]:
         """
         Build the 27-feature dict consumed by RegimeModel.get_regime() and the
         feature-store at training time.
 
-        Returns (features, stale, deribit_stale).
+        Returns (features, stale, deribit_stale, okx_stale).
         - stale=True when regime:features Redis key was missing/LKG used.
         - deribit_stale=True when options:features was absent or LKG used.
         Both flags are independent — do NOT combine them.
@@ -359,6 +364,10 @@ class SignalFusionEngine:
             or ctx.get("_deribit_lkg", False)
         )
 
+        # okx_stale=True when: (a) regime:features expired and LKG was used,
+        # OR (b) OKX funding/OI fetch failed with no Coinglass key (_okx_partial).
+        okx_stale = (not ctx) or ctx.get("_lkg", False) or ctx.get("_okx_partial", False)
+
         features = {
             "funding_rate":             funding_rate,
             "funding_rate_trend":       funding_rate_trend,
@@ -388,4 +397,4 @@ class SignalFusionEngine:
             "skew_25d":                 skew_25d,
             "kalshi_spread_normalized": kalshi_spread_normalized,
         }
-        return features, stale, deribit_stale
+        return features, stale, deribit_stale, okx_stale
