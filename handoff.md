@@ -10,7 +10,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
-**As of 2026-05-24 session 6: Deribit Options Feed COMPLETE — 6 new regime features (22–27) live, `deribit_stale=0` accumulation started.**
+**As of 2026-05-25 session 6 (continued): Deribit Options Feed COMPLETE and verified. First `deribit_stale=0` trade confirmed at 2026-05-25T05:40Z (`atm_iv=30.9`). Both feeds healthy. Accumulation underway: 1/500 fresh rows.**
 
 **Session 6 design decisions (implemented 2026-05-24):**
 - **Feature expansion: 21 → 27 features.** Six new features added to `_FEATURE_ORDER` (features 22–27):
@@ -37,9 +37,9 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 **As of 2026-05-24 session 5: DeepSeek enrichment complete — ~15 real signals now sent to DeepSeek V3. System live and collecting.**
 
 - `PAPER_TRADING=true` in `.env`
-- **~54 trades/day. 500 rows by ~June 2.**
-- Stats: 378 total trades, 207W/171L (54.7%), Net P&L: -$97.72
-- System running on PID 61960 — confirm: `ps aux | grep "[Pp]ython.*main\.py"` (**restart main.py after this merge to pick up session 5 changes**)
+- **~54 trades/day. 21-feature rows: 500 by ~June 2. 27-feature rows: 500 by ~June 3–4.**
+- Stats: 402 total trades, 401 resolved, 388 training-ready (21-feature), 1 deribit_stale=0 row
+- System running — check PID: `ps aux | grep "[Pp]ython.*main\.py"`
 - Latest commit: merge of session 5 DeepSeek enrichment
 - Test suite: **290 passing**
 - gate_rejections verified (session 3): 2 rows written within first signal cycle post-restart, all 21 features captured.
@@ -69,7 +69,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 | ~June 2–3 | 500 new 21-feature rows → `python3 scripts/train_regime.py` (21-feature model) |
 | ~June 2–3 | Deploy 21-feature regime model → flip `REGIME_GATE2_ENFORCING=true` |
 | ~June 5–7 | ~50 shadow trades observed → flip `PAPER_TRADING=false` |
-| ~June 10+ | Deribit feed live long enough → retrain with 27-feature model when ≥500 `deribit_stale=0` rows |
+| ~June 3–4 | 500 `deribit_stale=0` rows → retrain with 27-feature model (first fresh row: 2026-05-25T05:40Z) |
 
 ---
 
@@ -216,7 +216,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Next Steps
 
-0. ✅ **Deribit Options Feed implemented (session 6).** Restart main.py now: `ps aux | grep "[Pp]ython.*main\.py"` → kill PID → restart. Within 5 minutes verify: `redis-cli get options:features` returns a JSON dict with `atm_iv`, `pcr_oi`, `term_structure_slope`, `skew_25d`; `redis-cli ttl options:features` returns 400–600; `options:features:lkg` also populated. After one trade cycle, `trades.db` will have 7 new columns. **Do NOT retrain the 27-feature model until ≥500 `deribit_stale=0` rows accumulated — this is separate from the 21-feature retrain gate.**
+0. ✅ **Deribit Options Feed live and verified (session 6, 2026-05-24).** `options:features` writing correctly (TTL 400–600s). First `deribit_stale=0` trade confirmed 2026-05-25T05:40Z (`atm_iv=30.9`). Both feeds healthy. **Do NOT retrain the 27-feature model until ≥500 `deribit_stale=0` rows accumulated — separate from the 21-feature retrain gate.** Monitor: `sqlite3 trades.db "SELECT COUNT(*) FROM trades WHERE deribit_stale=0"`
 
 1. **Wire StratifiedEdgeTracker into Gate 4 after ~50 trades.** After session 4 fixes land, run ~50 trades and check `self._stratified_edge.summary()`. Wire `is_above_threshold(signal.deepseek_regime)` into Gate 4 — if a regime has fewer than 1 recorded trade, `is_above_threshold` returns `False` (blocks). **Important:** do NOT compare `summary()` against `self._edge_tracker.current_edge()` for parity — they measure the same metric (realized edge) but over different populations (global vs per-regime). A difference is expected and not a bug. Instead, validate that `"unknown"` bucket has low count and non-`"unknown"` buckets are accumulating.
 
@@ -254,7 +254,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Context / Gotchas
 
-- **Test suite: 290 pass.** `python3 -m pytest` from project root.
+- **Test suite: 312 pass.** `python3 -m pytest` from project root.
 
 - **Feature order is a 3-file contract.** `regime_model.py` / `train_regime.py` / `fusion._regime_features()` must match exactly. Test: `python3 -m pytest tests/ -k "feature_order"`.
 
