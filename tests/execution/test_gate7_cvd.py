@@ -1,5 +1,7 @@
 """
-Tests for Gate 7: CVD soft gate in PreTradeChecklist.
+Tests for Gate 7: CVD shadow gate in PreTradeChecklist.
+Gate 7 no longer blocks trades — it is shadow-only. The checklist always passes
+regardless of CVD. Shadow logging happens in main.py after the checklist passes.
 """
 import pytest
 from unittest.mock import MagicMock
@@ -47,39 +49,35 @@ GOOD_KWARGS = dict(
 )
 
 
-def test_gate7_blocks_yes_up_with_negative_cvd():
-    """direction=1 (YES→UP), cvd=-0.4 → Gate 7 blocks."""
+def test_gate7_no_longer_blocks_yes_up_with_negative_cvd():
+    """direction=1, cvd=-0.4 → checklist passes (Gate 7 is shadow-only)."""
     checklist = _make_checklist()
     signal = _make_signal(direction=1, cvd=-0.4)
-    # Use ask=60 so edge = 0.65 - 0.60 = 0.05 > spread(0.02) + 0.005 → Gate 5 passes
     kwargs = {**GOOD_KWARGS, "best_ask_cents": 60, "best_bid_cents": 58}
     result = checklist.run(signal=signal, **kwargs)
-    assert not result.passed
-    assert result.failed_gate == 7
-    assert "YES→UP" in result.failed_reason
-
-
-def test_gate7_passes_yes_up_with_mild_negative_cvd():
-    """direction=1, cvd=-0.2 (below threshold) → passes Gate 7."""
-    checklist = _make_checklist()
-    signal = _make_signal(direction=1, cvd=-0.2)
-    result = checklist.run(signal=signal, **GOOD_KWARGS)
-    # Gate 7 passes; may fail on other gates but not gate 7
+    assert result.passed
     assert result.failed_gate != 7
 
 
-def test_gate7_blocks_no_down_with_positive_cvd():
-    """direction=0 (NO→DOWN), cvd=+0.4 → Gate 7 blocks."""
+def test_gate7_no_longer_blocks_no_down_with_positive_cvd():
+    """direction=0, cvd=+0.4 → checklist passes (Gate 7 is shadow-only)."""
     checklist = _make_checklist()
     signal = _make_signal(direction=0, cvd=0.4, calibrated_prob=0.35)
     result = checklist.run(signal=signal, **GOOD_KWARGS)
-    assert not result.passed
-    assert result.failed_gate == 7
-    assert "NO→DOWN" in result.failed_reason
+    assert result.passed
+    assert result.failed_gate != 7
 
 
-def test_gate7_passes_no_down_with_mild_positive_cvd():
-    """direction=0, cvd=+0.2 → passes Gate 7."""
+def test_gate7_aligned_cvd_still_passes():
+    """direction=1, cvd=+0.4 (aligned) → passes as before."""
+    checklist = _make_checklist()
+    signal = _make_signal(direction=1, cvd=0.4)
+    result = checklist.run(signal=signal, **GOOD_KWARGS)
+    assert result.failed_gate != 7
+
+
+def test_gate7_mild_opposing_cvd_passes():
+    """direction=0, cvd=+0.2 (below threshold) → passes as before."""
     checklist = _make_checklist()
     signal = _make_signal(direction=0, cvd=0.2, calibrated_prob=0.35)
     result = checklist.run(signal=signal, **GOOD_KWARGS)

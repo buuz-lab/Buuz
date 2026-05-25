@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS gate_rejections (
 
 _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("aged_out", "INTEGER DEFAULT 0"),
+    ("shadow", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -525,6 +526,34 @@ class KronosV2:
             except sqlite3.Error as exc:
                 logger.error(f"SQLite gate_rejections insert failed for {ticker}: {exc}")
             return
+
+        # Gate 7 shadow — log when CVD opposes direction but let trade proceed.
+        # Enforcing mode removed; shadow rows accumulate so win-rate can be tracked.
+        _cvd = (signal.regime_features or {}).get("cvd_normalized", 0.0)
+        _g7_reason: str | None = None
+        if signal.direction == 1 and _cvd < -config.CVD_GATE_THRESHOLD:
+            _g7_reason = f"CVD {_cvd:.3f} opposes YES→UP (threshold -{config.CVD_GATE_THRESHOLD})"
+        elif signal.direction == 0 and _cvd > config.CVD_GATE_THRESHOLD:
+            _g7_reason = f"CVD {_cvd:.3f} opposes NO→DOWN (threshold +{config.CVD_GATE_THRESHOLD})"
+        if _g7_reason:
+            try:
+                self._db.execute(
+                    """INSERT OR IGNORE INTO gate_rejections
+                       (rejection_id, timestamp, ticker, timeframe, direction,
+                        failed_gate, failed_reason, signal_prob, deepseek_regime,
+                        kalshi_mid_cents, features, shadow)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                    (
+                        str(uuid.uuid4()), time.time(), ticker, timeframe,
+                        signal.direction, 7, _g7_reason, signal.kronos_calibrated,
+                        signal.deepseek_regime, round(mid_cents),
+                        json.dumps(signal.regime_features or {}),
+                    ),
+                )
+                self._db.commit()
+                logger.info(f"Gate 7 shadow (trade proceeds): {ticker} — {_g7_reason}")
+            except sqlite3.Error as exc:
+                logger.error(f"SQLite gate_rejections shadow insert failed: {exc}")
 
         # h. Place order (or simulate in paper mode)
         trade_id = str(uuid.uuid4())
