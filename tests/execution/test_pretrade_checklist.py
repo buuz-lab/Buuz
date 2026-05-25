@@ -184,3 +184,28 @@ def test_gate6_boundary_149_fails(checklist):
     r = checklist.run(**kw)
     assert not r.passed
     assert r.failed_gate == 6
+
+
+# ── Gate 2: practical Kelly 1-contract floor ─────────────────────────────────
+
+def test_gate2_passes_with_1_contract_floor_at_boundary(checklist):
+    """Kelly=$0.23 on a 45¢ market (>= half of $0.45) → floor to 1 contract, passes."""
+    kw = base_kwargs()
+    kw["best_ask_cents"] = 45
+    with patch.object(checklist._kelly, "compute_size", return_value=0.23), \
+         patch.object(checklist._kelly, "dollars_to_contracts", return_value=0):
+        r = checklist.run(**kw)
+    assert r.passed
+    assert r.kelly_contracts == 1
+
+
+def test_gate2_fails_below_half_contract_cost(checklist):
+    """Kelly=$0.22 on a 45¢ market (< half of $0.45) → still fails Gate 2."""
+    kw = base_kwargs()
+    kw["best_ask_cents"] = 45
+    with patch.object(checklist._kelly, "compute_size", return_value=0.22), \
+         patch.object(checklist._kelly, "dollars_to_contracts", return_value=0):
+        r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 2
+    assert "rounds to 0" in r.failed_reason

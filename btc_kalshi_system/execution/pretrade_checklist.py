@@ -70,7 +70,10 @@ class PreTradeChecklist:
         kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
 
         if kelly_contracts == 0:
-            return fail(2, "Kelly size rounds to 0 contracts")
+            if kelly_dollars >= (trade_price_cents / 100) * 0.5:
+                kelly_contracts = 1
+            else:
+                return fail(2, "Kelly size rounds to 0 contracts")
         if kelly_contracts > available_contracts:
             return fail(2, f"Insufficient depth: need {kelly_contracts} contracts, {available_contracts} available")
 
