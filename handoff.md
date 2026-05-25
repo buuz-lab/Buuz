@@ -338,6 +338,11 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 - **Gate 2 is in SHADOW mode** (`REGIME_GATE2_ENFORCING=false`). Do not flip until regime model has been live for ~50 trades.
 
+- **Gate 2 "Kelly rounds to 0" — possible calibrator underfitting (small sample, treat with caution).** Analysis of 39 blocked trades (17 DOWN, 22 UP) using Kalshi mid as fill proxy showed the two sides behave oppositely:
+  - **DOWN blocks (+5.6¢ avg P&L per trade):** Buying NO at ~83¢ avg fill, 87.5% win rate → positive EV. Kelly rounds to 0 because the *calibrated* probability is close to the market price, but the actual win rate substantially exceeds it. Likely cause: calibrator is still underfitted (sub-500 training trades) and is dampening Kronos's DOWN signal toward 50%, making computed edge look thin when the true edge is real.
+  - **UP blocks (−4.9¢ avg P&L per trade):** Buying YES at ~87¢ avg fill, 81.8% win rate → negative EV. Gate 2 correctly blocking these.
+  - **Sample is small (17 DOWN, 22 UP resolved).** Do not act on this yet. Revisit after the calibrator is trained on ≥500 trades — if DOWN "Kelly rounds to 0" blocks still show positive EV after calibrator training, the Kelly floor or calibration curve may need adjustment.
+
 - **PositionMonitor exit never calls `add_position()`.** Calls `remove_position()` first, then raw API. Do not "fix" this — it would break `MAX_POSITIONS_PER_TICKER_PER_SIDE=2`.
 
 - **Kronos is blocking (2–3s on CPU).** Always `loop.run_in_executor(None, ...)`. Never call on event loop thread. Preload before asyncio starts (Apple Silicon segfault).
