@@ -41,7 +41,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Stats: 402 total trades, 401 resolved, 388 training-ready (21-feature), 1 deribit_stale=0 row
 - System running — check PID: `ps aux | grep "[Pp]ython.*main\.py"`
 - Latest commit: merge of session 5 DeepSeek enrichment
-- Test suite: **290 passing**
+- Test suite: **312 passing**
 - gate_rejections verified (session 3): 2 rows written within first signal cycle post-restart, all 21 features captured.
 
 **All phases complete:**
@@ -136,6 +136,8 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 - **CVD buffer freshness check at 180s** — false-positives on healthy cycles (feed writes every 240s). Use 360s.
 - **Hardcoded timestamps in CVD test mocks** — caused freshness check to fire in tests. Always use `time.time()` in test setups for CVD entries.
 - **403-only exchange failover** — only re-resolved on 403/Forbidden; timeouts and connection resets retried the same dead session object, leaving the feed silently broken for hours. Fixed: re-resolve on ANY exception.
+- **`iv_rv_spread` direct subtraction (unit mismatch)** — `atm_iv` is annualised % (~31), `brti_volatility_1h` is dimensionless tick CV (~0.001). Direct subtraction ≈ `atm_iv`, making the spread useless. Fix: annualise brti_vol before subtracting: `brti_vol × sqrt(8760) × 100`. Gives ~22% spread (31% IV − 9% RV). 3 existing DB rows were written with the correct formula (all `deribit_stale=0` rows post-restart used the fixed code). Bug identified and fixed 2026-05-25.
+- **`train_regime load_dataset` missing `use_27=True`** — with `_FEATURE_COLS` at 27 entries, the default `_build_query(legacy)` call used `_EXTRA_FILTERS_20` (no `deribit_stale` gate), which would have included rows where features 22–27 are NULL. XGBoost would learn those features as "always missing" at train time while inference supplies real values — silent model corruption. Fix: `_build_query(legacy, use_27=not legacy)`. The retrain correctly returns 0 rows until ≥500 `deribit_stale=0` rows accumulate.
 
 ---
 
