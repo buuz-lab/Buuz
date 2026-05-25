@@ -306,10 +306,15 @@ class DerivativesFeed:
             )
             return await self._kraken_trades_data()
 
-    async def _kraken_trades_data(self) -> tuple[float, float, float]:
+    async def _get_kraken_exchange(self):
+        """Lazy-initialize and return the Kraken ccxt exchange instance."""
         if self._kraken_exchange is None:
             self._kraken_exchange = self._ccxt_async.kraken({"enableRateLimit": True})
-        trades = await self._kraken_exchange.fetch_trades(_KRAKEN_SYMBOL, limit=500)
+        return self._kraken_exchange
+
+    async def _kraken_trades_data(self) -> tuple[float, float, float]:
+        kraken = await self._get_kraken_exchange()
+        trades = await kraken.fetch_trades(_KRAKEN_SYMBOL, limit=500)
         return self._cvd_normalized(trades), self._basis_spread_pct(trades), self._large_print_direction(trades)
 
     def _funding_rate_trend(self, history: list[dict]) -> float:
@@ -395,19 +400,24 @@ class DerivativesFeed:
         return float(val) if val else None
 
     async def _fetch_volume_ratio(self) -> float:
-        """1h volume as a multiple of the 30-day hourly average. 1.0 = normal."""
-        try:
-            candles = await self._exchange.fetch_ohlcv(_SYMBOL, "1h", limit=721)
-            if len(candles) < 30:
-                return 1.0
-            avg_volume = sum(c[5] for c in candles[:-1]) / len(candles[:-1])
-            if avg_volume == 0:
-                return 1.0
-            current_volume = candles[-1][5]
-            return round(current_volume / avg_volume, 3)
-        except Exception as exc:
-            logger.warning(f"DerivativesFeed: volume_ratio fetch failed — {exc}")
-            return 1.0
+        """1h volume as a multiple of the 30-day hourly average. 1.0 = normal.
+        Tries the primary exchange (OKX) first; falls back to Kraken spot."""
+        for exchange, symbol in [
+            (self._exchange, _SYMBOL),
+            (await self._get_kraken_exchange(), _KRAKEN_SYMBOL),
+        ]:
+            try:
+                candles = await exchange.fetch_ohlcv(symbol, "1h", limit=721)
+                if len(candles) < 30:
+                    return 1.0
+                avg_volume = sum(c[5] for c in candles[:-1]) / len(candles[:-1])
+                if avg_volume == 0:
+                    return 1.0
+                current_volume = candles[-1][5]
+                return round(current_volume / avg_volume, 3)
+            except Exception as exc:
+                logger.warning(f"DerivativesFeed: volume_ratio fetch failed for {symbol} — {exc}")
+        return 1.0
 
     # ── Redis write ────────────────────────────────────────────────────────────
 

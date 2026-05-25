@@ -476,3 +476,20 @@ async def test_multi_source_okx_partial_only_when_all_fail():
     assert funding == pytest.approx(0.0)
     assert oi_delta == pytest.approx(0.0)
     assert okx_partial is True
+
+
+@pytest.mark.asyncio
+async def test_volume_ratio_falls_back_to_kraken_when_okx_fails():
+    """When OKX fetch_ohlcv raises, Kraken spot candles are used for volume ratio."""
+    feed = make_feed()
+    feed._exchange = AsyncMock()
+    feed._exchange.fetch_ohlcv.side_effect = Exception("geo-blocked")
+
+    # 31 candles: 30 historical (avg vol=100) + 1 current (vol=200) → ratio=2.0
+    candles = [[0, 0, 0, 0, 0, 100.0]] * 30 + [[0, 0, 0, 0, 0, 200.0]]
+    mock_kraken = AsyncMock()
+    mock_kraken.fetch_ohlcv = AsyncMock(return_value=candles)
+    feed._kraken_exchange = mock_kraken
+
+    ratio = await feed._fetch_volume_ratio()
+    assert ratio == pytest.approx(2.0)
