@@ -244,6 +244,8 @@ class PositionMonitor:
             "hour_sin", "hour_cos", "kalshi_implied_prob", "funding_window_proximity",
             "trend_slope_1h", "trend_r2_1h", "hourly_sr_proximity",
             "range_breakout_flag", "tape_speed_tpm",
+            "atm_iv", "iv_rv_spread", "pcr_oi",
+            "term_structure_slope", "skew_25d", "kalshi_spread_normalized",
             "kronos_prob", "regime_direction", "exit_triggered",
         ]
         try:

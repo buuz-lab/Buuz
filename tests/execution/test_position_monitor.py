@@ -57,6 +57,8 @@ def _make_db():
             hour_sin REAL, hour_cos REAL, kalshi_implied_prob REAL,
             funding_window_proximity REAL, trend_slope_1h REAL, trend_r2_1h REAL,
             hourly_sr_proximity REAL, range_breakout_flag REAL, tape_speed_tpm REAL,
+            atm_iv REAL, iv_rv_spread REAL, pcr_oi REAL,
+            term_structure_slope REAL, skew_25d REAL, kalshi_spread_normalized REAL,
             kronos_prob REAL, regime_direction INTEGER, exit_triggered INTEGER,
             PRIMARY KEY (trade_id, snapshot_window)
         )
@@ -154,7 +156,9 @@ def _make_position_monitor(regime_direction=0, kronos_prob=0.3, clf_none=False, 
             brti_momentum_15min REAL, candle_progress REAL, hour_sin REAL, hour_cos REAL,
             kalshi_implied_prob REAL, funding_window_proximity REAL, trend_slope_1h REAL,
             trend_r2_1h REAL, hourly_sr_proximity REAL, range_breakout_flag REAL,
-            tape_speed_tpm REAL, kronos_prob REAL, regime_direction INTEGER, exit_triggered INTEGER,
+            tape_speed_tpm REAL, atm_iv REAL, iv_rv_spread REAL, pcr_oi REAL,
+            term_structure_slope REAL, skew_25d REAL, kalshi_spread_normalized REAL,
+            kronos_prob REAL, regime_direction INTEGER, exit_triggered INTEGER,
             PRIMARY KEY (trade_id, snapshot_window)
         )
     """)

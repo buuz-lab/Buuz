@@ -162,7 +162,14 @@ def parse_args() -> argparse.Namespace:
 def load_dataset(db_path: str, max_rows: int | None = None, legacy: bool = False) -> list[tuple]:
     if not Path(db_path).exists():
         sys.exit(f"Database not found: {db_path}")
-    query = _build_query(legacy)
+    # _FEATURE_COLS now has 27 entries (including Deribit options features 22–27).
+    # Always use _EXTRA_FILTERS_27 so the query requires deribit_stale=0 and
+    # atm_iv IS NOT NULL. Without this, rows where features 22–27 are NULL
+    # (deribit_stale=1) would be included, and XGBoost would learn that those
+    # features are "always missing" at training time — but inference provides real
+    # values, causing a silent model corruption. The query will return 0 rows
+    # until ~500 deribit_stale=0 rows have accumulated; that is the correct gate.
+    query = _build_query(legacy, use_27=not legacy)
     conn = sqlite3.connect(db_path)
     try:
         if max_rows is not None:

@@ -121,6 +121,15 @@ _TRADES_COLUMN_MIGRATIONS = [
     ("deribit_stale",            "INTEGER DEFAULT 1"),
 ]
 
+_TRADE_SNAPSHOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("atm_iv",                   "REAL"),
+    ("iv_rv_spread",             "REAL"),
+    ("pcr_oi",                   "REAL"),
+    ("term_structure_slope",     "REAL"),
+    ("skew_25d",                 "REAL"),
+    ("kalshi_spread_normalized", "REAL"),
+]
+
 _CREATE_TRADE_SNAPSHOTS_TABLE = """
 CREATE TABLE IF NOT EXISTS trade_snapshots (
     trade_id                TEXT,
@@ -146,6 +155,12 @@ CREATE TABLE IF NOT EXISTS trade_snapshots (
     hourly_sr_proximity     REAL,
     range_breakout_flag     REAL,
     tape_speed_tpm          REAL,
+    atm_iv                  REAL,
+    iv_rv_spread            REAL,
+    pcr_oi                  REAL,
+    term_structure_slope    REAL,
+    skew_25d                REAL,
+    kalshi_spread_normalized REAL,
     kronos_prob             REAL,
     regime_direction        INTEGER,
     exit_triggered          INTEGER,
@@ -249,6 +264,13 @@ class KronosV2:
                 # "duplicate column name" — column already exists. Safe to ignore.
                 pass
         self._db.execute(_CREATE_TRADE_SNAPSHOTS_TABLE)
+        for col_name, col_def in _TRADE_SNAPSHOTS_COLUMN_MIGRATIONS:
+            try:
+                self._db.execute(
+                    f"ALTER TABLE trade_snapshots ADD COLUMN {col_name} {col_def}"
+                )
+            except sqlite3.OperationalError:
+                pass
         self._db.execute(_CREATE_GATE_REJECTIONS_TABLE)
         for col_name, col_def in _GATE_REJECTIONS_COLUMN_MIGRATIONS:
             try:
@@ -624,12 +646,21 @@ class KronosV2:
             except Exception:
                 pass
 
-            # Derive iv_rv_spread from merged context (requires both sources present)
+            # Derive iv_rv_spread from merged context (requires both sources present).
+            # atm_iv is Deribit annualised implied vol in % (e.g. 31.1).
+            # brti_volatility_1h is a dimensionless tick CV (e.g. 0.0009).
+            # To compare them we convert brti_volatility_1h to annualised % by
+            # treating the 1h tick CV as an hourly vol and scaling to a year:
+            #   annualised_rv_pct = brti_vol_cv * sqrt(8760 hours/year) * 100
+            # This gives ~8–12% annualised RV, making the spread meaningful
+            # (e.g. 31% IV - 10% RV = 21% premium — options are expensive).
             try:
+                import math as _math
                 atm_iv = ctx.get("atm_iv")
                 rv = ctx.get("brti_volatility_1h")
                 if atm_iv is not None and rv is not None and rv > 0:
-                    ctx["iv_rv_spread"] = float(atm_iv) - float(rv)
+                    annualised_rv_pct = float(rv) * _math.sqrt(8760) * 100
+                    ctx["iv_rv_spread"] = float(atm_iv) - annualised_rv_pct
             except Exception:
                 pass
 

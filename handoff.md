@@ -144,6 +144,14 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Files Touched This Session (2026-05-24, session 6)
 
+**Session 6 (continued): trade_snapshots schema fix**
+
+| File | Change |
+|------|--------|
+| `main.py` | `_CREATE_TRADE_SNAPSHOTS_TABLE`: 6 new Deribit columns added (after `tape_speed_tpm`, before `kronos_prob`); `_TRADE_SNAPSHOTS_COLUMN_MIGRATIONS` list added; migration loop added in `__init__` — trade_snapshots: 6 new Deribit columns added for T+5/T+10 analytics |
+| `btc_kalshi_system/execution/position_monitor.py` | `_write_snapshot()` cols list: 6 new Deribit columns added (after `tape_speed_tpm`, before `kronos_prob`) — trade_snapshots: 6 new Deribit columns added for T+5/T+10 analytics |
+| `tests/execution/test_position_monitor.py` | Inline `CREATE TABLE trade_snapshots` in `_make_db()` and `_make_position_monitor()` updated to include 6 new columns |
+
 **Session 6 (Deribit Options Feed — features 22–27):**
 
 | File | Change |
