@@ -29,22 +29,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
-from btc_kalshi_system.models.regime_model import RegimeModel
+from btc_kalshi_system.models.regime_model import RegimeModel, _FEATURE_ORDER
 
 import numpy as np
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _MARKER_PATH = "models/last_trained.json"
-
-_FEATURE_COLS = [
-    "funding_rate",
-    "funding_rate_trend",
-    "oi_delta_pct",
-    "cvd_normalized",
-    "basis_spread_pct",
-    "brti_volatility_1h",
-]
 
 _FRESH_FILTER = (
     "features_stale = 0"
@@ -56,10 +47,16 @@ _FRESH_FILTER = (
     " AND brti_volatility_1h IS NOT NULL"
 )
 
+# Requires deribit_stale=0 so the row trigger fires only when enough 27-feature
+# rows exist. Without this, the trigger would count ~388 rows (all 21-feature
+# rows) and fire on ~June 2 when train_regime.py would immediately fail because
+# it enforces deribit_stale=0 internally via _EXTRA_FILTERS_27.
 _TRAINING_READY_FILTER = (
     "features_stale = 0"
     " AND funding_rate IS NOT NULL"
     " AND outcome IS NOT NULL"
+    " AND deribit_stale = 0"
+    " AND atm_iv IS NOT NULL"
 )
 
 _ROW_TRIGGER_DELTA = 500          # retrain when +500 new training-ready rows
@@ -100,7 +97,7 @@ def compute_rolling_health(db_path: str, model_path: str) -> tuple[float, float]
     if not Path(db_path).exists():
         return None
 
-    feat_cols_sql = ", ".join(_FEATURE_COLS)
+    feat_cols_sql = ", ".join(_FEATURE_ORDER)
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
@@ -120,11 +117,11 @@ def compute_rolling_health(db_path: str, model_path: str) -> tuple[float, float]
     briers = []
 
     for row in rows:
-        feat_vals = row[: len(_FEATURE_COLS)]
-        direction = int(row[len(_FEATURE_COLS)])
-        outcome = int(row[len(_FEATURE_COLS) + 1])
+        feat_vals = row[: len(_FEATURE_ORDER)]
+        direction = int(row[len(_FEATURE_ORDER)])
+        outcome = int(row[len(_FEATURE_ORDER) + 1])
 
-        feat_dict = dict(zip(_FEATURE_COLS, feat_vals))
+        feat_dict = dict(zip(_FEATURE_ORDER, feat_vals))
         result = model.get_regime(feat_dict)
 
         prob_up = result["prob_up"]

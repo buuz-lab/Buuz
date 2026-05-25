@@ -21,31 +21,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
-from btc_kalshi_system.models.regime_model import RegimeModel
-
-_FEATURE_COLS = [
-    "funding_rate",
-    "funding_rate_trend",
-    "oi_delta_pct",
-    "cvd_normalized",
-    "basis_spread_pct",
-    "brti_volatility_1h",
-    "cvd_velocity",
-    "cvd_acceleration",
-    "brti_momentum_5min",
-    "brti_momentum_15min",
-    "candle_progress",
-    "hour_sin",
-    "hour_cos",
-    "kalshi_implied_prob",
-    "funding_window_proximity",
-    "trend_slope_1h",
-    "trend_r2_1h",
-    "hourly_sr_proximity",
-    "range_breakout_flag",
-    "tape_speed_tpm",
-    "large_print_direction",
-]
+from btc_kalshi_system.models.regime_model import RegimeModel, _FEATURE_ORDER
 
 # Legacy 6-feature filter: used to count post-instrumentation rows (all rows since
 # the original feature logging was added, regardless of 20-feature expansion).
@@ -121,12 +97,21 @@ def section_training_progress(conn: sqlite3.Connection) -> None:
              AND outcome IS NOT NULL"""
     ).fetchone()[0]
 
+    _DERIBIT_FILTER = _FRESH_FILTER + " AND deribit_stale = 0 AND atm_iv IS NOT NULL"
+    training_ready_27 = conn.execute(
+        f"""SELECT COUNT(*) FROM trades
+           WHERE {_DERIBIT_FILTER}
+             AND outcome IS NOT NULL"""
+    ).fetchone()[0]
+
     print("=== TRAINING PROGRESS ===")
     print(f"Total rows in trades.db        : {total_rows}")
     print(f"Post-instrumentation rows      : {post_instr}  (funding_rate IS NOT NULL)")
     print(f"Training-ready (6-feature)     : {training_ready_6}  (features_stale=0, resolved)")
     print(f"Training-ready (21-feature)    : {training_ready_20}  (all new cols NOT NULL)")
+    print(f"Training-ready (27-feature)    : {training_ready_27}  (deribit_stale=0, atm_iv NOT NULL)")
     print(f"Progress to 500 (21-feature)   : {_progress_bar(training_ready_20, 500)}")
+    print(f"Progress to 500 (27-feature)   : {_progress_bar(training_ready_27, 500)}")
 
     # Resolved rate over last 7 days (or full window if less data)
     recent_resolved = conn.execute(
@@ -171,22 +156,24 @@ def section_training_progress(conn: sqlite3.Connection) -> None:
     else:
         print("Estimated days to 500          : N/A (no resolved-rate data)")
 
-    # Feature variance stats on fresh rows
-    feat_cols_sql = ", ".join(_FEATURE_COLS)
+    # Feature variance stats on 27-feature-clean rows; fall back to 21-feature rows
+    # if not enough deribit_stale=0 rows exist yet.
+    _DERIBIT_FILTER = _FRESH_FILTER + " AND deribit_stale = 0 AND atm_iv IS NOT NULL"
+    feat_cols_sql = ", ".join(_FEATURE_ORDER)
     fresh_rows = conn.execute(
         f"""SELECT {feat_cols_sql} FROM trades
-            WHERE {_FRESH_FILTER}"""
+            WHERE {_DERIBIT_FILTER}"""
     ).fetchall()
 
     print()
-    print("Feature variance stats (fresh rows):")
+    print("Feature variance stats (27-feature clean rows):")
     if not fresh_rows:
-        print("  (no fresh rows available)")
+        print("  (no deribit_stale=0 rows yet — accumulating)")
     else:
         arr = np.array(fresh_rows, dtype=float)
         header = f"  {'Feature':<26s} {'mean':>12s} {'std':>12s} {'min':>12s} {'max':>12s}"
         print(header)
-        for i, feat in enumerate(_FEATURE_COLS):
+        for i, feat in enumerate(_FEATURE_ORDER):
             col = arr[:, i]
             print(
                 f"  {feat:<26s} {np.mean(col):>12.6f} {np.std(col):>12.6f}"
@@ -231,20 +218,21 @@ def section_feature_staleness(conn: sqlite3.Connection) -> None:
 def section_zero_variance(conn: sqlite3.Connection) -> None:
     print("=== ZERO-VARIANCE CHECK ===")
 
-    feat_cols_sql = ", ".join(_FEATURE_COLS)
+    _DERIBIT_FILTER = _FRESH_FILTER + " AND deribit_stale = 0 AND atm_iv IS NOT NULL"
+    feat_cols_sql = ", ".join(_FEATURE_ORDER)
     fresh_rows = conn.execute(
         f"""SELECT {feat_cols_sql} FROM trades
-            WHERE {_FRESH_FILTER}"""
+            WHERE {_DERIBIT_FILTER}"""
     ).fetchall()
 
     if not fresh_rows:
-        print("  (no fresh rows — cannot check variance)")
+        print("  (no deribit_stale=0 rows yet — cannot check 27-feature variance)")
         print()
         return
 
     arr = np.array(fresh_rows, dtype=float)
     zero_var_found = False
-    for i, feat in enumerate(_FEATURE_COLS):
+    for i, feat in enumerate(_FEATURE_ORDER):
         std = float(np.std(arr[:, i]))
         if std < 1e-6:
             print(
@@ -254,7 +242,7 @@ def section_zero_variance(conn: sqlite3.Connection) -> None:
             zero_var_found = True
 
     if not zero_var_found:
-        print("  All features have non-zero variance. OK.")
+        print("  All 27 features have non-zero variance. OK.")
     print()
 
 
@@ -273,18 +261,19 @@ def section_post_deployment_health(conn: sqlite3.Connection, model_path: str) ->
     print(f"Model found at: {model_path}")
     print("Evaluating on last 100 resolved training-ready trades...")
 
-    feat_cols_sql = ", ".join(_FEATURE_COLS)
+    _DERIBIT_FILTER = _FRESH_FILTER + " AND deribit_stale = 0 AND atm_iv IS NOT NULL"
+    feat_cols_sql = ", ".join(_FEATURE_ORDER)
     rows = conn.execute(
         f"""SELECT {feat_cols_sql}, direction, outcome
             FROM trades
-            WHERE {_FRESH_FILTER}
+            WHERE {_DERIBIT_FILTER}
               AND outcome IS NOT NULL
             ORDER BY timestamp DESC
             LIMIT 100"""
     ).fetchall()
 
     if not rows:
-        print("  No resolved training-ready trades found — cannot evaluate.")
+        print("  No resolved 27-feature-clean trades found — cannot evaluate.")
         print()
         return
 
@@ -293,11 +282,11 @@ def section_post_deployment_health(conn: sqlite3.Connection, model_path: str) ->
     briers = []
 
     for row in rows:
-        feat_vals = row[: len(_FEATURE_COLS)]
-        direction = int(row[len(_FEATURE_COLS)])
-        outcome = int(row[len(_FEATURE_COLS) + 1])
+        feat_vals = row[: len(_FEATURE_ORDER)]
+        direction = int(row[len(_FEATURE_ORDER)])
+        outcome = int(row[len(_FEATURE_ORDER) + 1])
 
-        feat_dict = dict(zip(_FEATURE_COLS, feat_vals))
+        feat_dict = dict(zip(_FEATURE_ORDER, feat_vals))
         result = model.get_regime(feat_dict)
 
         prob_up = result["prob_up"]
