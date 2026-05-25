@@ -222,6 +222,35 @@ class DerivativesFeed:
 
         return funding_8h, oi_delta
 
+    async def _fetch_kraken_futures_funding_and_oi(self) -> tuple[float, float]:
+        """Returns (funding_rate_8h_equiv, oi_delta_pct) from Kraken Futures.
+        fundingRate from their API is annualized; divide by 1095 to get 8h equivalent.
+        openInterest is USD-denominated; consistent for delta_pct calculation."""
+        url = f"{_KRAKEN_FUTURES_BASE}/tickers"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json()
+
+        ticker = next(
+            (t for t in data["tickers"] if t.get("symbol") == "PF_XBTUSD"),
+            None,
+        )
+        if ticker is None:
+            raise ValueError("PF_XBTUSD not found in Kraken Futures tickers")
+
+        funding_annual = float(ticker["fundingRate"] or 0.0)
+        funding_8h = funding_annual / (365 * 3)
+
+        curr_oi = float(ticker.get("openInterest") or 0.0)
+        prev = self._prev_oi["kraken_futures"]
+        oi_delta = self._oi_delta_pct(prev, curr_oi)
+        self._prev_oi["kraken_futures"] = curr_oi
+
+        return funding_8h, oi_delta
+
     async def _fetch_trades_data(self) -> tuple[float, float, float]:
         """Returns (cvd_normalized, basis_spread_pct, large_print_direction).
         Tries OKX first; falls back to Kraken fetchTrades on any exception."""

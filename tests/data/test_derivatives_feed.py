@@ -358,3 +358,35 @@ async def test_hyperliquid_fetcher_returns_normalized_funding_and_oi():
 
     assert funding == pytest.approx(0.0000125 * 8)   # normalized to 8h
     assert oi_delta == pytest.approx(0.10)            # (1100 - 1000) / 1000
+
+
+@pytest.mark.asyncio
+async def test_kraken_futures_fetcher_returns_normalized_funding_and_oi():
+    """_fetch_kraken_futures_funding_and_oi converts annualized rate to 8h and computes OI delta."""
+    feed = make_feed()
+    feed._prev_oi = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 500_000.0}
+
+    kf_response = {
+        "tickers": [
+            {"symbol": "PF_XBTUSD", "fundingRate": 0.1095, "openInterest": 550_000.0},
+            {"symbol": "FI_XBTUSD_250926", "fundingRate": None, "openInterest": 100_000.0},
+        ]
+    }
+
+    mock_resp = AsyncMock()
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_resp.json = AsyncMock(return_value=kf_response)
+
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.get = MagicMock(return_value=mock_resp)
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        funding, oi_delta = await feed._fetch_kraken_futures_funding_and_oi()
+
+    # 0.1095 annualized / 1095 periods = 0.0001 per 8h
+    assert funding == pytest.approx(0.0001)
+    # (550k - 500k) / 500k = 0.10
+    assert oi_delta == pytest.approx(0.10)
