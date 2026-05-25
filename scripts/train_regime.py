@@ -125,7 +125,8 @@ _EXTRA_FILTERS_20 = """AND cvd_velocity IS NOT NULL
   AND brti_momentum_5min IS NOT NULL
   AND kalshi_implied_prob IS NOT NULL
   AND funding_window_proximity IS NOT NULL
-  AND large_print_direction IS NOT NULL"""
+  AND large_print_direction IS NOT NULL
+  AND COALESCE(okx_stale, 0) = 0"""
 
 _EXTRA_FILTERS_27 = _EXTRA_FILTERS_20 + "\n  AND deribit_stale = 0\n  AND atm_iv IS NOT NULL"
 
