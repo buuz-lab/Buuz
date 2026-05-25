@@ -103,7 +103,9 @@ class SignalFusionEngine:
     def update_kalshi_spread(self, spread: float) -> None:
         self._market_context["kalshi_spread_normalized"] = spread
 
-    def get_signal(self, timeframe: str, strike: float) -> Optional[TradingSignal]:
+    def get_signal(
+        self, timeframe: str, strike: float, kronos_raw: float | None = None
+    ) -> Optional[TradingSignal]:
         ds = self._deepseek.get_current_context(self._market_context)
 
         # Gate 1: DeepSeek says suppress
@@ -122,12 +124,9 @@ class SignalFusionEngine:
 
         deepseek_regime = ds["regime"]
 
-        # For KXBTC15M up/down markets, strike = close of the last completed 15-min
-        # BRTI candle (i.e. the BRTI price at the open of the current 15-min window).
-        # This computes P(predicted_5min_close > last_15min_close) ≈ P(market resolves yes).
-        # The caller (_extract_strike in main.py) is responsible for supplying the
-        # correct reference price — do not substitute spot price or 5-min close here.
-        kronos_raw = self._kronos.run_monte_carlo(self._store, threshold=strike)
+        if kronos_raw is None:
+            # only used in tests — production always provides kronos_raw from _cached_kronos
+            kronos_raw = self._kronos.run_monte_carlo(self._store, threshold=strike)
         kronos_cal = self._calibrator.transform(kronos_raw)
         kronos_direction = 1 if kronos_cal >= 0.5 else 0
 

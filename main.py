@@ -284,6 +284,7 @@ class KronosV2:
         self._running = False
         self._last_deepseek_refresh = 0.0
         self._last_recovery_attempt = 0.0
+        self._cached_kronos: dict | None = None
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -311,6 +312,7 @@ class KronosV2:
             self._main_loop(),
             self._regime_watchdog(),
             self._position_monitor.run(),
+            self._kronos_background_loop(),
         )
 
     async def _main_loop(self) -> None:
@@ -329,6 +331,38 @@ class KronosV2:
             elapsed = time.time() - loop_start
             await asyncio.sleep(max(0, SIGNAL_INTERVAL_SECONDS - elapsed))
         logger.info("KronosV2 main loop stopped")
+
+    async def _kronos_background_loop(self) -> None:
+        last_candle_ts = None
+        while self._running:
+            try:
+                df = self._store.get_ohlcv("5min")
+                if df is not None and len(df) >= 10:
+                    current_ts = df.index[-1]
+                    if current_ts != last_candle_ts:
+                        last_candle_ts = current_ts
+                        strike = await asyncio.to_thread(self._get_15min_reference_price)
+                        try:
+                            prob = await asyncio.to_thread(
+                                self._kronos.run_monte_carlo, self._store, 100, strike
+                            )
+                            # Always assign a new dict — never mutate in place (GIL safety)
+                            self._cached_kronos = {
+                                "prob": prob,
+                                "candle_ts": current_ts,
+                                "computed_at": time.time(),
+                                "strike": strike,
+                            }
+                            logger.info(
+                                f"KronosBG: prob={prob:.4f} strike={strike:.2f} candle={current_ts}"
+                            )
+                        except ValueError as exc:
+                            logger.warning(f"KronosBG: insufficient OHLCV data — {exc}")
+                        except Exception as exc:
+                            logger.error(f"KronosBG: MC failed — {exc}")
+            except Exception as exc:
+                logger.error(f"KronosBG: loop error — {exc}")
+            await asyncio.sleep(10)
 
     async def _regime_watchdog(self) -> None:
         """Warn when regime:features TTL is dangerously low or key has expired."""
@@ -356,6 +390,22 @@ class KronosV2:
                     )
             except Exception as exc:
                 logger.error(f"WATCHDOG: TTL check failed — {exc}")
+            try:
+                if (
+                    self._cached_kronos is not None
+                    and time.time() - self._cached_kronos["computed_at"] > 360
+                ):
+                    logger.error(
+                        "WATCHDOG: Kronos cache stale — background loop may be stuck"
+                    )
+                    subprocess.run(
+                        ["osascript", "-e",
+                         'display notification "Kronos cache stale — background loop may be stuck"'
+                         ' with title "KronosV2 ALERT" sound name "Sosumi"'],
+                        check=False,
+                    )
+            except Exception as exc:
+                logger.error(f"WATCHDOG: Kronos cache check failed — {exc}")
 
     def stop(self) -> None:
         logger.info("KronosV2 stopping")
@@ -446,8 +496,22 @@ class KronosV2:
         self._fusion.update_kalshi_spread(kalshi_spread_normalized)
         self._fusion.update_kalshi_mid(mid_cents)
 
-        # f. Signal
-        signal = self._fusion.get_signal(timeframe=timeframe, strike=strike)
+        # f. Read background MC cache — avoids 23s Kronos call on the critical path
+        cached = self._cached_kronos
+        if cached is None:
+            logger.info(f"Kronos cache not yet populated — skipping cycle for {ticker}")
+            return
+        _cache_age = time.time() - cached["computed_at"]
+        if _cache_age > 600:
+            logger.error(
+                f"Kronos cache too stale ({_cache_age:.0f}s) — skipping cycle for {ticker}"
+            )
+            return
+        logger.debug(
+            f"KronosBG strike delta: ${abs(cached['strike'] - strike):.2f} "
+            f"(cached={cached['strike']:.2f} market={strike:.2f})"
+        )
+        signal = self._fusion.get_signal(timeframe=timeframe, strike=strike, kronos_raw=cached["prob"])
         if signal is None:
             logger.debug(f"No signal for {ticker} (gated out)")
             return
@@ -555,49 +619,83 @@ class KronosV2:
             except sqlite3.Error as exc:
                 logger.error(f"SQLite gate_rejections shadow insert failed: {exc}")
 
-        # h. Place order (or simulate in paper mode)
+        # h. Second orderbook fetch — get fresh prices right before placing the order.
+        #    The first fetch (T+0) was for kalshi_mid/spread feature injection only.
+        #    Both paper and live mode abort if the second fetch fails.
+        try:
+            orderbook_resp2 = self._router.get_orderbook(ticker)
+        except Exception as exc:
+            logger.warning(
+                f"Second orderbook fetch failed for {ticker} — aborting order: {exc}"
+            )
+            return
+        fresh_bid, fresh_ask, fresh_contracts = self._parse_orderbook(orderbook_resp2)
+        if fresh_ask == 0:
+            logger.warning(f"Second orderbook empty for {ticker} — aborting order")
+            return
+
+        result2 = self._checklist.run(
+            signal=signal,
+            best_ask_cents=fresh_ask,
+            best_bid_cents=fresh_bid,
+            available_contracts=fresh_contracts,
+            current_exposure=current_exposure,
+            same_timeframe_open=same_timeframe_open,
+            composite_price=composite_price,
+            edge_above_threshold=edge_above_threshold,
+        )
+        if not result2.passed:
+            logger.info(
+                f"Second-fetch checklist failed for {ticker} [gate {result2.failed_gate}]: "
+                f"{result2.failed_reason}"
+            )
+            return
+
+        fill_price_cents = fresh_ask if signal.direction == 1 else (100 - fresh_bid)
+
+        # i. Place order (or simulate in paper mode)
         trade_id = str(uuid.uuid4())
         side = "yes" if signal.direction == 1 else "no"
         if config.PAPER_TRADING:
             logger.info(
-                f"[PAPER] Simulated fill: {ticker} {side} {result.kelly_contracts}@{fill_price_cents}¢ "
-                f"(${result.kelly_dollars:.2f} kelly) trade_id={trade_id}"
+                f"[PAPER] Simulated fill: {ticker} {side} {result2.kelly_contracts}@{fill_price_cents}¢ "
+                f"(${result2.kelly_dollars:.2f} kelly) trade_id={trade_id}"
             )
         else:
             try:
                 self._router.place_order(
                     ticker=ticker,
                     side=side,
-                    count=result.kelly_contracts,
+                    count=result2.kelly_contracts,
                     price_cents=fill_price_cents,
                     client_order_id=trade_id,
                 )
                 logger.info(
-                    f"Order placed: {ticker} {side} {result.kelly_contracts}@{fill_price_cents}¢ "
-                    f"(${result.kelly_dollars:.2f} kelly) trade_id={trade_id}"
+                    f"Order placed: {ticker} {side} {result2.kelly_contracts}@{fill_price_cents}¢ "
+                    f"(${result2.kelly_dollars:.2f} kelly) trade_id={trade_id}"
                 )
             except Exception as exc:
                 logger.error(f"Order placement failed for {ticker}: {exc}")
                 return
 
-        # i. Record position
+        # j. Record position
         position = OpenPosition(
             trade_id=trade_id,
             ticker=ticker,
             timeframe=timeframe,
             direction=signal.direction,
             strike=strike,
-            contracts=result.kelly_contracts,
+            contracts=result2.kelly_contracts,
             entry_price_cents=fill_price_cents,
-            kelly_dollars=result.kelly_dollars,
+            kelly_dollars=result2.kelly_dollars,
             timestamp=time.time(),
             calibrated_prob=signal.calibrated_prob,
             deepseek_regime=signal.deepseek_regime,
         )
         self._monitor.add_position(position)
 
-        # j. Log to SQLite
-        self._record_trade_sqlite(trade_id, signal, result, ticker, fill_price_cents)
+        # k. Log to SQLite
+        self._record_trade_sqlite(trade_id, signal, result2, ticker, fill_price_cents)
 
     # ── Helper methods ────────────────────────────────────────────────────────
 

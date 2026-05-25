@@ -81,6 +81,13 @@ def _make_trader(db: sqlite3.Connection):
     trader._monitor.ticker_direction_count.return_value = 0
     trader._monitor.get_current_exposure.return_value = 0.0
     trader._monitor.has_timeframe_position.return_value = False
+    import pandas as pd
+    trader._cached_kronos = {
+        "prob": 0.65,
+        "candle_ts": pd.Timestamp("2024-01-01 12:00:00", tz="UTC"),
+        "computed_at": time.time(),
+        "strike": 96250.0,
+    }
     return trader
 
 

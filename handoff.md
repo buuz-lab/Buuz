@@ -10,6 +10,36 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-25 session 8: Background Kronos MC loop + second orderbook fetch COMPLETE. Trades now execute at T+180ms instead of T+23s. 338 tests pass.**
+
+**Session 8: Background Kronos MC loop + second orderbook fetch**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/signal/fusion.py` | `get_signal()` gains `kronos_raw: float \| None = None` parameter — when provided, skips `run_monte_carlo()` call entirely; when None (default), calls MC as before (backward compat for tests) |
+| `main.py` | `__init__`: `self._cached_kronos: dict \| None = None`; new `_kronos_background_loop()` coroutine; added to `asyncio.gather()`; cache staleness watchdog added to `_regime_watchdog()` (fires at >360s); `_process_market`: reads `_cached_kronos` before `get_signal()` (None → INFO skip, >600s → ERROR skip), logs strike delta at DEBUG, passes `kronos_raw=cached["prob"]` to `get_signal()`, second orderbook fetch after first checklist passes, re-runs full checklist on fresh prices, uses `result2`+fresh `fill_price_cents` for order placement and DB record |
+| `tests/test_main_bg_kronos.py` | **New** — 9 TDD tests: background loop (populates cache, no-rerun on same candle, survives MC exception), process_market cache guard (None skip, stale skip, kronos_raw passthrough), second fetch (abort on failure, abort on checklist fail, fill_price from second fetch) |
+| `tests/signal/test_fusion_kronos_raw.py` | **New** — 3 TDD tests: skips MC when kronos_raw provided, calls MC when None, calibrator receives provided value |
+| `tests/execution/test_gate_rejections.py` | `_make_trader()` adds `trader._cached_kronos` with valid cache so existing gate rejection tests reach the checklist |
+
+**Architecture — `_cached_kronos` dict structure:**
+```python
+{
+    "prob":       float,          # P(close > strike) from run_monte_carlo
+    "candle_ts":  pd.Timestamp,   # timestamp of the 5-min candle that triggered this run
+    "computed_at": float,         # time.time() when MC finished
+    "strike":     float,          # 15-min reference price used as MC threshold
+}
+```
+
+**Background loop behavior:** Polls `store.get_ohlcv("5min")` every 10s; detects new candle via `last_candle_ts`; runs `run_monte_carlo` in `asyncio.to_thread`; writes a new dict (never mutates in place); logs at INFO. Errors (MC failure, OHLCV insufficient) caught per-iteration; loop never exits.
+
+**Second orderbook fetch behavior:** After first checklist passes, fetches orderbook again (~90ms). Both paper and live mode abort if this fails. Re-runs full `checklist.run()` on fresh bid/ask/contracts. If second checklist fails, logs INFO with gate number and returns. `fill_price_cents` and `result2` (kelly $, contracts) from second fetch are used for order placement, `OpenPosition`, and SQLite record.
+
+**Test suite: 338 passing (was 326).**
+
+---
+
 **As of 2026-05-25 session 7 (continued): Gate 7 (CVD soft gate) converted to shadow mode — no longer blocks trades. Shadow rows written to `gate_rejections` with `shadow=1` so win-rate tracking continues. 326 tests pass.**
 
 **Session 7 (continued): Gate 7 shadow mode**
@@ -157,6 +187,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## What Worked
 
+- **Background MC loop — trades now execute at T+180ms instead of T+23s.** Decoupling Kronos from the trading cycle eliminates the 23s order-placement delay. Second orderbook fetch resolves the stale-price problem simultaneously. Both paper and live mode abort on second-fetch failure.
 - **3-file feature order contract enforced by test.** `python3 -m pytest tests/ -k "feature_order"` catches any mismatch between `regime_model.py`, `train_regime.py`, `fusion.py`.
 - **fakeredis injection** for testing Redis-dependent code without a live Redis server.
 - **TTL=600s + refresh every 240s** (not TTL=refresh) — gives headroom so `regime:features` never expires between writes.
@@ -177,6 +208,7 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 - **Backfilling pre-instrumentation trades** — funding/OI/CVD not reconstructable.
 - **CVD buffer freshness check at 180s** — false-positives on healthy cycles (feed writes every 240s). Use 360s.
 - **Hardcoded timestamps in CVD test mocks** — caused freshness check to fire in tests. Always use `time.time()` in test setups for CVD entries.
+- **Stale orderbook on order placement (RESOLVED session 8).** Was: orderbook fetched at T+0, Kronos ran ~23s, limit order placed at T+0 price. Fix: background MC loop + second orderbook fetch right before placement. Both paper and live mode abort on second-fetch failure. First fetch kept for feature injection only.
 - **403-only exchange failover** — only re-resolved on 403/Forbidden; timeouts and connection resets retried the same dead session object, leaving the feed silently broken for hours. Fixed: re-resolve on ANY exception.
 - **`iv_rv_spread` direct subtraction (unit mismatch)** — `atm_iv` is annualised % (~31), `brti_volatility_1h` is dimensionless tick CV (~0.001). Direct subtraction ≈ `atm_iv`, making the spread useless. Fix: annualise brti_vol before subtracting: `brti_vol × sqrt(8760) × 100`. Gives ~22% spread (31% IV − 9% RV). 3 existing DB rows were written with the correct formula (all `deribit_stale=0` rows post-restart used the fixed code). Bug identified and fixed 2026-05-25.
 - **`train_regime load_dataset` missing `use_27=True`** — with `_FEATURE_COLS` at 27 entries, the default `_build_query(legacy)` call used `_EXTRA_FILTERS_20` (no `deribit_stale` gate), which would have included rows where features 22–27 are NULL. XGBoost would learn those features as "always missing" at train time while inference supplies real values — silent model corruption. Fix: `_build_query(legacy, use_27=not legacy)`. The retrain correctly returns 0 rows until ≥500 `deribit_stale=0` rows accumulate.
@@ -304,7 +336,80 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 5. **After ~50 shadow trades with regime model live:** Flip `PAPER_TRADING=false` in `.env` and restart to go live.
 
-6. **Post-go-live (deferred):** Kalshi intra-cycle YES momentum (needs new polling infra). Slippage gate for 15min markets (needs 200+ spread samples first).
+6. ✅ **Second orderbook fetch + stale price fix COMPLETE (session 8).** Trades now use fresh prices from second fetch for order placement, Kelly sizing, and DB record. Both paper and live mode abort on second-fetch failure.
+
+7. ✅ **Background Kronos MC loop COMPLETE (session 8).** `_kronos_background_loop` runs in `asyncio.gather()`. Trades now execute at T+180ms instead of T+23s.
+
+8. **Post-go-live (deferred):** Kalshi intra-cycle YES momentum (needs new polling infra). Slippage gate for 15min markets (needs 200+ spread samples first).
+
+---
+
+## Kronos Monte Carlo — Timing Analysis & Decoupling Plan
+
+### Measured timing (2026-05-25, 4 cycles, steady-state)
+
+| Step | Latency |
+|------|---------|
+| Orderbook fetch (Kalshi REST) | 76–98ms (~90ms typical) |
+| Kronos Monte Carlo (100 paths, CPU) | 22,463–27,456ms (~23s typical) |
+| Everything else (Redis, checklist, Kelly, order submit) | <200ms |
+| **Total cycle wall time** | **~23s** |
+| Cycle interval | 300s |
+| CPU idle per cycle | ~277s |
+
+Monte Carlo is 100 sequential `predictor.predict()` calls at ~230ms each. Runs in `asyncio.to_thread` so it doesn't block WebSocket feeds, but it blocks trade placement by ~23s every cycle.
+
+### Why the current architecture is wrong
+
+The 300s cycle does: fetch orderbook → run MC (23s) → place order at **T+0 price**.
+
+Two problems:
+1. **Stale price**: limit order uses the T+0 orderbook snapshot. By T+23 the market has moved. See Next Step 6.
+2. **Wasted idle time**: MC finishes at T+23, then the system sleeps for ~277s. Meanwhile OHLCV ticks in and the signal goes stale. MC could have run again.
+
+### Correct architecture: background MC loop
+
+Decouple MC from the trading cycle entirely:
+
+```
+Background task (_kronos_background_loop):
+  loop forever:
+    wait for new 5-min candle (poll store.get_ohlcv("5min"), detect timestamp change)
+    run MC (~23s) → store (prob, candle_timestamp) as self._cached_kronos
+    # no sleep needed — next iteration immediately checks for new candle
+
+Main 5-min cycle (_process_market):
+  fetch orderbook #1 (~90ms) → inject kalshi_mid + spread into fusion
+  read self._cached_kronos  ← instant, no 23s wait
+  if cache stale (>10min old): skip cycle, log warning
+  run gates on fresh signal
+  fetch orderbook #2 (~90ms) → fresh prices for gates + order placement
+  place order at fresh ask price
+```
+
+**Effect:** trades placed at **T+90ms** instead of T+23s. A 250× reduction in trade latency from cycle start to order submission. Stale orderbook bug also resolved because the second fetch happens right before placing.
+
+**Why once per candle is sufficient:** OHLCV only changes every 5 minutes. Running MC more than once per candle is identical computation on identical input — wasted CPU. The background loop naturally paces itself: 23s of work, ~277s waiting for the next candle.
+
+### MC efficiency options (if 23s per run needs to be reduced)
+
+| Option | Speedup | Cost |
+|--------|---------|------|
+| Reduce `n_paths` 100→50 | ~2× (→12s) | Noisier prob estimates (±5% vs ±3%) |
+| Reduce `n_paths` 100→25 | ~4× (→6s) | Noticeably noisier (±7%) |
+| `torch.no_grad()` wrapper | ~10–15% | None — pure win if not already wrapped |
+| `ThreadPoolExecutor` across paths | 2–4× (GPU-free) | PyTorch releases GIL during tensor ops; needs hardware testing |
+| `sample_count=100` in one call | Potentially 5–10× | The predictor comment says "averages paths internally" — test if a single call with `sample_count=100` gives same variance as 100 calls with `sample_count=1`. If yes, this is the biggest win. |
+
+With the background loop, the 23s per run stops being on the critical path entirely, so efficiency tuning becomes optional rather than urgent. Recommended order: (1) implement background loop first, (2) try `torch.no_grad()` as a free win, (3) only optimize further if CPU load becomes a concern.
+
+### Implementation notes
+
+- `_cached_kronos` should store `{"prob": float, "candle_ts": pd.Timestamp, "computed_at": float}` — `candle_ts` is the timestamp of the candle that triggered the MC run; `computed_at` is `time.time()` when MC finished.
+- Cache freshness check in `_process_market`: if `time.time() - cached["computed_at"] > 600`, skip and log — something broke in the background loop.
+- Background loop must handle `ValueError: Insufficient OHLCV data` (not enough candles on startup) — catch and retry after 60s.
+- `_kronos_background_loop` added to `asyncio.gather()` in `run()` alongside existing feed tasks.
+- Strike for the cached MC run: use `self._get_15min_reference_price()` — same as what `_process_market` computes. If strike changes between MC run and cycle (unlikely intra-candle), the cached prob is still directionally valid.
 
    **Gate 8 (candle_progress / UTC dark gate) — DEFERRED until more data:** Only 33/384 trades have `candle_progress` populated, zero above 0.85. Revisit once we have ≥200 trades with valid candle_progress values. Do not implement until data density justifies it.
 
@@ -322,7 +427,17 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Context / Gotchas
 
-- **Test suite: 326 pass.** `python3 -m pytest` from project root.
+- **Test suite: 338 pass.** `python3 -m pytest` from project root.
+
+- **`_cached_kronos` is None on startup for ~23s.** `_process_market` skips silently (INFO log: "not yet populated") until the background loop completes its first MC run. This is expected behavior — no trades fire during this startup window.
+
+- **Cache staleness thresholds:** `_process_market` skips if `computed_at > 600s` (ERROR log). `_regime_watchdog` fires an OS notification if `computed_at > 360s`. The background loop refreshes every new 5-min candle (~300s cycle), so >360s means the loop missed at least one candle.
+
+- **Strike delta logged at DEBUG only.** The background loop may compute MC at a slightly different strike than the current market strike (if BRTI drifted since the last candle). This delta is logged for diagnostics but does NOT gate the trade — the cached prob is still directionally valid within a candle.
+
+- **`get_signal()` `kronos_raw=None` fallback is test-only.** In production, `_process_market` always passes `kronos_raw=cached["prob"]`. The None path calls `run_monte_carlo()` inline — never trigger this in production (would block the cycle for ~23s and create concurrent MC).
+
+- **Second checklist re-runs full Kelly sizing.** `result2.kelly_dollars` and `result2.kelly_contracts` come from the second checklist call with fresh prices. `OpenPosition`, `place_order`, and `_record_trade_sqlite` all use `result2`, not `result` from the first checklist.
 
 - **Feature order is a 3-file contract.** `regime_model.py` / `train_regime.py` / `fusion._regime_features()` must match exactly. Test: `python3 -m pytest tests/ -k "feature_order"`.
 
