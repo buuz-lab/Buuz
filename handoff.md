@@ -10,6 +10,31 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-25 session 7 (continued): Gate 7 (CVD soft gate) converted to shadow mode — no longer blocks trades. Shadow rows written to `gate_rejections` with `shadow=1` so win-rate tracking continues. 326 tests pass.**
+
+**Session 7 (continued): Gate 7 shadow mode**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/execution/pretrade_checklist.py` | Gate 7 block removed entirely — checklist always passes regardless of CVD |
+| `main.py` | Shadow Gate 7 check added after checklist pass: writes `gate_rejections` row with `shadow=1` when CVD would have triggered, then lets trade proceed. `_GATE_REJECTIONS_COLUMN_MIGRATIONS` extended with `("shadow", "INTEGER DEFAULT 0")` |
+| `tests/execution/test_gate7_cvd.py` | Tests updated: "blocks" cases replaced with "no longer blocks" assertions; aligned/mild-CVD pass cases preserved |
+
+**Why disabled:** Live data showed Gate 7 was blocking trades that won 61.9% of the time overall — and 80% on the YES→UP side specifically. The original 32.3% win-rate calibration was from a different market regime. Gate 7 was net-negative in the current regime.
+
+**Shadow query for win-rate tracking:**
+```sql
+SELECT CASE direction WHEN 1 THEN 'YES→UP' ELSE 'NO→DOWN' END as side,
+  COUNT(*) as would_have_blocked,
+  ROUND(100.0*SUM(outcome)/COUNT(*),1) as win_pct
+FROM gate_rejections
+WHERE failed_gate=7 AND shadow=1 AND outcome IS NOT NULL AND aged_out=0
+GROUP BY direction
+```
+Historical real blocks (before shadow mode) remain in the table with `shadow=0`.
+
+---
+
 **As of 2026-05-25 session 7: Multi-source derivatives feed COMPLETE. DerivativesFeed now queries OKX + Hyperliquid + Kraken Futures in parallel; `okx_partial=True` only when all three fail. Kraken spot fallback added for `_fetch_volume_ratio`. Training filter excludes `okx_stale` rows. 326 tests pass.**
 
 **Session 7 (2026-05-25): Multi-source derivatives feed**
@@ -346,6 +371,10 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 - **`pcr_oi` neutral fallback = 1.0** (not 0.0). A ratio of 1.0 means equal put and call positioning — true neutral. 0.0 would imply zero put OI which is misleading.
 
 - **`_FEATURE_COLS_LEGACY` in `train_regime.py` stays at 6 features.** Do not modify it. The legacy path is for very old rows — not related to the Deribit expansion.
+
+- **Gate 7 is shadow-only** (`shadow=1` in `gate_rejections`). It no longer blocks trades. The original 32.3% YES→UP win-rate calibration was regime-specific; live data showed 80% win rate on blocked YES→UP trades and 56% on NO→DOWN, both net-negative for the gate. Re-evaluate periodically with the shadow query above. Do NOT re-enable without fresh regime-specific data.
+
+- **`gate_rejections.shadow` column** — added via migration (`_GATE_REJECTIONS_COLUMN_MIGRATIONS`). Historical real blocks have `shadow=0` (default). Shadow observations have `shadow=1`. Always filter by `shadow` when analyzing gate effectiveness to avoid mixing the two populations.
 
 - **`dump.rdb` and `trades.db.bak.*` must NOT be committed.**
 
