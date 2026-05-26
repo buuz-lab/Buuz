@@ -78,6 +78,13 @@ class DerivativesFeed:
                 await asyncio.sleep(_REFRESH_INTERVAL)
 
             while True:
+                # Re-resolve if exchange was nulled out by a prior failure that
+                # was swallowed internally (individual fetchers fall back to
+                # Kraken but never trigger the outer except block).
+                if self._exchange is None:
+                    if not await self._resolve_exchange():
+                        await asyncio.sleep(_REFRESH_INTERVAL)
+                        continue
                 success = False
                 try:
                     features = await self._fetch_features()
