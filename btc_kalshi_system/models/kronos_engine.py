@@ -55,29 +55,39 @@ class KronosEngine:
         store: FeatureStore,
         n_paths: int = 100,
         threshold: float = 76548.76,
+        candle_freq: str = "5min",
     ) -> float:
         """
-        Pull the last 400 5-min BRTI candles, run n_paths MC inference paths,
-        return P(predicted_close > threshold) at the next 5-min resolution window.
+        Pull the last 400 BRTI candles at candle_freq resolution, run n_paths MC
+        inference paths, return P(predicted_close > threshold) at the next candle.
 
-        Raises ValueError if fewer than _MIN_CANDLES 5-min candles are available.
+        candle_freq controls the prediction horizon:
+          "5min"  → predicts next 5-min close  (default, original behaviour)
+          "15min" → predicts next 15-min close (aligned with 15-min Kalshi markets)
+          "1h"    → predicts next 1-hour close (aligned with 1-hour Kalshi markets)
+
+        Raises ValueError if fewer than _MIN_CANDLES candles are available.
         """
-        df = store.get_ohlcv("5min")
+        _FREQ_DELTA = {"5min": pd.Timedelta(minutes=5), "15min": pd.Timedelta(minutes=15), "1h": pd.Timedelta(hours=1)}
+        if candle_freq not in _FREQ_DELTA:
+            raise ValueError(f"Unsupported candle_freq: {candle_freq!r}. Use '5min', '15min', or '1h'.")
+
+        df = store.get_ohlcv(candle_freq)
         if df is None or len(df) < _MIN_CANDLES:
             raise ValueError(
-                f"Insufficient OHLCV data: need >={_MIN_CANDLES} 5-min candles, "
+                f"Insufficient OHLCV data: need >={_MIN_CANDLES} {candle_freq} candles, "
                 f"got {0 if df is None else len(df)}"
             )
 
         df = df.tail(400)
         if len(df) < 400:
-            logger.warning(f"KronosEngine: only {len(df)} 5-min candles available (recommend >=400)")
+            logger.warning(f"KronosEngine: only {len(df)} {candle_freq} candles available (recommend >=400)")
 
         self._load()
 
         # predict() requires Series types, not bare Timestamps
         x_timestamp = df.index.to_series().reset_index(drop=True)
-        y_timestamp = pd.Series([df.index[-1] + pd.Timedelta(minutes=5)])
+        y_timestamp = pd.Series([df.index[-1] + _FREQ_DELTA[candle_freq]])
 
         # sample_count>1 averages paths internally — call n_paths times with sample_count=1
         predicted_closes = []
