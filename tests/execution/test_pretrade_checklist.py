@@ -298,3 +298,57 @@ def test_gate8_both_shrinks_stack(checklist):
     r_both = checklist.run(**kw)
     expected = r_base.kelly_dollars * 0.75 * 0.5
     assert r_both.kelly_dollars == pytest.approx(expected, rel=0.01)
+
+
+# ── Bootstrap floor tests ─────────────────────────────────────────────────────
+
+def test_bootstrap_floor_allows_1_contract_on_thin_edge(checklist):
+    """is_bootstrap=True + positive edge + price 25-75¢ → 1 contract instead of gate 2 fail.
+
+    prob=0.507, ask=bid=50¢ (zero spread), plus chop+tape+direction_win_rate shrinks stack
+    kelly_dollars to ~0.176 — below the 0.5x heuristic (0.25) but still positive.
+    Gate 5 passes (edge=0.007 > 0.005). Bootstrap floor gives 1 contract.
+    """
+    # chop shrink (×0.70) + tape shrink (×0.80) + direction_win_rate (×0.60)
+    # → kelly_dollars ≈ 75 * 0.007 * 0.70 * 0.80 * 0.60 = 0.176 < 0.25 (0.5×price)
+    rf = {"range_breakout_flag": 0.10, "tape_speed_tpm": 0.10}
+    signal = make_signal(direction=1, calibrated_prob=0.507, regime_features=rf)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 50
+    kw["direction_win_rate"] = 0.40
+
+    r_normal = checklist.run(**kw)
+    assert not r_normal.passed and r_normal.failed_gate == 2
+
+    kw["is_bootstrap"] = True
+    r_bootstrap = checklist.run(**kw)
+    assert r_bootstrap.passed
+    assert r_bootstrap.kelly_contracts == 1
+
+
+def test_bootstrap_floor_blocked_outside_price_range(checklist):
+    """is_bootstrap=True but NO trade_price > 75¢ → still fails gate 2 (bad risk/reward).
+    Mock kelly_dollars=0.35 < 0.40 (0.5×80¢ threshold) so heuristic also fails."""
+    signal = make_signal(direction=0, calibrated_prob=0.193)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 20
+    kw["best_bid_cents"] = 20  # NO costs 100-20=80¢ > 75¢
+    kw["is_bootstrap"] = True
+    with patch.object(checklist._kelly, "compute_size", return_value=0.35), \
+         patch.object(checklist._kelly, "dollars_to_contracts", return_value=0):
+        r = checklist.run(**kw)
+    assert not r.passed and r.failed_gate == 2
+
+
+def test_bootstrap_floor_not_active_when_regime_trained(checklist):
+    """is_bootstrap=False (regime trained) → thin-edge trade still fails gate 2."""
+    rf = {"range_breakout_flag": 0.10, "tape_speed_tpm": 0.10}
+    signal = make_signal(direction=1, calibrated_prob=0.507, regime_features=rf)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 50
+    kw["direction_win_rate"] = 0.40
+    kw["is_bootstrap"] = False
+    r = checklist.run(**kw)
+    assert not r.passed and r.failed_gate == 2

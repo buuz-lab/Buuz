@@ -35,6 +35,7 @@ class PreTradeChecklist:
         fresh_kalshi_mid: float = 0.5,
         is_drifting: bool = False,
         direction_win_rate: Optional[float] = None,
+        is_bootstrap: bool = False,
     ) -> ChecklistResult:
         def fail(gate: int, reason: str, kalshi_mid: Optional[float] = None) -> ChecklistResult:
             return ChecklistResult(
@@ -76,7 +77,12 @@ class PreTradeChecklist:
         kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
 
         if kelly_contracts == 0:
-            if kelly_dollars >= (trade_price_cents / 100) * 0.5:
+            # Bootstrap floor: regime model untrained, positive edge, price 25–75¢.
+            # Breaks the chicken-and-egg deadlock where Kelly rounds to 0 in bootstrap
+            # mode, starving the system of training data.
+            if is_bootstrap and kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
+                kelly_contracts = 1
+            elif kelly_dollars >= (trade_price_cents / 100) * 0.5:
                 kelly_contracts = 1
             else:
                 return fail(2, "Kelly size rounds to 0 contracts")
@@ -89,7 +95,9 @@ class PreTradeChecklist:
         kelly_dollars *= kalshi_kelly_mult
         kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
         if kelly_contracts == 0:
-            if kelly_dollars >= (trade_price_cents / 100) * 0.5:
+            if is_bootstrap and kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
+                kelly_contracts = 1
+            elif kelly_dollars >= (trade_price_cents / 100) * 0.5:
                 kelly_contracts = 1
             else:
                 return fail(2, "Kelly size rounds to 0 contracts after Kalshi Kelly multiplier")
@@ -99,7 +107,9 @@ class PreTradeChecklist:
             kelly_dollars *= 0.5
             kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
             if kelly_contracts == 0:
-                if kelly_dollars >= (trade_price_cents / 100) * 0.5:
+                if is_bootstrap and kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
+                    kelly_contracts = 1
+                elif kelly_dollars >= (trade_price_cents / 100) * 0.5:
                     kelly_contracts = 1
                 else:
                     return fail(2, "Kelly size rounds to 0 contracts after drift shrink")

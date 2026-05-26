@@ -84,6 +84,8 @@ def _make_trader(db: sqlite3.Connection):
     trader._drift_monitor.is_drifting.return_value = False
     trader._dir_tracker = MagicMock()
     trader._dir_tracker.get_win_rate.return_value = None
+    trader._regime_model = MagicMock()
+    trader._regime_model._clf = MagicMock()  # not None = trained, is_bootstrap=False
     trader._monitor.ticker_direction_count.return_value = 0
     trader._monitor.get_current_exposure.return_value = 0.0
     trader._monitor.has_timeframe_position.return_value = False

@@ -61,6 +61,8 @@ def _make_system() -> "main.KronosV2":
     system._drift_monitor.is_drifting.return_value = False
     system._dir_tracker = MagicMock()
     system._dir_tracker.get_win_rate.return_value = None
+    system._regime_model = MagicMock()
+    system._regime_model._clf = MagicMock()  # not None = trained, is_bootstrap=False
     system._last_deepseek_refresh = 0.0
 
     db = sqlite3.connect(":memory:")

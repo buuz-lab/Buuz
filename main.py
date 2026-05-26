@@ -572,6 +572,7 @@ class KronosV2:
 
         fresh_kalshi_mid1 = (best_bid_cents + best_ask_cents) / 200.0
         dir_win_rate = self._dir_tracker.get_win_rate(signal.direction)
+        is_bootstrap = self._regime_model._clf is None
         result = self._checklist.run(
             signal=signal,
             best_ask_cents=best_ask_cents,
@@ -584,6 +585,7 @@ class KronosV2:
             fresh_kalshi_mid=fresh_kalshi_mid1,
             is_drifting=self._drift_monitor.is_drifting(),
             direction_win_rate=dir_win_rate,
+            is_bootstrap=is_bootstrap,
         )
 
         # g. Checklist failed
@@ -673,6 +675,7 @@ class KronosV2:
             fresh_kalshi_mid=fresh_kalshi_mid2,
             is_drifting=self._drift_monitor.is_drifting(),
             direction_win_rate=dir_win_rate,
+            is_bootstrap=is_bootstrap,
         )
         if not result2.passed:
             logger.info(
