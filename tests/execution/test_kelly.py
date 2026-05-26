@@ -184,3 +184,26 @@ def test_all_three_shrinks_stack_multiplicatively(sizer):
         loss_streak=3,
     )
     assert math.isclose(all_shrunk, base * 0.70 * 0.80 * 0.84, rel_tol=1e-9)
+
+
+# --- Direction win rate shrink ---
+
+def test_direction_win_rate_below_threshold_shrinks(sizer):
+    base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
+    shrunk = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
+                                direction_win_rate=0.44)
+    assert math.isclose(shrunk, base * 0.60, rel_tol=1e-9)
+
+
+def test_direction_win_rate_at_threshold_no_shrink(sizer):
+    base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
+    result = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
+                                direction_win_rate=0.46)
+    assert math.isclose(result, base, rel_tol=1e-9)
+
+
+def test_direction_win_rate_none_no_shrink(sizer):
+    base = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False)
+    result = sizer.compute_size(prob=0.65, market_price=0.50, current_exposure=0.0, same_timeframe_open=False,
+                                direction_win_rate=None)
+    assert math.isclose(result, base, rel_tol=1e-9)

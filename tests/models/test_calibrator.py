@@ -42,19 +42,19 @@ def test_calibrated_output_differs_from_raw_after_fit():
     assert max(diffs) > 1e-6
 
 
-# ── pass-through when n < 500 ──────────────────────────────────────────────────
+# ── pass-through when n < 300 ──────────────────────────────────────────────────
 
-def test_transform_is_passthrough_when_fewer_than_500_samples():
+def test_transform_is_passthrough_when_fewer_than_300_samples():
     cal = Calibrator()
-    raw, outcomes = _synthetic_data(n=499)
+    raw, outcomes = _synthetic_data(n=299)
     cal.fit(raw, outcomes)
     for p in [0.1, 0.5, 0.9]:
         assert cal.transform(p) == pytest.approx(p)
 
 
-def test_transform_calibrates_when_exactly_500_samples():
+def test_transform_calibrates_when_exactly_300_samples():
     cal = Calibrator()
-    raw, outcomes = _synthetic_data(n=500)
+    raw, outcomes = _synthetic_data(n=300)
     cal.fit(raw, outcomes)
     # Should not raise and should return a float — calibration engaged
     result = cal.transform(0.5)
@@ -107,3 +107,65 @@ def test_save_and_load_roundtrip_produces_same_output():
 def test_load_from_missing_file_raises_file_not_found():
     with pytest.raises(FileNotFoundError):
         Calibrator.load("/tmp/does_not_exist_calibrator.joblib")
+
+
+# ── Phase 2 new tests ──────────────────────────────────────────────────────────
+
+def test_fit_uses_y_up_labels():
+    """y_up labels should produce different calibration than inverted labels."""
+    cal_correct = Calibrator()
+    cal_inverted = Calibrator()
+    raw = np.array([0.1, 0.9] * 200)
+    y_up = np.array([0, 1] * 200, dtype=float)
+    y_inverted = np.array([1, 0] * 200, dtype=float)
+    cal_correct.fit(raw, y_up)
+    cal_inverted.fit(raw, y_inverted)
+    # Calibrated outputs for same raw input should differ
+    assert cal_correct.transform(0.7) != cal_inverted.transform(0.7)
+
+
+def test_min_samples_is_300():
+    """Passthrough should be True for n=299, False for n=300."""
+    cal_under = Calibrator()
+    raw, outcomes = _synthetic_data(n=299)
+    cal_under.fit(raw, outcomes)
+    assert cal_under._passthrough is True
+
+    cal_at = Calibrator()
+    raw, outcomes = _synthetic_data(n=300)
+    cal_at.fit(raw, outcomes)
+    assert cal_at._passthrough is False
+
+
+def test_monotonicity_guard_reverts_worse_fit():
+    """After a clean fit, a contradictory fit that worsens Brier should be reverted."""
+    cal = Calibrator()
+    # First fit: clean data — calibrator engages
+    raw_clean, outcomes_clean = _synthetic_data(n=400, seed=1)
+    cal.fit(raw_clean, outcomes_clean)
+    iso_after_first = cal._iso
+    brier_after_first = cal._prev_brier
+
+    # Second fit: perfectly contradictory (high raw → low outcome) → Brier worsens
+    raw_bad = np.linspace(0.1, 0.9, 400)
+    outcomes_bad = (raw_bad < 0.5).astype(float)  # inverted correlation → bad calibration
+    cal.fit(raw_bad, outcomes_bad)
+
+    # If Brier worsened, the iso should have been reverted
+    if brier_after_first is not None:
+        assert cal._iso is iso_after_first or cal._prev_brier <= brier_after_first + 1e-6
+
+
+def test_save_load_with_correct_labels():
+    """Save a calibrator fit with y_up labels; load and verify transform matches."""
+    cal = Calibrator()
+    raw = np.array([0.1, 0.9] * 200)
+    y_up = np.array([0, 1] * 200, dtype=float)
+    cal.fit(raw, y_up)
+    expected = cal.transform(0.7)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "cal_y_up.pkl")
+        cal.save(path)
+        cal2 = Calibrator.load(path)
+        assert cal2.transform(0.7) == pytest.approx(expected, abs=1e-9)

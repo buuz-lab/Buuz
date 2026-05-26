@@ -22,6 +22,7 @@ class KellySizer:
         same_timeframe_open: bool,
         regime_features: dict | None = None,
         loss_streak: int = 0,
+        direction_win_rate: float | None = None,
     ) -> float:
         edge = prob - market_price
         if edge <= 0:
@@ -46,6 +47,9 @@ class KellySizer:
                 size *= KELLY_TAPE_SHRINK
         if loss_streak > 0:
             size *= max(KELLY_STREAK_FLOOR, 1.0 - max(0, loss_streak - 1) * KELLY_STREAK_STEP)
+
+        if direction_win_rate is not None and direction_win_rate < 0.45:
+            size *= 0.60
 
         return max(size, 0.0)
 

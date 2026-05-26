@@ -19,6 +19,7 @@ from btc_kalshi_system.signal.calibration_drift_monitor import (
     _KEY_HISTORY,
     _KEY_BASELINE,
     _KEY_ALERT_COUNT,
+    _KEY_TOTAL_COUNT,
 )
 
 
@@ -192,3 +193,21 @@ def test_recompute_window_empty_history_does_not_raise():
 
     # Must not raise
     monitor._recompute_window()
+
+
+# ── Phase 2: reset_baseline ───────────────────────────────────────────────────
+
+def test_reset_baseline_clears_state():
+    """Record 20+ trades to set baseline; call reset_baseline(); verify state cleared."""
+    monitor = make_monitor()
+    _record_n_good(monitor, DRIFT_WINDOW)  # sets baseline
+
+    assert monitor.baseline_brier() is not None
+
+    monitor.reset_baseline()
+
+    assert monitor.baseline_brier() is None
+    assert not monitor.is_drifting()
+    assert len(monitor._history) == 0
+    assert monitor._total_count == 0
+    assert monitor._redis.get(_KEY_TOTAL_COUNT) is None

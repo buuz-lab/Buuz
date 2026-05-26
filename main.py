@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import signal
 import sqlite3
 import subprocess
@@ -8,6 +9,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+import numpy as np
 
 from loguru import logger
 
@@ -27,6 +30,7 @@ from btc_kalshi_system.models.regime_model import RegimeModel
 from btc_kalshi_system.portfolio.circuit_breaker import CircuitBreaker
 from btc_kalshi_system.portfolio.monitor import OpenPosition, PortfolioMonitor
 from btc_kalshi_system.signal.calibration_drift_monitor import CalibrationDriftMonitor
+from btc_kalshi_system.signal.direction_win_rate_tracker import DirectionWinRateTracker
 from btc_kalshi_system.signal.edge_tracker import EdgeTracker
 from btc_kalshi_system.signal.stratified_edge_tracker import StratifiedEdgeTracker
 from btc_kalshi_system.signal.fusion import SignalFusionEngine
@@ -120,6 +124,8 @@ _TRADES_COLUMN_MIGRATIONS = [
     ("kalshi_spread_normalized", "REAL DEFAULT NULL"),
     ("deribit_stale",            "INTEGER DEFAULT 1"),
     ("okx_stale",                "INTEGER DEFAULT 0"),
+    # Feature 28: 24h BTC price return (session 11). NULL for rows written before this migration.
+    ("btc_24h_return",           "REAL DEFAULT NULL"),
 ]
 
 _TRADE_SNAPSHOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
@@ -189,7 +195,13 @@ CREATE TABLE IF NOT EXISTS gate_rejections (
 
 _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("aged_out", "INTEGER DEFAULT 0"),
+    # shadow=1 means Gate 7 would have blocked this trade but didn't (shadow mode).
+    # The actual trade is in trades.db; this row is for win-rate observability only.
+    # Any training query against gate_rejections MUST filter WHERE shadow = 0
+    # to avoid duplicating trades that already appear in trades.db.
     ("shadow", "INTEGER DEFAULT 0"),
+    # Gate 8 (Kalshi consensus): fresh second-fetch mid-price at block time for threshold analysis.
+    ("kalshi_mid_at_block", "REAL DEFAULT NULL"),
 ]
 
 
@@ -198,6 +210,11 @@ class KronosV2:
         self._store = FeatureStore()
         self._kronos = KronosEngine()
         self._calibrator = Calibrator()
+        try:
+            self._calibrator = Calibrator.load(config.CALIBRATOR_MODEL_PATH)
+            logger.info(f"Calibrator loaded from {config.CALIBRATOR_MODEL_PATH} (n_samples={self._calibrator.n_samples})")
+        except FileNotFoundError:
+            logger.info("Calibrator file not found — starting fresh (passthrough mode)")
         # Try to load a trained RegimeModel from disk. If the file doesn't exist
         # yet (e.g. system is still in bootstrap mode and hasn't collected enough
         # paper trades to train), fall back to an unfit instance. fusion.py's
@@ -212,15 +229,17 @@ class KronosV2:
                 f"running in bootstrap mode (Kronos-only, Gate 2 bypassed)"
             )
         self._deepseek = DeepSeekContextParser()
+        self._edge_tracker = EdgeTracker()
+        self._drift_monitor = CalibrationDriftMonitor()
+        self._dir_tracker = DirectionWinRateTracker()
         self._fusion = SignalFusionEngine(
             feature_store=self._store,
             kronos_engine=self._kronos,
             calibrator=self._calibrator,
             regime_model=self._regime,
             deepseek_parser=self._deepseek,
+            drift_monitor=self._drift_monitor,
         )
-        self._edge_tracker = EdgeTracker()
-        self._drift_monitor = CalibrationDriftMonitor()
         self._stratified_edge = StratifiedEdgeTracker()
         self._kelly = KellySizer()
         self._checklist = PreTradeChecklist(self._kelly)
@@ -551,6 +570,8 @@ class KronosV2:
         # In paper mode Gate 4 is always open — edge tracker hasn't accumulated yet
         edge_above_threshold = True if config.PAPER_TRADING else self._edge_tracker.is_above_threshold()
 
+        fresh_kalshi_mid1 = (best_bid_cents + best_ask_cents) / 200.0
+        dir_win_rate = self._dir_tracker.get_win_rate(signal.direction)
         result = self._checklist.run(
             signal=signal,
             best_ask_cents=best_ask_cents,
@@ -560,6 +581,9 @@ class KronosV2:
             same_timeframe_open=same_timeframe_open,
             composite_price=composite_price,
             edge_above_threshold=edge_above_threshold,
+            fresh_kalshi_mid=fresh_kalshi_mid1,
+            is_drifting=self._drift_monitor.is_drifting(),
+            direction_win_rate=dir_win_rate,
         )
 
         # g. Checklist failed
@@ -570,8 +594,8 @@ class KronosV2:
                     """INSERT OR IGNORE INTO gate_rejections
                        (rejection_id, timestamp, ticker, timeframe, direction,
                         failed_gate, failed_reason, signal_prob, deepseek_regime,
-                        kalshi_mid_cents, features)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        kalshi_mid_cents, features, kalshi_mid_at_block)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(uuid.uuid4()),
                         time.time(),
@@ -584,6 +608,7 @@ class KronosV2:
                         signal.deepseek_regime,
                         round(mid_cents),
                         json.dumps(signal.regime_features or {}),
+                        result.kalshi_mid_at_block,
                     ),
                 )
                 self._db.commit()
@@ -602,6 +627,7 @@ class KronosV2:
         if _g7_reason:
             try:
                 self._db.execute(
+                    # shadow=1: trade proceeds; row is observability-only, not training data.
                     """INSERT OR IGNORE INTO gate_rejections
                        (rejection_id, timestamp, ticker, timeframe, direction,
                         failed_gate, failed_reason, signal_prob, deepseek_regime,
@@ -634,6 +660,7 @@ class KronosV2:
             logger.warning(f"Second orderbook empty for {ticker} — aborting order")
             return
 
+        fresh_kalshi_mid2 = (fresh_bid + fresh_ask) / 200.0
         result2 = self._checklist.run(
             signal=signal,
             best_ask_cents=fresh_ask,
@@ -643,6 +670,9 @@ class KronosV2:
             same_timeframe_open=same_timeframe_open,
             composite_price=composite_price,
             edge_above_threshold=edge_above_threshold,
+            fresh_kalshi_mid=fresh_kalshi_mid2,
+            is_drifting=self._drift_monitor.is_drifting(),
+            direction_win_rate=dir_win_rate,
         )
         if not result2.passed:
             logger.info(
@@ -1011,13 +1041,15 @@ class KronosV2:
                     hourly_sr_proximity, range_breakout_flag, tape_speed_tpm,
                     large_print_direction,
                     atm_iv, iv_rv_spread, pcr_oi, term_structure_slope,
-                    skew_25d, kalshi_spread_normalized, deribit_stale, okx_stale
+                    skew_25d, kalshi_spread_normalized, deribit_stale, okx_stale,
+                    btc_24h_return
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
                     ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?
                 )
                 """,
                 (
@@ -1065,6 +1097,7 @@ class KronosV2:
                     feats.get("kalshi_spread_normalized"),
                     1 if signal.deribit_stale else 0,
                     1 if signal.okx_stale else 0,
+                    feats.get("btc_24h_return"),
                 ),
             )
             self._db.commit()
@@ -1130,7 +1163,9 @@ class KronosV2:
                     outcome=outcome,
                     market_price=position.entry_price_cents / 100,
                 )
-                self._drift_monitor.record(position.calibrated_prob, outcome)
+                y_up_outcome = int(position.direction == outcome)
+                self._drift_monitor.record(position.calibrated_prob, y_up_outcome)
+                self._dir_tracker.record(position.direction, outcome)
                 self._stratified_edge.record(
                     position.deepseek_regime,
                     position.calibrated_prob,
@@ -1155,19 +1190,34 @@ class KronosV2:
                 except sqlite3.Error as exc:
                     logger.error(f"SQLite update failed for {position.trade_id}: {exc}")
 
-                # Refit calibrator with all resolved trades so n_samples grows
+                # Refit calibrator every 25 resolutions (not every trade)
                 try:
-                    rows = self._db.execute(
-                        "SELECT kronos_raw, outcome FROM trades WHERE outcome IS NOT NULL"
-                    ).fetchall()
-                    if rows:
-                        import numpy as np
-                        raw_probs = np.array([r[0] for r in rows], dtype=float)
-                        outcomes = np.array([r[1] for r in rows], dtype=float)
-                        self._calibrator.fit(raw_probs, outcomes)
-                        logger.debug(f"Calibrator refit with {len(rows)} resolved trades")
-                except Exception as exc:
-                    logger.warning(f"Calibrator refit failed: {exc}")
+                    pending = int(self._redis.incr("calibration_drift:pending_refits") or 0)
+                except Exception:
+                    pending = 25
+                if pending >= 25:
+                    try:
+                        self._redis.set("calibration_drift:pending_refits", 0)
+                        rows = self._db.execute(
+                            "SELECT kronos_raw, direction, outcome FROM trades "
+                            "WHERE outcome IS NOT NULL AND features_stale=0 "
+                            "ORDER BY timestamp DESC LIMIT 300"
+                        ).fetchall()
+                        if rows:
+                            raw_probs = np.array([r[0] for r in rows], dtype=float)
+                            directions = np.array([r[1] for r in rows], dtype=float)
+                            outcomes_arr = np.array([r[2] for r in rows], dtype=float)
+                            y_up = (directions == outcomes_arr).astype(float)
+                            self._calibrator.fit(raw_probs, y_up)
+                            os.makedirs("models", exist_ok=True)
+                            self._calibrator.save(config.CALIBRATOR_MODEL_PATH)
+                            self._drift_monitor.reset_baseline()
+                            logger.info(
+                                f"Calibrator refit: n_samples={self._calibrator.n_samples} "
+                                f"passthrough={self._calibrator._passthrough}"
+                            )
+                    except Exception as exc:
+                        logger.warning(f"Calibrator refit failed: {exc}")
 
                 logger.info(
                     f"Trade resolved: {position.ticker} trade_id={position.trade_id} "

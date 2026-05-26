@@ -35,11 +35,12 @@ def _make_feature_store_mock():
         "open": prices, "high": prices, "low": prices, "close": prices,
         "volume": [0.0] * 15, "amount": [0.0] * 15,
     }, index=idx)
-    h_prices = np.linspace(94000, 96000, 5).tolist()
-    h_idx = pd.date_range("2024-01-01", periods=5, freq="1h", tz="UTC")
+    # 26 hourly candles to provide enough data for btc_24h_return (needs >= 25)
+    h_prices = np.linspace(94000, 96000, 26).tolist()
+    h_idx = pd.date_range("2024-01-01", periods=26, freq="1h", tz="UTC")
     df1h = pd.DataFrame({
         "open": h_prices, "high": h_prices, "low": h_prices, "close": h_prices,
-        "volume": [0.0] * 5, "amount": [0.0] * 5,
+        "volume": [0.0] * 26, "amount": [0.0] * 26,
     }, index=h_idx)
     def ohlcv_side_effect(tf):
         return df1h if tf == "1h" else df5
@@ -100,4 +101,4 @@ def test_feature_order_all_three_match():
     """All three sources must be identical including ORDER (not just membership)."""
     fusion_keys = _get_fusion_feature_keys()
     assert _FEATURE_ORDER == _FEATURE_COLS == fusion_keys
-    assert len(_FEATURE_ORDER) == 27
+    assert len(_FEATURE_ORDER) == 28

@@ -86,6 +86,7 @@ class SignalFusionEngine:
         regime_model: RegimeModel,
         deepseek_parser: DeepSeekContextParser,
         market_context: Optional[dict] = None,
+        drift_monitor: Optional["CalibrationDriftMonitor"] = None,
     ) -> None:
         self._store = feature_store
         self._kronos = kronos_engine
@@ -93,6 +94,7 @@ class SignalFusionEngine:
         self._regime = regime_model
         self._deepseek = deepseek_parser
         self._market_context: dict = market_context or {}
+        self._drift_monitor = drift_monitor
 
     def update_market_context(self, ctx: dict) -> None:
         self._market_context = ctx
@@ -172,6 +174,8 @@ class SignalFusionEngine:
             regime_prob = math.nan
             regime_direction = -1
             base_shrink = _BOOTSTRAP_SHRINK
+            if self._drift_monitor is not None and self._drift_monitor.is_drifting():
+                base_shrink = min(base_shrink, 0.4)
             if deepseek_regime == "high_uncertainty":
                 base_shrink = _UNCERTAINTY_SHRINK
             elif deepseek_regime == "ranging":
@@ -348,6 +352,13 @@ class SignalFusionEngine:
         # --- Feature 21: large_print_direction ---
         large_print_direction = float(ctx.get("large_print_direction", 0.0))
 
+        # --- Feature 28: btc_24h_return ---
+        if df1h is not None and len(df1h) >= 25:
+            btc_24h_return = float(df1h["close"].iloc[-1] / df1h["close"].iloc[-25] - 1)
+        else:
+            btc_24h_return = 0.0
+            stale = True
+
         # --- Features 22-27: Deribit options + Kalshi spread ---
         atm_iv = float(ctx.get("atm_iv") or 0.0)
         iv_rv_spread = float(ctx.get("iv_rv_spread") or 0.0)
@@ -395,5 +406,6 @@ class SignalFusionEngine:
             "term_structure_slope":     term_structure_slope,
             "skew_25d":                 skew_25d,
             "kalshi_spread_normalized": kalshi_spread_normalized,
+            "btc_24h_return":           btc_24h_return,
         }
         return features, stale, deribit_stale, okx_stale

@@ -99,6 +99,8 @@ _FEATURE_COLS = [
     "term_structure_slope",
     "skew_25d",
     "kalshi_spread_normalized",
+    # Feature 28: 24h BTC price return context (session 11)
+    "btc_24h_return",
 ]
 
 _FEATURE_COLS_LEGACY = [
@@ -129,13 +131,19 @@ _EXTRA_FILTERS_20 = """AND cvd_velocity IS NOT NULL
   AND COALESCE(okx_stale, 0) = 0"""
 
 _EXTRA_FILTERS_27 = _EXTRA_FILTERS_20 + "\n  AND deribit_stale = 0\n  AND atm_iv IS NOT NULL"
+_EXTRA_FILTERS_28 = _EXTRA_FILTERS_27 + "\n  AND btc_24h_return IS NOT NULL"
 
-def _build_query(legacy: bool, use_27: bool = False) -> str:
+def _build_query(legacy: bool = False, use_27: bool = False, use_28: bool = False) -> str:
     if legacy:
         cols = ", ".join(_FEATURE_COLS_LEGACY)
         return _QUERY_TEMPLATE.format(cols=cols, extra_filters="")
     cols = ", ".join(_FEATURE_COLS)
-    extra = _EXTRA_FILTERS_27 if use_27 else _EXTRA_FILTERS_20
+    if use_28:
+        extra = _EXTRA_FILTERS_28
+    elif use_27:
+        extra = _EXTRA_FILTERS_27
+    else:
+        extra = _EXTRA_FILTERS_20
     return _QUERY_TEMPLATE.format(cols=cols, extra_filters=extra)
 
 
@@ -163,14 +171,11 @@ def parse_args() -> argparse.Namespace:
 def load_dataset(db_path: str, max_rows: int | None = None, legacy: bool = False) -> list[tuple]:
     if not Path(db_path).exists():
         sys.exit(f"Database not found: {db_path}")
-    # _FEATURE_COLS now has 27 entries (including Deribit options features 22–27).
-    # Always use _EXTRA_FILTERS_27 so the query requires deribit_stale=0 and
-    # atm_iv IS NOT NULL. Without this, rows where features 22–27 are NULL
-    # (deribit_stale=1) would be included, and XGBoost would learn that those
-    # features are "always missing" at training time — but inference provides real
-    # values, causing a silent model corruption. The query will return 0 rows
-    # until ~500 deribit_stale=0 rows have accumulated; that is the correct gate.
-    query = _build_query(legacy, use_27=not legacy)
+    # _FEATURE_COLS now has 28 entries (features 22–27 from Deribit + Feature 28
+    # btc_24h_return). Always use _EXTRA_FILTERS_28 when not legacy so the query
+    # requires deribit_stale=0, atm_iv IS NOT NULL, and btc_24h_return IS NOT NULL.
+    # use_28=True implies use_27=True — the 28-feature model is a strict superset.
+    query = _build_query(legacy=legacy, use_28=not legacy)
     conn = sqlite3.connect(db_path)
     try:
         if max_rows is not None:

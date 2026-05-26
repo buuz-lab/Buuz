@@ -51,3 +51,12 @@ REGIME_GATE2_ENFORCING: bool = os.getenv("REGIME_GATE2_ENFORCING", "false").lowe
 # Statistical basis: YES→UP trades with negative CVD have a 32.3% win rate, well below
 # the ~52% breakeven for typical fill prices. This addresses CVD oscillation loss streaks.
 CVD_GATE_THRESHOLD: float = 0.3
+
+# Gate 8 (Kalshi consensus gate): block trades when Kalshi prices >= this margin against
+# our direction. 8% = Kalshi must price >=58% against us. Zero false positives on 248
+# good-day trades at this threshold; 22% win rate on blocked trades.
+KALSHI_CONSENSUS_THRESHOLD: float = 0.08
+
+# Path to the serialized isotonic-regression Calibrator. Created by scripts/train_calibrator.py
+# or by in-process refit every 25 resolutions. KronosV2 attempts to load on startup.
+CALIBRATOR_MODEL_PATH: str = os.getenv("CALIBRATOR_MODEL_PATH", "models/calibrator.pkl")

@@ -9,7 +9,7 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 def _synthetic_features(n: int = 200, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
-    X = rng.standard_normal((n, 27))
+    X = rng.standard_normal((n, 28))
     y = (X[:, 0] > 0).astype(int)  # label = sign of first feature
     return X, y
 
@@ -45,6 +45,8 @@ def _feature_dict(seed: int = 0) -> dict:
         "term_structure_slope":    float(rng.uniform(-0.3, 0.3)),
         "skew_25d":                float(rng.uniform(-10, 5)),
         "kalshi_spread_normalized": float(rng.uniform(0, 0.2)),
+        # Feature 28
+        "btc_24h_return":          float(rng.uniform(-0.3, 0.3)),
     }
 
 

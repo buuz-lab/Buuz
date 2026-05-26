@@ -13,3 +13,4 @@ logs/
 dump.rdb
 *.db.bak*
 .claude/
+models/calibrator.pkl

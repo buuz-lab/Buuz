@@ -2,22 +2,24 @@ import os
 
 import joblib
 import numpy as np
+from loguru import logger
 from sklearn.isotonic import IsotonicRegression
 
-_MIN_SAMPLES = 500
+_MIN_SAMPLES = 300
 
 
 class Calibrator:
     """
     Isotonic-regression probability calibrator.
 
-    Pass-through when n_samples < 500 (not enough data to fit reliably).
+    Pass-through when n_samples < _MIN_SAMPLES (not enough data to fit reliably).
     """
 
     def __init__(self) -> None:
         self._iso: IsotonicRegression | None = None
         self._passthrough: bool = True
         self._n_samples: int = 0
+        self._prev_brier: float | None = None
 
     @property
     def n_samples(self) -> int:
@@ -30,9 +32,27 @@ class Calibrator:
         if len(raw_probs) < _MIN_SAMPLES:
             self._passthrough = True
             return self
+
+        # Snapshot current state in case we need to revert (monotonicity guard)
+        prev_iso = self._iso
+        prev_passthrough = self._passthrough
+
         self._passthrough = False
-        self._iso = IsotonicRegression(out_of_bounds="clip")
-        self._iso.fit(raw_probs, outcomes)
+        new_iso = IsotonicRegression(out_of_bounds="clip")
+        new_iso.fit(raw_probs, outcomes)
+        self._iso = new_iso
+
+        # Monotonicity guard: revert if new Brier is worse than previous
+        new_brier = self.brier_score(raw_probs, outcomes)
+        if self._prev_brier is not None and new_brier > self._prev_brier:
+            logger.warning(
+                f"Calibrator: new Brier {new_brier:.4f} > previous {self._prev_brier:.4f} — reverting"
+            )
+            self._iso = prev_iso
+            self._passthrough = prev_passthrough
+        else:
+            self._prev_brier = new_brier
+
         return self
 
     def transform(self, raw_prob: float) -> float:
@@ -48,7 +68,12 @@ class Calibrator:
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        joblib.dump({"iso": self._iso, "passthrough": self._passthrough, "n_samples": self._n_samples}, path)
+        joblib.dump({
+            "iso": self._iso,
+            "passthrough": self._passthrough,
+            "n_samples": self._n_samples,
+            "prev_brier": self._prev_brier,
+        }, path)
 
     @classmethod
     def load(cls, path: str) -> "Calibrator":
@@ -59,4 +84,5 @@ class Calibrator:
         obj._iso = state["iso"]
         obj._passthrough = state["passthrough"]
         obj._n_samples = state.get("n_samples", 0)
+        obj._prev_brier = state.get("prev_brier", None)
         return obj

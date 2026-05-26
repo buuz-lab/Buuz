@@ -10,6 +10,137 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-26 session 11: Regime-adaptive trading fixes COMPLETE. 362 tests pass.**
+
+**Session 11: Regime-adaptive trading implementation**
+
+| File | Change |
+|------|--------|
+| `config.py` | Added `KALSHI_CONSENSUS_THRESHOLD = 0.08`, `CALIBRATOR_MODEL_PATH = "models/calibrator.pkl"` |
+| `btc_kalshi_system/execution/pretrade_checklist.py` | Gate 8 hard block (+ OI squeeze compound at 2%), Gate 8b continuous Kelly multiplier, drift 50% Kelly shrink, `fresh_kalshi_mid`/`is_drifting`/`direction_win_rate` params, `kalshi_mid_at_block` on `ChecklistResult` |
+| `btc_kalshi_system/execution/kelly.py` | Added `direction_win_rate` param; 40% shrink when rolling 30-trade win rate < 45% |
+| `btc_kalshi_system/models/calibrator.py` | `_MIN_SAMPLES` 500→300; monotonicity guard in `fit()`; persist `_prev_brier` in save/load |
+| `btc_kalshi_system/models/regime_model.py` | Added `btc_24h_return` to `_FEATURE_ORDER` (Feature 28) |
+| `btc_kalshi_system/signal/calibration_drift_monitor.py` | Added `reset_baseline()` |
+| `btc_kalshi_system/signal/fusion.py` | Added `drift_monitor` param; bootstrap shrink 0.4 when drifting; added `btc_24h_return` to `_regime_features()` |
+| `btc_kalshi_system/signal/direction_win_rate_tracker.py` | **New** — per-direction rolling 30-trade win rate via Redis sorted sets |
+| `main.py` | Calibrator load-on-startup; refit every 25 resolutions (rolling 300 rows, correct y_up labels, save, reset_baseline); drift monitor label fix (y_up not outcome); drift_monitor wired into fusion; DirectionWinRateTracker wired; Gate 8 wired into both checklist calls; btc_24h_return schema + record; `kalshi_mid_at_block` gate_rejections migration; `numpy`/`os` top-level imports |
+| `scripts/train_regime.py` | Added `btc_24h_return` to `_FEATURE_COLS`; `_EXTRA_FILTERS_28`; `use_28` flag in `_build_query()` |
+| `scripts/train_calibrator.py` | **New** — standalone calibrator training script with --dry-run, Brier comparison |
+| `scripts/auto_retrain.py` | `_ROW_TRIGGER_DELTA` 500→200 |
+| `.gitignore` | Added `models/calibrator.pkl` |
+
+**Test count:** 362 (338 baseline + 24 new)
+
+**Key new constants:**
+- `KALSHI_CONSENSUS_THRESHOLD = 0.08` — Gate 8 fires when Kalshi prices ≥8% against our direction
+- `CALIBRATOR_MODEL_PATH = "models/calibrator.pkl"` — calibrator persistence path
+
+**Key new behavior:**
+- **Gate 8** fires when Kalshi consensus ≥8% against direction; OI squeeze compounds to 2% threshold for NO→DOWN bets; blocks logged to `gate_rejections` with `failed_gate=8`
+- **Calibrator** now uses `y_up = int(direction == outcome)` labels; rolling 300-row window; persists to disk; refit every 25 resolutions; monotonicity guard prevents degraded refit
+- **Drift monitor** now records `y_up` not `outcome`; wired to bootstrap shrink (0.4 when drifting) in fusion; `reset_baseline()` called after each calibrator refit
+- **DirectionWinRateTracker** fires 40% Kelly shrink when rolling 30-trade per-direction win rate < 45%
+- **Feature 28 (btc_24h_return)**: 24h BTC price return added to 3-file contract (fusion/regime_model/train_regime)
+- `auto_retrain.py` trigger now fires every 200 new rows (was 500)
+
+**Notes:**
+- `models/` directory created by first calibrator save — `models/calibrator.pkl` is in `.gitignore`
+- Gate 8 blocks query: `SELECT COUNT(*), ROUND(100.0*AVG(outcome),1) as win_pct FROM gate_rejections WHERE failed_gate=8 AND outcome IS NOT NULL AND aged_out=0`
+- btc_24h_return stale path: defaults 0.0 + features_stale=True when len(df1h) < 25; excluded from training via `_EXTRA_FILTERS_28`
+
+---
+
+**As of 2026-05-26 session 10: Regime-adaptive trading design COMPLETE. Implementation pending (see spec). 338 tests pass.**
+
+**Session 10: Regime-adaptive trading analysis + design**
+
+BTC dropped ~20% (May 20→76k). Market bounced (mean-reversion). Kronos stayed bearish. Win rate dropped to 37–42% on May 23–26, losing $347 on May 23 alone. Root cause analysis identified 3 compounding failures and 15 specific bugs/missing features. Full spec at `docs/superpowers/specs/2026-05-26-regime-adaptive-trading-design.md`.
+
+**Three root causes identified:**
+
+1. **Calibrator has never worked correctly — 4 bugs, never activated.** `_MIN_SAMPLES=500` too high (460 trades accumulated, never crosses threshold). Wrong training labels: `outcome` (trade win) used instead of `y_up = int(direction == outcome)` (market direction). For NO trades these are opposite, making isotonic regression learn contradictory signals. No persistence: calibrator resets to passthrough on every launchd restart — all in-memory fits lost. No rolling window: query fetches ALL 460 rows, blending two contradictory regimes.
+
+2. **No Kalshi consensus gate.** When Kalshi prices UP and Kronos bets DOWN: 23.9% trade win rate on 46 trades (May 23–26). When Kalshi agrees with direction: 49–60% win rate. Zero false positives on the 248 good-day (May 20–22) trades at every threshold tested. This is the single strongest available signal — missing entirely.
+
+3. **Drift detection fires but nothing acts on it.** `CalibrationDriftMonitor` correctly detected the May 23 regime shift (Brier 0.21 → 0.46). But `is_drifting()` is not wired to Kelly, bootstrap shrink, or trade suppression anywhere in the codebase. Additionally, the drift monitor itself has the same label bug as the calibrator.
+
+**Additional findings:**
+- `bootstrap_shrink=0.8` has no interaction with drift detection — extreme directional bets fire at full strength during known-bad regime
+- Continuous Kalshi disagreement → win rate gradient: 63% win at 0¢ opposition, 12–22% win at 5–10¢ opposition → should be a continuous Kelly multiplier, not just a hard gate
+- No per-direction rolling win rate tracker: drift monitor needs 60 trades to fire; a 30-trade per-direction tracker fires 2× faster
+- `CalibrationDriftMonitor.record()` also has the label bug (records `outcome` not `y_up`)
+- `models/` directory doesn't exist — calibrator save would fail silently even after fix
+- No `train_calibrator.py` script (unlike `train_regime.py`) — no way to manually verify calibration before go-live
+- `btc_24h_return` missing as a feature: all 27 features max out at 1h lookback; BTC's 24h crash context is invisible to the regime model. `brti:candles:1h` stores candles permanently (no TTL), so 6+ days of data already available.
+- OI rising + NO→DOWN: 14.3% win rate on 14 trades — cleaner short-squeeze indicator than CVD alone
+- Kalshi accuracy (54.9%) vs Kronos accuracy (18.4%) in losing period — market is 3× better predictor right now
+
+**Planned changes (pending implementation):**
+
+| Layer | Change | Files |
+|-------|--------|-------|
+| 1 | Fix calibrator label bug: use `y_up = int(direction==outcome)` | `main.py` |
+| 1 | Add rolling 300-row window + `features_stale=0` filter to calibrator training query | `main.py` |
+| 1 | Lower `_MIN_SAMPLES` 500→300 | `calibrator.py` |
+| 1 | Add calibrator persistence: `CALIBRATOR_MODEL_PATH`, save after refit, load on startup | `config.py`, `calibrator.py`, `main.py` |
+| 1 | Refit cadence: every 25 resolutions via Redis counter (not every trade) | `main.py` |
+| 1 | Monotonicity guard: revert refit if new Brier > old Brier on training data | `calibrator.py` |
+| 1 | New `scripts/train_calibrator.py` (mirrors `train_regime.py`, dry-run, Brier report) | new file |
+| 1b | Fix drift monitor label bug: record `y_up` not `outcome` | `main.py` |
+| 1b | Add `CalibrationDriftMonitor.reset_baseline()` — call after each calibrator refit | `calibration_drift_monitor.py` |
+| 1b | Bootstrap shrink 0.8→0.4 when `is_drifting()=True` in fusion | `fusion.py` |
+| 2 | Gate 8 hard block: Kalshi consensus at 8% threshold (OI squeeze compound at 2%) | `pretrade_checklist.py`, `config.py` |
+| 2 | Gate 8b continuous Kelly multiplier: `max(0, 1 - opposing_margin/0.20)` | `pretrade_checklist.py` |
+| 2 | Drift monitor → Kelly: 50% shrink when `is_drifting()` | `pretrade_checklist.py` |
+| 2 | Gate 8 logged to `gate_rejections` with `failed_gate=8`; fresh second-fetch mid used | `main.py`, `pretrade_checklist.py` |
+| 3 | New `DirectionWinRateTracker`: 30-trade rolling per-direction win rate → 40% Kelly shrink when <45% | new file, `kelly.py`, `main.py` |
+| 3 | `btc_24h_return` as Feature 28 (3-file contract: `regime_model.py`, `train_regime.py`, `fusion.py`) | 3 files + `main.py` |
+| 3 | `auto_retrain.py` `_ROW_TRIGGER_DELTA` 500→200 | `scripts/auto_retrain.py` |
+
+**Deployment order:** Gate 8 + drift→Kelly wiring first (immediate bleeding stop, no model changes) → calibrator fixes → drift monitor fixes + direction tracker → Feature 28 (before June 3 regime train).
+
+**Key constants added:**
+- `CALIBRATOR_MODEL_PATH = "models/calibrator.pkl"` in config.py
+- `KALSHI_CONSENSUS_THRESHOLD = 0.08` in config.py
+
+**Key gotchas for implementation:**
+- `y_up = int(direction == outcome)` for the correct label. direction=0, outcome=0 → y_up=1 (market UP); direction=0, outcome=1 → y_up=0 (market DOWN = NO win). This is `(directions == outcomes).astype(float)` in numpy.
+- `fresh_kalshi_mid = (result2_best_bid_cents + result2_best_ask_cents) / 200.0` — pass to checklist from the second orderbook fetch data, not from `signal.regime_features["kalshi_implied_prob"]`
+- Feature 28 default = 0.0 when len(df1h) < 25; set `stale=True`
+- `use_28=True` implies `use_27=True` in `_build_query()` — 28-feature model is strict superset
+- `reset_baseline()` must clear `_KEY_BASELINE`, `_KEY_ALERT_COUNT`, `_KEY_TOTAL_COUNT` AND `_KEY_HISTORY` in Redis, and reset `_history` deque and `_total_count=0` in memory
+- Gate 8 blocks: write `failed_gate=8` to `gate_rejections` — same logging path as other gates (see existing `_process_market` gate rejection write in main.py)
+- `models/` directory doesn't exist — use `os.makedirs("models", exist_ok=True)` before any save
+- Do NOT add `_lkg`, `_lkg_written_at`, or `_deribit_lkg` to feature lists — corrupts XGBoost
+
+---
+
+**As of 2026-05-26 session 9: launchd persistence COMPLETE. Kronos now auto-starts on login and auto-restarts on crash. 338 tests pass.**
+
+**Session 9: launchd persistence**
+
+| File | Change |
+|------|--------|
+| `scripts/launch_kronos.sh` | **New** — wrapper script: `cd` to project dir, `source .env`, `exec python3 main.py`. Required because launchd does not source shell profiles or `.env`. |
+| `~/Library/LaunchAgents/com.kronos.v2.plist` | **New** — launchd agent: `RunAtLoad=true`, `KeepAlive=true`, `ThrottleInterval=15s`. Starts on login, restarts on crash. Stdout/stderr → `logs/launchd_stdout.log` / `logs/launchd_stderr.log`. |
+| `main.py` | Added `shadow` column comment in `_GATE_REJECTIONS_COLUMN_MIGRATIONS` and at shadow INSERT call — makes the training exclusion rule explicit: any training query must filter `WHERE shadow = 0` to avoid duplicating trades already in `trades.db`. |
+
+**Manage the launchd agent:**
+```bash
+launchctl load   ~/Library/LaunchAgents/com.kronos.v2.plist   # start + register (persists across reboots)
+launchctl unload ~/Library/LaunchAgents/com.kronos.v2.plist   # stop + deregister
+launchctl list | grep kronos                                    # check status (PID + exit code)
+```
+
+**What persists vs what doesn't:**
+- Survives: terminal close, process crash, Mac wake from sleep
+- Survives on next login: reboots, logouts (re-registers on login)
+- Does NOT survive: Mac fully asleep (process suspended, not dead — resumes on wake)
+- For true 24/7 (lid closed): System Settings → Battery → disable "Prevent automatic sleeping when on power adapter" (keeps Mac awake on AC power, lid open or closed)
+
+---
+
 **As of 2026-05-25 session 8: Background Kronos MC loop + second orderbook fetch COMPLETE. Trades now execute at T+180ms instead of T+23s. 338 tests pass.**
 
 **Session 8: Background Kronos MC loop + second orderbook fetch**
@@ -506,6 +637,6 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 - **Multi-source derivatives feed (session 7):** `_fetch_funding_and_oi()` now queries OKX, Hyperliquid, and Kraken Futures in parallel; averages whichever succeed. `okx_partial=True` only when ALL three fail. Hyperliquid reports 1h funding (multiply × 8 for 8h equiv). Kraken reports annualized funding (divide by 1095 for 8h equiv). `_prev_oi` is now a dict `{"okx": float, "hyperliquid": float, "kraken_futures": float}` — each source tracks its own prev OI for delta computation. `_coinglass_funding_and_oi` is preserved but no longer in the main fallback chain; it can be called directly for debugging.
 
-- **Restart procedure:** `ps aux | grep "[Pp]ython.*main\.py"` → kill PID → `cd /Users/ezrakornberg/Kronos\ V2 && python3 main.py > /tmp/kronos_restart.log 2>&1 &` — verify first DerivativesFeed log shows all 21 features including `large_print_direction`.
+- **Restart procedure (launchd):** `launchctl unload ~/Library/LaunchAgents/com.kronos.v2.plist && launchctl load ~/Library/LaunchAgents/com.kronos.v2.plist` — launchd will restart automatically on crash. Logs in `logs/launchd_stdout.log` and `logs/launchd_stderr.log`. Old manual procedure (direct python3) is superseded.
 
 - **Feed health check:** `redis-cli ttl regime:features` should return 400–600. If -2, feed is down. `redis-cli get regime:features:lkg` shows LKG age via `_lkg_written_at` field.

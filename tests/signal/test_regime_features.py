@@ -334,3 +334,30 @@ def test_cvd_fresh_buffer_within_threshold_not_stale_from_buffer():
     # Buffer check passes; velocity should be non-zero
     assert isinstance(features["cvd_velocity"], float)
     assert features["cvd_velocity"] != pytest.approx(0.0)
+
+
+# ── Feature 28: btc_24h_return ────────────────────────────────────────────────
+
+def test_btc_24h_return_computed_with_sufficient_1h_data():
+    """With 26 hourly candles, btc_24h_return = close[-1]/close[-25] - 1."""
+    import numpy as np
+    prices = np.linspace(90000, 95000, 26).tolist()
+    df1h = _make_df1h.__wrapped__(26, prices) if hasattr(_make_df1h, '__wrapped__') else None
+    # Build the df1h manually
+    idx = __import__('pandas').date_range("2024-01-01", periods=26, freq="1h", tz="UTC")
+    df1h = __import__('pandas').DataFrame({
+        "open": prices, "high": prices, "low": prices, "close": prices,
+        "volume": [0.0] * 26, "amount": [0.0] * 26,
+    }, index=idx)
+    engine = _make_engine(df1h=df1h)
+    features, stale, _, _ = engine._regime_features()
+    expected = prices[-1] / prices[-25] - 1
+    assert features["btc_24h_return"] == pytest.approx(expected, rel=1e-6)
+
+
+def test_btc_24h_return_defaults_to_zero_and_stale_with_insufficient_1h_data():
+    """With fewer than 25 hourly candles, btc_24h_return=0.0 and stale=True."""
+    engine = _make_engine(df1h=_make_df1h(n=10))
+    features, stale, _, _ = engine._regime_features()
+    assert features["btc_24h_return"] == pytest.approx(0.0)
+    assert stale is True

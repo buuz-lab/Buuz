@@ -14,6 +14,7 @@ class ChecklistResult:
     failed_reason: Optional[str]
     kelly_dollars: float
     kelly_contracts: int
+    kalshi_mid_at_block: Optional[float] = None
 
 
 class PreTradeChecklist:
@@ -31,14 +32,18 @@ class PreTradeChecklist:
         same_timeframe_open: bool,
         composite_price: float,
         edge_above_threshold: bool,
+        fresh_kalshi_mid: float = 0.5,
+        is_drifting: bool = False,
+        direction_win_rate: Optional[float] = None,
     ) -> ChecklistResult:
-        def fail(gate: int, reason: str) -> ChecklistResult:
+        def fail(gate: int, reason: str, kalshi_mid: Optional[float] = None) -> ChecklistResult:
             return ChecklistResult(
                 passed=False,
                 failed_gate=gate,
                 failed_reason=reason,
                 kelly_dollars=0.0,
                 kelly_contracts=0,
+                kalshi_mid_at_block=kalshi_mid,
             )
 
         # Gate 1 — Spread check
@@ -66,6 +71,7 @@ class PreTradeChecklist:
             same_timeframe_open=same_timeframe_open,
             regime_features=signal.regime_features,
             loss_streak=loss_streak,
+            direction_win_rate=direction_win_rate,
         )
         kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
 
@@ -76,6 +82,27 @@ class PreTradeChecklist:
                 return fail(2, "Kelly size rounds to 0 contracts")
         if kelly_contracts > available_contracts:
             return fail(2, f"Insufficient depth: need {kelly_contracts} contracts, {available_contracts} available")
+
+        # Gate 8b — Kalshi Kelly multiplier (continuous gradient reduction before hard block)
+        opposing_margin = max(0.0, (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid))
+        kalshi_kelly_mult = max(0.0, 1.0 - opposing_margin / 0.20)
+        kelly_dollars *= kalshi_kelly_mult
+        kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
+        if kelly_contracts == 0:
+            if kelly_dollars >= (trade_price_cents / 100) * 0.5:
+                kelly_contracts = 1
+            else:
+                return fail(2, "Kelly size rounds to 0 contracts after Kalshi Kelly multiplier")
+
+        # Drift Kelly shrink — 50% additional shrink when calibration drift detected
+        if is_drifting:
+            kelly_dollars *= 0.5
+            kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
+            if kelly_contracts == 0:
+                if kelly_dollars >= (trade_price_cents / 100) * 0.5:
+                    kelly_contracts = 1
+                else:
+                    return fail(2, "Kelly size rounds to 0 contracts after drift shrink")
 
         # Gate 3 — High uncertainty + thin edge
         edge_from_center = abs(signal.calibrated_prob - 0.5)
@@ -103,6 +130,15 @@ class PreTradeChecklist:
             distance = abs(composite_price - signal.strike)
             if distance < 150:
                 return fail(6, f"Composite price ${composite_price:,.0f} within $150 of strike ${signal.strike:,.0f} (distance ${distance:.0f})")
+
+        # Gate 8 — Kalshi consensus hard block
+        oi_delta = signal.regime_features.get("oi_delta_pct", 0.0) if signal.regime_features else 0.0
+        oi_squeeze = (oi_delta > 0.001) and (signal.direction == 0)
+        effective_threshold = config.KALSHI_CONSENSUS_THRESHOLD / 4.0 if oi_squeeze else config.KALSHI_CONSENSUS_THRESHOLD
+        opposing = (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid)
+        if opposing > effective_threshold:
+            side = "NO→DOWN" if signal.direction == 0 else "YES→UP"
+            return fail(8, f"Kalshi consensus {fresh_kalshi_mid:.3f} opposes {side} (threshold {effective_threshold:.3f})", kalshi_mid=fresh_kalshi_mid)
 
         return ChecklistResult(
             passed=True,

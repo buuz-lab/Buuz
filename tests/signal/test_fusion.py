@@ -33,12 +33,12 @@ def _make_feature_store_mock():
         "volume": [0.0] * 15, "amount": [0.0] * 15,
     }, index=idx)
 
-    # Enough 1h candles for sr_proximity
-    h_prices = np_.linspace(94000, 96000, 5).tolist()
-    h_idx = pd.date_range("2024-01-01", periods=5, freq="1h", tz="UTC")
+    # Enough 1h candles for sr_proximity AND btc_24h_return (needs >= 25)
+    h_prices = np_.linspace(94000, 96000, 26).tolist()
+    h_idx = pd.date_range("2024-01-01", periods=26, freq="1h", tz="UTC")
     df1h = pd.DataFrame({
         "open": h_prices, "high": h_prices, "low": h_prices, "close": h_prices,
-        "volume": [0.0] * 5, "amount": [0.0] * 5,
+        "volume": [0.0] * 26, "amount": [0.0] * 26,
     }, index=h_idx)
 
     # get_ohlcv("1h") should return df1h, ("5min") should return df5

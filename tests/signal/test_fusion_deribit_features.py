@@ -18,6 +18,8 @@ _ALL_27_KEYS = [
     "tape_speed_tpm", "large_print_direction",
     "atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope", "skew_25d",
     "kalshi_spread_normalized",
+    # Feature 28 (session 11)
+    "btc_24h_return",
 ]
 
 
@@ -29,11 +31,12 @@ def _make_feature_store_mock():
         "open": prices, "high": prices, "low": prices, "close": prices,
         "volume": [0.0] * 15, "amount": [0.0] * 15,
     }, index=idx)
-    h_prices = np.linspace(94000, 96000, 5).tolist()
-    h_idx = pd.date_range("2024-01-01", periods=5, freq="1h", tz="UTC")
+    # 26 candles for btc_24h_return (needs >= 25)
+    h_prices = np.linspace(94000, 96000, 26).tolist()
+    h_idx = pd.date_range("2024-01-01", periods=26, freq="1h", tz="UTC")
     df1h = pd.DataFrame({
         "open": h_prices, "high": h_prices, "low": h_prices, "close": h_prices,
-        "volume": [0.0] * 5, "amount": [0.0] * 5,
+        "volume": [0.0] * 26, "amount": [0.0] * 26,
     }, index=h_idx)
     def ohlcv_side_effect(tf):
         return df1h if tf == "1h" else df5
@@ -77,14 +80,14 @@ def _base_ctx() -> dict:
 # ── test_regime_features_includes_all_27_keys ─────────────────────────────────
 
 def test_regime_features_includes_all_27_keys():
-    """_regime_features() must return exactly 27 keys in the correct order."""
+    """_regime_features() must return exactly 28 keys in the correct order (now including btc_24h_return)."""
     engine = _make_engine(_base_ctx())
     features, stale, deribit_stale, _ = engine._regime_features()
     keys = list(features.keys())
     assert keys == _ALL_27_KEYS, (
         f"Key mismatch.\nExpected: {_ALL_27_KEYS}\nGot:      {keys}"
     )
-    assert len(keys) == 27
+    assert len(keys) == 28
 
 
 # ── test_deribit_stale flags ──────────────────────────────────────────────────

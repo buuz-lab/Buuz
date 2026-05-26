@@ -73,6 +73,16 @@ class CalibrationDriftMonitor:
         """True when alert_count >= DRIFT_CONSECUTIVE_ALERT."""
         return self._get_alert_count() >= DRIFT_CONSECUTIVE_ALERT
 
+    def reset_baseline(self) -> None:
+        """Call after calibrator refit so baseline reflects new calibration era."""
+        try:
+            self._redis.delete(_KEY_BASELINE, _KEY_ALERT_COUNT, _KEY_TOTAL_COUNT, _KEY_HISTORY)
+            self._history.clear()
+            self._total_count = 0
+            logger.info("CalibrationDriftMonitor: baseline reset after calibrator refit")
+        except redis.RedisError as exc:
+            logger.warning(f"CalibrationDriftMonitor: reset failed — {exc}")
+
     def baseline_brier(self) -> float | None:
         """None until first window fills."""
         try:

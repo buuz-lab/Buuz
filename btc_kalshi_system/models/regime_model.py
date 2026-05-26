@@ -33,6 +33,8 @@ _FEATURE_ORDER = [
     "term_structure_slope",
     "skew_25d",
     "kalshi_spread_normalized",
+    # Feature 28: 24h BTC price return context (session 11)
+    "btc_24h_return",
 ]
 
 

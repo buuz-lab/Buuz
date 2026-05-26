@@ -59,7 +59,7 @@ _TRAINING_READY_FILTER = (
     " AND atm_iv IS NOT NULL"
 )
 
-_ROW_TRIGGER_DELTA = 500          # retrain when +500 new training-ready rows
+_ROW_TRIGGER_DELTA = 200          # retrain when +200 new training-ready rows
 _TIME_TRIGGER_DAYS = 14           # retrain if 14 days elapsed
 _ROLLING_WINDOW_THRESHOLD = 1500  # switch to rolling window above this many rows
 _ROLLING_WINDOW_SIZE = 1200       # use last 1200 rows when above threshold

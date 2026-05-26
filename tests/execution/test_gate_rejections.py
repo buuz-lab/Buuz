@@ -20,20 +20,22 @@ from btc_kalshi_system.signal.fusion import TradingSignal
 
 _GATE_REJECTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS gate_rejections (
-    rejection_id    TEXT PRIMARY KEY,
-    timestamp       REAL,
-    ticker          TEXT,
-    timeframe       TEXT,
-    direction       INTEGER,
-    failed_gate     INTEGER,
-    failed_reason   TEXT,
-    signal_prob     REAL,
-    deepseek_regime TEXT,
+    rejection_id     TEXT PRIMARY KEY,
+    timestamp        REAL,
+    ticker           TEXT,
+    timeframe        TEXT,
+    direction        INTEGER,
+    failed_gate      INTEGER,
+    failed_reason    TEXT,
+    signal_prob      REAL,
+    deepseek_regime  TEXT,
     kalshi_mid_cents INTEGER,
-    features        TEXT,
-    outcome         INTEGER DEFAULT NULL,
-    resolved_at     REAL DEFAULT NULL,
-    aged_out        INTEGER DEFAULT 0
+    features         TEXT,
+    outcome          INTEGER DEFAULT NULL,
+    resolved_at      REAL DEFAULT NULL,
+    aged_out         INTEGER DEFAULT 0,
+    shadow           INTEGER DEFAULT 0,
+    kalshi_mid_at_block REAL DEFAULT NULL
 )
 """
 
@@ -78,6 +80,10 @@ def _make_trader(db: sqlite3.Connection):
     trader._monitor = MagicMock()
     trader._edge_tracker = MagicMock()
     trader._redis = MagicMock()
+    trader._drift_monitor = MagicMock()
+    trader._drift_monitor.is_drifting.return_value = False
+    trader._dir_tracker = MagicMock()
+    trader._dir_tracker.get_win_rate.return_value = None
     trader._monitor.ticker_direction_count.return_value = 0
     trader._monitor.get_current_exposure.return_value = 0.0
     trader._monitor.has_timeframe_position.return_value = False
