@@ -10,6 +10,14 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-26 session 11 (post-deploy hotfix): DerivativesFeed OKX re-resolve bug fixed. 362 tests pass.**
+
+**Session 11 hotfix: DerivativesFeed OKX exchange stuck as None**
+
+`_fetch_trades_data` and `_fetch_volume_ratio` both catch all exceptions internally and fall back to Kraken, so `run()` never saw a failure and never called `_resolve_exchange()` after OKX was nulled out. Fixed by adding a guard at the top of the `run()` inner loop: if `self._exchange is None`, re-resolve before fetching. Commit `46b7143`.
+
+---
+
 **As of 2026-05-26 session 11: Regime-adaptive trading fixes COMPLETE. 362 tests pass.**
 
 **Session 11: Regime-adaptive trading implementation**
