@@ -26,7 +26,7 @@ from config import REDIS_URL
 _REFRESH_INTERVAL = 300          # 5 minutes
 _OPTIONS_TTL = 600               # 2× refresh interval
 _OPTIONS_LKG_TTL = 14_400        # 4 hours — options data moves slowly
-_MIN_DAYS_TO_EXPIRY = 3          # skip front-month (theta spike)
+_MIN_DAYS_TO_EXPIRY = 1          # skip same-day expiry only; 3 was too aggressive near weekly rolls
 _MIN_OI_FOR_ATM = 10             # minimum OI for ATM IV candidates
 _DERIBIT_URL = (
     "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"

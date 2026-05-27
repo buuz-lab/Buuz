@@ -193,8 +193,8 @@ class TestKronosBackgroundLoop:
         with patch("asyncio.sleep", side_effect=mock_sleep):
             asyncio.run(system._kronos_background_loop())
 
-        # Two iterations, same candle → MC called exactly once
-        assert system._kronos.run_monte_carlo.call_count == 1
+        # Two iterations, same candle → MC called exactly twice (k5 + k15 on first iteration only)
+        assert system._kronos.run_monte_carlo.call_count == 2
 
     def test_continues_after_mc_exception(self):
         """Loop stays alive after an MC exception and processes the next new candle."""
@@ -340,7 +340,7 @@ class TestProcessMarketSecondFetch:
 
         captured_fills = []
 
-        def capture_record(trade_id, signal, checklist_result, ticker, fill_price_cents):
+        def capture_record(trade_id, signal, checklist_result, ticker, fill_price_cents, **kwargs):
             captured_fills.append(fill_price_cents)
 
         with patch.object(system, "_record_trade_sqlite", side_effect=capture_record):

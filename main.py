@@ -126,6 +126,11 @@ _TRADES_COLUMN_MIGRATIONS = [
     ("okx_stale",                "INTEGER DEFAULT 0"),
     # Feature 28: 24h BTC price return (session 11). NULL for rows written before this migration.
     ("btc_24h_return",           "REAL DEFAULT NULL"),
+    # Shadow: 15min-candle Kronos MC prob logged alongside live 5min prob for A/B comparison.
+    ("kronos_raw_15min",         "REAL DEFAULT NULL"),
+    # k15 calibrated probability — calibrator.transform(kronos_raw_15min) at trade time.
+    # Enables k15-primary vs k5-primary counterfactual on actual trades.
+    ("k15_calibrated_prob",      "REAL DEFAULT NULL"),
 ]
 
 _TRADE_SNAPSHOTS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
@@ -203,6 +208,24 @@ _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("shadow", "INTEGER DEFAULT 0"),
     # Gate 8 (Kalshi consensus): fresh second-fetch mid-price at block time for threshold analysis.
     ("kalshi_mid_at_block", "REAL DEFAULT NULL"),
+    # Gate 9 (edge-flip shadow): the price at which the flipped direction would have been entered.
+    ("flip_price_cents", "INTEGER DEFAULT NULL"),
+    # Shadow: 15min-candle Kronos MC prob at signal time for A/B comparison vs 5min.
+    ("kronos_raw_15min", "REAL DEFAULT NULL"),
+    # Raw k5 MC probability at signal time — apples-to-apples comparison with kronos_raw_15min.
+    ("kronos_raw",       "REAL DEFAULT NULL"),
+    # All gates: the price at which the trade would have (or did) fill.
+    # shadow=0: hypothetical fill (ask for YES, 100-bid for NO) at signal time.
+    # shadow=1 (Gate 7): real fill price from the trade that proceeded.
+    # shadow=2 (Gate 9): same as flip_price_cents.
+    ("would_be_fill_cents", "INTEGER DEFAULT NULL"),
+    # k15 calibrated probability — calibrator.transform(kronos_raw_15min) at signal time.
+    # Cannot be reconstructed post-hoc (calibrator state changes every 25 resolutions).
+    # Combined with kronos_raw_15min, would_be_fill_cents, and outcome, enables full
+    # k15-primary vs k5-primary counterfactual analysis.
+    ("k15_calibrated_prob", "REAL DEFAULT NULL"),
+    # Denormalized from features JSON for easy timing-bucket queries (t=0 / t+5 / t+10).
+    ("candle_progress",     "REAL DEFAULT NULL"),
 ]
 
 
@@ -366,15 +389,26 @@ class KronosV2:
                             prob = await asyncio.to_thread(
                                 self._kronos.run_monte_carlo, self._store, 100, strike
                             )
+                            prob_15min: float | None = None
+                            try:
+                                prob_15min = await asyncio.to_thread(
+                                    self._kronos.run_monte_carlo, self._store, 100, strike,
+                                    candle_freq="15min",
+                                )
+                            except Exception as exc15:
+                                logger.warning(f"KronosBG: 15min MC failed — {exc15}")
                             # Always assign a new dict — never mutate in place (GIL safety)
                             self._cached_kronos = {
                                 "prob": prob,
+                                "prob_15min": prob_15min,
                                 "candle_ts": current_ts,
                                 "computed_at": time.time(),
                                 "strike": strike,
                             }
+                            _k15_str = f"{prob_15min:.4f}" if prob_15min is not None else "N/A"
                             logger.info(
-                                f"KronosBG: prob={prob:.4f} strike={strike:.2f} candle={current_ts}"
+                                f"KronosBG: prob={prob:.4f} prob_15min={_k15_str} "
+                                f"strike={strike:.2f} candle={current_ts}"
                             )
                         except ValueError as exc:
                             logger.warning(f"KronosBG: insufficient OHLCV data — {exc}")
@@ -593,12 +627,17 @@ class KronosV2:
         if not result.passed:
             logger.info(f"Pre-trade checklist failed for {ticker} [gate {result.failed_gate}]: {result.failed_reason}")
             try:
+                would_be_fill = best_ask_cents if signal.direction == 1 else (100 - best_bid_cents)
+                _k15_raw = cached.get("prob_15min")
+                _k15_cal = self._calibrator.transform(_k15_raw) if _k15_raw is not None else None
+                _candle_prog = (signal.regime_features or {}).get("candle_progress")
                 self._db.execute(
                     """INSERT OR IGNORE INTO gate_rejections
                        (rejection_id, timestamp, ticker, timeframe, direction,
                         failed_gate, failed_reason, signal_prob, deepseek_regime,
-                        kalshi_mid_cents, features, kalshi_mid_at_block)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        kalshi_mid_cents, features, kalshi_mid_at_block, would_be_fill_cents,
+                        kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(uuid.uuid4()),
                         time.time(),
@@ -612,6 +651,11 @@ class KronosV2:
                         round(mid_cents),
                         json.dumps(signal.regime_features or {}),
                         result.kalshi_mid_at_block,
+                        would_be_fill,
+                        _k15_raw,
+                        cached.get("prob"),
+                        _k15_cal,
+                        _candle_prog,
                     ),
                 )
                 self._db.commit()
@@ -639,8 +683,10 @@ class KronosV2:
                             """INSERT OR IGNORE INTO gate_rejections
                                (rejection_id, timestamp, ticker, timeframe, direction,
                                 failed_gate, failed_reason, signal_prob, deepseek_regime,
-                                kalshi_mid_cents, features, shadow)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                kalshi_mid_cents, features, shadow, flip_price_cents,
+                                would_be_fill_cents, kronos_raw_15min, kronos_raw,
+                                k15_calibrated_prob, candle_progress)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                             (
                                 str(uuid.uuid4()),
                                 time.time(),
@@ -654,6 +700,12 @@ class KronosV2:
                                 round(mid_cents),
                                 json.dumps(signal.regime_features or {}),
                                 2,
+                                flip_price_cents,
+                                flip_price_cents,
+                                _k15_raw,
+                                cached.get("prob"),
+                                _k15_cal,
+                                _candle_prog,
                             ),
                         )
                         self._db.commit()
@@ -665,32 +717,13 @@ class KronosV2:
 
         # Gate 7 shadow — log when CVD opposes direction but let trade proceed.
         # Enforcing mode removed; shadow rows accumulate so win-rate can be tracked.
+        # Insert is deferred to after fill so would_be_fill_cents stores the real fill price.
         _cvd = (signal.regime_features or {}).get("cvd_normalized", 0.0)
         _g7_reason: str | None = None
         if signal.direction == 1 and _cvd < -config.CVD_GATE_THRESHOLD:
             _g7_reason = f"CVD {_cvd:.3f} opposes YES→UP (threshold -{config.CVD_GATE_THRESHOLD})"
         elif signal.direction == 0 and _cvd > config.CVD_GATE_THRESHOLD:
             _g7_reason = f"CVD {_cvd:.3f} opposes NO→DOWN (threshold +{config.CVD_GATE_THRESHOLD})"
-        if _g7_reason:
-            try:
-                self._db.execute(
-                    # shadow=1: trade proceeds; row is observability-only, not training data.
-                    """INSERT OR IGNORE INTO gate_rejections
-                       (rejection_id, timestamp, ticker, timeframe, direction,
-                        failed_gate, failed_reason, signal_prob, deepseek_regime,
-                        kalshi_mid_cents, features, shadow)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-                    (
-                        str(uuid.uuid4()), time.time(), ticker, timeframe,
-                        signal.direction, 7, _g7_reason, signal.kronos_calibrated,
-                        signal.deepseek_regime, round(mid_cents),
-                        json.dumps(signal.regime_features or {}),
-                    ),
-                )
-                self._db.commit()
-                logger.info(f"Gate 7 shadow (trade proceeds): {ticker} — {_g7_reason}")
-            except sqlite3.Error as exc:
-                logger.error(f"SQLite gate_rejections shadow insert failed: {exc}")
 
         # h. Second orderbook fetch — get fresh prices right before placing the order.
         #    The first fetch (T+0) was for kalshi_mid/spread feature injection only.
@@ -773,7 +806,42 @@ class KronosV2:
         self._monitor.add_position(position)
 
         # k. Log to SQLite
-        self._record_trade_sqlite(trade_id, signal, result2, ticker, fill_price_cents)
+        _trade_k15_raw = cached.get("prob_15min")
+        _trade_k15_cal = self._calibrator.transform(_trade_k15_raw) if _trade_k15_raw is not None else None
+        self._record_trade_sqlite(trade_id, signal, result2, ticker, fill_price_cents,
+                                   kronos_raw_15min=_trade_k15_raw,
+                                   k15_calibrated_prob=_trade_k15_cal)
+
+        # Gate 7 shadow insert — deferred to here so would_be_fill_cents = real fill price.
+        if _g7_reason:
+            try:
+                _g7_k15_raw = cached.get("prob_15min")
+                _g7_k15_cal = self._calibrator.transform(_g7_k15_raw) if _g7_k15_raw is not None else None
+                _g7_candle_prog = (signal.regime_features or {}).get("candle_progress")
+                self._db.execute(
+                    # shadow=1: trade proceeds; row is observability-only, not training data.
+                    """INSERT OR IGNORE INTO gate_rejections
+                       (rejection_id, timestamp, ticker, timeframe, direction,
+                        failed_gate, failed_reason, signal_prob, deepseek_regime,
+                        kalshi_mid_cents, features, shadow, would_be_fill_cents,
+                        kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
+                    (
+                        str(uuid.uuid4()), time.time(), ticker, timeframe,
+                        signal.direction, 7, _g7_reason, signal.kronos_calibrated,
+                        signal.deepseek_regime, round(mid_cents),
+                        json.dumps(signal.regime_features or {}),
+                        fill_price_cents,
+                        _g7_k15_raw,
+                        cached.get("prob"),
+                        _g7_k15_cal,
+                        _g7_candle_prog,
+                    ),
+                )
+                self._db.commit()
+                logger.info(f"Gate 7 shadow (trade proceeds): {ticker} — {_g7_reason}")
+            except sqlite3.Error as exc:
+                logger.error(f"SQLite gate_rejections shadow insert failed: {exc}")
 
     # ── Helper methods ────────────────────────────────────────────────────────
 
@@ -1061,6 +1129,8 @@ class KronosV2:
         checklist_result,
         ticker: str,
         fill_price_cents: int,
+        kronos_raw_15min: float | None = None,
+        k15_calibrated_prob: float | None = None,
     ) -> None:
         import math
         # Pull the six regime features off the signal. These are the exact values
@@ -1090,14 +1160,14 @@ class KronosV2:
                     large_print_direction,
                     atm_iv, iv_rv_spread, pcr_oi, term_structure_slope,
                     skew_25d, kalshi_spread_normalized, deribit_stale, okx_stale,
-                    btc_24h_return
+                    btc_24h_return, kronos_raw_15min, k15_calibrated_prob
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?,
                     ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -1146,6 +1216,8 @@ class KronosV2:
                     1 if signal.deribit_stale else 0,
                     1 if signal.okx_stale else 0,
                     feats.get("btc_24h_return"),
+                    kronos_raw_15min,
+                    k15_calibrated_prob,
                 ),
             )
             self._db.commit()

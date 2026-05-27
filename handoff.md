@@ -34,6 +34,136 @@ Depth failures at 2–9¢ markets: Kelly requested 100–400 contracts (even a $
 
 Prediction horizon mismatch: `run_monte_carlo()` used 5-min candles and predicted `y_timestamp = last_candle + 5min`, but 15-min Kalshi markets settle at the 15-min BRTI close. Added `candle_freq: str = "5min"` parameter (default preserves existing behavior). Background loop and 1h track can pass correct freq when ready. Commit `d36b56a`.
 
+**k15 shadow column (session 13)**
+
+`kronos_raw_15min` column added to `trades` and `gate_rejections`. Background loop computes both 5min and 15min MC on every 5min candle close; `prob_15min` cached alongside `prob`. All trade and rejection INSERTs log both. Enables A/B calibration comparison over time.
+
+**Caveat if switching k15 to primary signal:** The background loop triggers on 5min candle closes and `_resample()` always appends the live in-progress candle, so the 15min OHLCV input refreshes every 5 minutes (not just on 15min closes) — no structural staleness problem. However, the hard-abort threshold in `_process_market` is `_cache_age > 600` (10 min). If the background loop ever misses a 5min trigger, a 15min-primary system could hit this threshold mid-candle. Raise it to `900` (one full 15min period) before going live with k15 as primary. The 360s watchdog in `_regime_watchdog` should also be raised to `~600s` accordingly.
+
+**k15/k5 signal architecture — tentative design (session 13)**
+
+**Core design: k15 picks direction, k5 sizes the bet (and vice versa at t=0)**
+
+| Time in 15-min window | Direction signal | Size modifier |
+|---|---|---|
+| t=0 (progress < 0.15) | k5 primary | full Kelly if k15 agrees; half Kelly if k15 disagrees |
+| t+5 (0.15–0.55) | k15 primary | full Kelly if k5 agrees; half Kelly if k5 disagrees |
+| t+10 (progress > 0.55) | block or very tight edge only | candle_progress data: 27% win rate at 0.7 |
+
+**Why this design:**
+- k15 at t=0 is one 15-min bar stale (background loop hasn't finished for the new candle yet); k5 is fresher
+- k15 at t+5 has just updated with the bar that closed at market open — most informative k15 gets
+- Agreement amplifies (full Kelly); disagreement doesn't block the trade, it just reduces conviction (half Kelly)
+- No momentum missed: disagreement costs size, not the entry
+
+**Implementation notes:**
+- Direction change at t+5: replace `cached["prob"]` with `cached["prob_15min"]` for signal direction computation in `_process_market`, gated on `candle_progress >= 0.15`
+- Size modifier: add an `agreement_mult` (1.0 or 0.5) to the Kelly shrink chain in `pretrade_checklist.py`
+- `candle_progress` is already computed in fusion.py and available in `signal.regime_features`
+- Gate rejections log `candle_progress` via `json_extract(features, '$.candle_progress')` — no schema change needed for analysis
+
+---
+
+**Uptrend cases and how to adjust**
+
+Four scenarios when BTC enters an uptrend:
+
+**Case 1 — k15 bullish, k5 bullish (agree)**
+Both signals see the trend. Full Kelly at both t=0 and t+5. This is the ideal case — no adjustment needed. Expect this after the first full 15-min bar of the uptrend has closed and k15 has updated.
+
+**Case 2 — k15 bullish, k5 bearish (k5 sees an intra-bar pullback)**
+This is the design working correctly. k15 leads the trend direction; k5 is reacting to short-term noise within the uptrend. Enter at half Kelly. If k15 is right (trend holds), momentum is captured. Risk is limited by the smaller size.
+
+**Case 3 — k15 bearish, k5 bullish at t+5 (the dangerous case)**
+k5 is catching a trend reversal but k15 is still bearish from the bar that closed before the reversal started. Under the design, k15 controls direction at t+5 → we either skip or enter the wrong way (NO). This is where the design can fail.
+
+*Mitigations:*
+- At t=0 in the same market period, k5 is primary → you still enter YES at half Kelly (k15 disagreeing reduces size but doesn't block). This captures the early momentum even if t+5 misfires.
+- After one 15-min bar of uptrend, k15 will have flipped bullish and the t+5 signal corrects itself. The failure window is at most ONE market period (15 min).
+- DeepSeek override: if DeepSeek classifies `trending_up` AND k5 is strongly bullish (≥ 0.80), treat t+5 as k5-primary instead of k15-primary. This is the cleanest adjustment and uses an existing signal.
+- If k5 is very strongly bullish (≥ 0.85) while k15 is bearish at t+5, consider 75% Kelly instead of 50% rather than full reversal — softer than overriding k15 entirely.
+
+**Case 4 — Both bearish, trend reversal mid-period**
+Both signals are wrong. This is a regime-change problem independent of the k5/k15 design. The existing circuit breaker and direction win-rate tracker are the right mitigations here.
+
+**Case 5 — Early trend, k5 has fired at t=0 but k15 hasn't updated yet**
+k5 enters at t=0 (half Kelly, k15 still bearish). By t+5, k15 has updated with the first bullish 15-min bar → k15 now bullish → t+5 entry at full or half Kelly depending on k5. The system naturally scales up as the trend becomes clear. This is the expected happy path for catching early momentum.
+
+**Monitoring signals that precede k15 catching up:**
+When these flip, the transition from Case 3 to Case 1 is imminent:
+- `large_print_direction` turns strongly positive (> 0.6)
+- `cvd_normalized` turns positive and sustained
+- `volume_ratio_1h` climbing above 0.8x
+- `funding_rate_trend` turning positive
+- k5 consistently ≥ 0.70 for 2+ consecutive cycles
+- DeepSeek flips to `trending_up`
+
+**Key validation needed before implementing:**
+The design assumes k15 will flip bullish within one 15-min bar of a real uptrend starting. This needs to be confirmed with live trending_up data — it's the only regime missing from the k15 dataset. Until then, this design should not be implemented. Use the current shadow logging to accumulate that data.
+
+---
+
+**k15 investigation findings + integration roadmap (session 13)**
+
+94 resolved gate rejections with k15 data collected (all 2026-05-27, thin-volume Extreme Fear overnight). Key results:
+
+| | k5 | k15 |
+|---|---|---|
+| Directional accuracy (94 rows) | 53.2% | 66.0% |
+| Accuracy when they agree (66 rows) | 54.5% | 54.5% |
+| Accuracy when they diverge (36 rows) | **30.6%** | **69.4%** |
+
+In all 36 divergence cases: k5 was bullish, k15 was bearish. k15 was right 25/36 = 69.4%. k5 is near-coinflip when they agree; k5 is a strong contra-indicator when they diverge.
+
+**Critical data gap:** zero k15 rows in `trending_up` regime (36 historical rows exist, none with k15). This is the regime where k15 being overly conservative would hurt — must see this before any gate goes live.
+
+**Session 13 schema addition:** `kronos_raw` added to `gate_rejections`. Now stores raw k5 MC (pre-calibration) alongside `kronos_raw_15min` for apples-to-apples comparison. `signal_prob` (calibrated) was the old k5 proxy — use `kronos_raw` for all future k5 vs k15 analysis.
+
+---
+
+**k15 integration options**
+
+**Option A — k15 as hard confirmation gate (recommended)**
+Require `kronos_raw_15min >= 0.5` (for YES direction) before the trade proceeds. Adds as a new gate between signal fusion and the existing checklist.
+- Eliminates the 36-case divergence pattern (30% win rate)
+- Reduces trade frequency ~30% (only fires when both agree)
+- Doesn't require regime model retrain
+- Implementation: one condition in `_process_market` before `result = self._checklist.run(...)`, logged as a new gate_rejections row with `failed_gate=10` or similar
+- **Code change:** raise `_cache_age > 600` → `> 900` and watchdog `360s` → `600s` in `main.py` first
+
+**Option B — k15 as a regime model feature**
+Add `kronos_raw` and `kronos_raw_15min` to the regime model's X matrix. The model learns when their disagreement signals regime uncertainty.
+- Requires ~200+ trades with k15 populated (currently 3)
+- Not viable until ~late June at current trade rate
+- Combine with Option A: gate first, feature later
+
+**Option C — weighted ensemble**
+Composite signal = `0.6 * kronos_raw_15min + 0.4 * kronos_raw`. Replace `cached["prob"]` with composite before calibration step in `_kronos_background_loop`.
+- Softer than a hard gate — doesn't eliminate borderline divergence cases
+- Harder to interpret and audit
+- Not recommended as first step; could layer on top of Option A later
+
+---
+
+**Suggested schedule**
+
+| Date | Action | Condition |
+|------|--------|-----------|
+| Now → May 30 | Accumulate k15 data across regimes | Need `trending_up` rows + 400+ total resolved k15 gate rejections |
+| ~May 30–31 | Implement Option A (k15 hard gate) | 66%+ accuracy holds across regimes; trending_up data confirms k15 isn't systematically late in bullish markets |
+| ~June 1–3 | Regime model retrain | 500 training-ready rows with `deribit_stale=0` (currently ~102, accumulating ~73/day) |
+| Post-retrain | Add `kronos_raw` + `kronos_raw_15min` as features | Only if enough trades have k15 populated (~100+); otherwise skip and add in next retrain |
+
+**Regime model retrain is independent of the k15 gate** — they can ship in the same deploy (~June 1–3) but neither blocks the other.
+
+**Pre-gate-live checklist:**
+- [ ] At least one `trending_up` session with k15 data — confirm k15 accuracy holds (target ≥55%)
+- [ ] 400+ resolved k15 rows across ≥2 distinct regimes
+- [ ] Raise `_cache_age` threshold `600 → 900` and watchdog `360 → 600` in `main.py`
+- [ ] Add `failed_gate=10` path to gate_rejections with shadow=0
+
+---
+
 **Session 11 bootstrap floor: Gate 2 chicken-and-egg deadlock resolved**
 
 Regime model needs trades to accumulate training data, but Kelly rounds to 0 on thin edges in bootstrap mode (stacked chop/tape/direction_win_rate shrinks), blocking trades entirely. Fixed by adding an `is_bootstrap` flag to `PreTradeChecklist.run()`. When `is_bootstrap=True` (i.e., `regime_model._clf is None`), `kelly_dollars > 0`, and `25 ≤ trade_price_cents ≤ 75`:

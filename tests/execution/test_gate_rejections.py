@@ -20,22 +20,28 @@ from btc_kalshi_system.signal.fusion import TradingSignal
 
 _GATE_REJECTIONS_DDL = """
 CREATE TABLE IF NOT EXISTS gate_rejections (
-    rejection_id     TEXT PRIMARY KEY,
-    timestamp        REAL,
-    ticker           TEXT,
-    timeframe        TEXT,
-    direction        INTEGER,
-    failed_gate      INTEGER,
-    failed_reason    TEXT,
-    signal_prob      REAL,
-    deepseek_regime  TEXT,
-    kalshi_mid_cents INTEGER,
-    features         TEXT,
-    outcome          INTEGER DEFAULT NULL,
-    resolved_at      REAL DEFAULT NULL,
-    aged_out         INTEGER DEFAULT 0,
-    shadow           INTEGER DEFAULT 0,
-    kalshi_mid_at_block REAL DEFAULT NULL
+    rejection_id        TEXT PRIMARY KEY,
+    timestamp           REAL,
+    ticker              TEXT,
+    timeframe           TEXT,
+    direction           INTEGER,
+    failed_gate         INTEGER,
+    failed_reason       TEXT,
+    signal_prob         REAL,
+    deepseek_regime     TEXT,
+    kalshi_mid_cents    INTEGER,
+    features            TEXT,
+    outcome             INTEGER DEFAULT NULL,
+    resolved_at         REAL DEFAULT NULL,
+    aged_out            INTEGER DEFAULT 0,
+    shadow              INTEGER DEFAULT 0,
+    kalshi_mid_at_block REAL DEFAULT NULL,
+    flip_price_cents    INTEGER DEFAULT NULL,
+    kronos_raw_15min    REAL DEFAULT NULL,
+    kronos_raw          REAL DEFAULT NULL,
+    would_be_fill_cents INTEGER DEFAULT NULL,
+    k15_calibrated_prob REAL DEFAULT NULL,
+    candle_progress     REAL DEFAULT NULL
 )
 """
 
