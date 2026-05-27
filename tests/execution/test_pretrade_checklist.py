@@ -352,3 +352,36 @@ def test_bootstrap_floor_not_active_when_regime_trained(checklist):
     kw["is_bootstrap"] = False
     r = checklist.run(**kw)
     assert not r.passed and r.failed_gate == 2
+
+
+# ── Gate 2a: minimum price filter ────────────────────────────────────────────
+
+def test_min_price_blocks_yes_at_low_cents(checklist):
+    """YES trade at 9¢ ask is rejected before Kelly runs (extreme/illiquid market)."""
+    signal = make_signal(direction=1, calibrated_prob=0.52)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 9
+    kw["best_bid_cents"] = 7
+    r = checklist.run(**kw)
+    assert not r.passed and r.failed_gate == 2
+    assert "below minimum" in r.failed_reason
+
+def test_min_price_blocks_no_at_low_cents(checklist):
+    """NO trade where 100-bid=15¢ is also rejected (direction=0, bid=85)."""
+    signal = make_signal(direction=0, calibrated_prob=0.52)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 87
+    kw["best_bid_cents"] = 85   # NO price = 100-85 = 15¢
+    r = checklist.run(**kw)
+    assert not r.passed and r.failed_gate == 2
+    assert "below minimum" in r.failed_reason
+
+def test_min_price_allows_trade_at_boundary(checklist):
+    """Trade at exactly 20¢ is allowed through the price filter."""
+    signal = make_signal(direction=1, calibrated_prob=0.65)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 20
+    kw["best_bid_cents"] = 18
+    kw["available_contracts"] = 200  # Kelly at 20¢ requests ~105 contracts
+    r = checklist.run(**kw)
+    assert r.passed

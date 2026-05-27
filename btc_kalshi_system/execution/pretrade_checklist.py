@@ -64,6 +64,13 @@ class PreTradeChecklist:
             win_prob = 1.0 - signal.calibrated_prob
             trade_price_cents = 100 - best_bid_cents
         market_price = trade_price_cents / 100
+
+        # Gate 2a — Minimum price filter: reject extreme-priced markets.
+        # Sub-20¢ contracts require 100-400+ contracts for any meaningful dollar
+        # size, exhausting orderbook depth every time. Historically 0W/10L at ≤18¢.
+        _MIN_TRADE_PRICE_CENTS = 20
+        if trade_price_cents < _MIN_TRADE_PRICE_CENTS:
+            return fail(2, f"Trade price {trade_price_cents}¢ below minimum {_MIN_TRADE_PRICE_CENTS}¢ (extreme/illiquid market)")
         loss_streak = int(self._redis.get("trading:loss_streak") or 0)
         kelly_dollars = self._kelly.compute_size(
             prob=win_prob,
