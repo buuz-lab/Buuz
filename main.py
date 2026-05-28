@@ -598,7 +598,11 @@ class KronosV2:
             f"KronosBG strike delta: ${abs(cached['strike'] - strike):.2f} "
             f"(cached={cached['strike']:.2f} market={strike:.2f})"
         )
-        signal = self._fusion.get_signal(timeframe=timeframe, strike=strike, kronos_raw=cached["prob"])
+        signal = self._fusion.get_signal(
+            timeframe=timeframe, strike=strike,
+            kronos_raw=cached["prob"],
+            kronos_raw_15min=cached.get("prob_15min"),
+        )
         if signal is None:
             logger.debug(f"No signal for {ticker} (gated out)")
             return
@@ -1367,39 +1371,54 @@ class KronosV2:
                 logger.warning(f"Failed to check resolution for {position.ticker}: {exc}")
 
     def _refit_calibrator(self) -> None:
-        """Refit isotonic calibrator on combined trades + gate_rejections outcomes (most recent 300)."""
+        """Refit isotonic calibrator on k15_raw vs 15-min market outcomes (most recent 300 rows).
+
+        k15 predicts the next 15-min close direction, which is exactly what KXBTC15M
+        markets resolve against.  k5 predicts the next 5-min close — a different
+        horizon — so using k5 against 15-min outcomes produces a misaligned (near-flat)
+        calibration curve.  We fall back to k5 only when no k15 rows exist yet.
+        """
         try:
             self._redis.set("calibration_drift:pending_refits", 0)
             rows = self._db.execute(
-                """SELECT kronos_raw, direction, outcome FROM (
-                       SELECT kronos_raw, direction, outcome, timestamp FROM trades
-                       WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw IS NOT NULL
+                """SELECT kronos_raw_15min, direction, outcome FROM (
+                       SELECT kronos_raw_15min, direction, outcome, timestamp FROM trades
+                       WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL
                        UNION ALL
-                       SELECT kronos_raw, direction, outcome, timestamp FROM gate_rejections
-                       WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw IS NOT NULL
+                       SELECT kronos_raw_15min, direction, outcome, timestamp FROM gate_rejections
+                       WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw_15min IS NOT NULL
                    ) ORDER BY timestamp DESC LIMIT 300"""
             ).fetchall()
-            if rows:
-                raw_probs = np.array([r[0] for r in rows], dtype=float)
-                directions = np.array([r[1] for r in rows], dtype=float)
-                outcomes_arr = np.array([r[2] for r in rows], dtype=float)
-                # Target = P(YES happened), not P(direction_correct).
-                # outcome=1 means the predicted direction was correct:
-                #   direction=1 (YES trade) + outcome=1 → YES happened → y=1
-                #   direction=0 (NO trade)  + outcome=1 → NO happened  → y=0
-                # Calibrator maps kronos_raw → calibrated_P(YES), matching
-                # how the checklist consumes calibrated_prob (win_prob =
-                # calibrated_prob for YES, 1-calibrated_prob for NO).
-                y_yes = np.where(directions == 1, outcomes_arr, 1.0 - outcomes_arr)
-                self._calibrator.fit(raw_probs, y_yes)
-                os.makedirs("models", exist_ok=True)
-                self._calibrator.save(config.CALIBRATOR_MODEL_PATH)
-                self._drift_monitor.reset_baseline()
-                logger.info(
-                    f"Calibrator refit: n_samples={self._calibrator.n_samples} "
-                    f"passthrough={self._calibrator._passthrough} "
-                    f"sources=trades+gate_rejections"
-                )
+            if not rows:
+                # No k15 data yet — fall back to k5 to avoid a cold start
+                rows = self._db.execute(
+                    """SELECT kronos_raw, direction, outcome FROM (
+                           SELECT kronos_raw, direction, outcome, timestamp FROM trades
+                           WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw IS NOT NULL
+                           UNION ALL
+                           SELECT kronos_raw, direction, outcome, timestamp FROM gate_rejections
+                           WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw IS NOT NULL
+                       ) ORDER BY timestamp DESC LIMIT 300"""
+                ).fetchall()
+                if not rows:
+                    return
+                logger.info("Calibrator refit: no k15 data yet — using k5 fallback")
+            raw_probs = np.array([r[0] for r in rows], dtype=float)
+            directions = np.array([r[1] for r in rows], dtype=float)
+            outcomes_arr = np.array([r[2] for r in rows], dtype=float)
+            # Target = P(YES happened). outcome=1 means predicted direction was correct:
+            #   direction=1, outcome=1 → YES happened → y=1
+            #   direction=0, outcome=1 → NO happened  → y=0
+            y_yes = np.where(directions == 1, outcomes_arr, 1.0 - outcomes_arr)
+            self._calibrator.fit(raw_probs, y_yes)
+            os.makedirs("models", exist_ok=True)
+            self._calibrator.save(config.CALIBRATOR_MODEL_PATH)
+            self._drift_monitor.reset_baseline()
+            logger.info(
+                f"Calibrator refit: n_samples={self._calibrator.n_samples} "
+                f"passthrough={self._calibrator._passthrough} "
+                f"sources=k15+trades+gate_rejections"
+            )
         except Exception as exc:
             logger.warning(f"Calibrator refit failed: {exc}")
 

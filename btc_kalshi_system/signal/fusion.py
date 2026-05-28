@@ -106,7 +106,11 @@ class SignalFusionEngine:
         self._market_context["kalshi_spread_normalized"] = spread
 
     def get_signal(
-        self, timeframe: str, strike: float, kronos_raw: float | None = None
+        self,
+        timeframe: str,
+        strike: float,
+        kronos_raw: float | None = None,
+        kronos_raw_15min: float | None = None,
     ) -> Optional[TradingSignal]:
         ds = self._deepseek.get_current_context(self._market_context)
 
@@ -129,7 +133,12 @@ class SignalFusionEngine:
         if kronos_raw is None:
             # only used in tests — production always provides kronos_raw from _cached_kronos
             kronos_raw = self._kronos.run_monte_carlo(self._store, threshold=strike)
-        kronos_cal = self._calibrator.transform(kronos_raw)
+        # Calibrate using k15 when available — k15 predicts the 15-min close direction,
+        # which is exactly what KXBTC15M markets resolve against.  k5 predicts the next
+        # 5-min close (misaligned horizon), so using it produces a near-flat calibration.
+        # Fall back to k5 on the rare candle where k15 hasn't computed yet.
+        _cal_input = kronos_raw_15min if kronos_raw_15min is not None else kronos_raw
+        kronos_cal = self._calibrator.transform(_cal_input)
         kronos_direction = 1 if kronos_cal >= 0.5 else 0
 
         # Compute features ONCE per signal so the values we feed the regime model
