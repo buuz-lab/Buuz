@@ -185,10 +185,9 @@ class SignalFusionEngine:
             base_shrink = _BOOTSTRAP_SHRINK
             if self._drift_monitor is not None and self._drift_monitor.is_drifting():
                 base_shrink = min(base_shrink, 0.4)
-            if deepseek_regime == "high_uncertainty":
-                base_shrink = _UNCERTAINTY_SHRINK
-            elif deepseek_regime == "ranging":
-                base_shrink = _RANGING_SHRINK
+            # In bootstrap mode the calibrator is passthrough (k15_raw = k15_cal),
+            # so DeepSeek regime should not override _BOOTSTRAP_SHRINK — that would
+            # double-penalise an already well-calibrated signal.
             combined = 0.5 + (kronos_cal - 0.5) * base_shrink
 
         direction = 1 if combined >= 0.5 else 0
