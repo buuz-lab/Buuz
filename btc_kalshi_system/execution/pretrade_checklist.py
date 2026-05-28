@@ -98,11 +98,12 @@ class PreTradeChecklist:
 
         # Gate 8b — Kalshi Kelly multiplier (continuous gradient reduction before hard block)
         opposing_margin = max(0.0, (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid))
-        kalshi_kelly_mult = max(0.0, 1.0 - opposing_margin / 0.20)
+        _pre_mult_kelly_dollars = kelly_dollars
+        kalshi_kelly_mult = max(0.0, 1.0 - opposing_margin / 0.30)
         kelly_dollars *= kalshi_kelly_mult
         kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
         if kelly_contracts == 0:
-            if is_bootstrap and kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
+            if is_bootstrap and _pre_mult_kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
                 kelly_contracts = 1
             elif kelly_dollars >= (trade_price_cents / 100) * 0.5:
                 kelly_contracts = 1

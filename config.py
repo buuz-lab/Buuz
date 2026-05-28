@@ -53,9 +53,11 @@ REGIME_GATE2_ENFORCING: bool = os.getenv("REGIME_GATE2_ENFORCING", "false").lowe
 CVD_GATE_THRESHOLD: float = 0.3
 
 # Gate 8 (Kalshi consensus gate): block trades when Kalshi prices >= this margin against
-# our direction. 8% = Kalshi must price >=58% against us. Zero false positives on 248
-# good-day trades at this threshold; 22% win rate on blocked trades.
-KALSHI_CONSENSUS_THRESHOLD: float = 0.08
+# our direction. 25% = Kalshi must price >=75% against us. Widened from 0.08 following
+# k15 calibration improvements (isotonic passthrough): k15 high-confidence calls (>0.75)
+# are reliable enough to trade through moderate Kalshi disagreement. Old 0.08 was tuned
+# when k15 was a flat 0.558 and routinely blocked correct high-edge calls.
+KALSHI_CONSENSUS_THRESHOLD: float = 0.25
 
 # Path to the serialized isotonic-regression Calibrator. Created by scripts/train_calibrator.py
 # or by in-process refit every 25 resolutions. KronosV2 attempts to load on startup.

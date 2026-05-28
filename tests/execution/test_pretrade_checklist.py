@@ -217,18 +217,19 @@ def test_gate2_fails_below_half_contract_cost(checklist):
 # ── Gate 8 tests ─────────────────────────────────────────────────────────────
 
 def test_gate8_blocks_no_down_when_kalshi_mid_high(checklist):
-    """kalshi_mid=0.60 → opposing=0.10 > threshold=0.08 → Gate 8 blocks NO→DOWN."""
+    """kalshi_mid=0.77 → opposing=0.27 > threshold=0.25 → Gate 8 blocks NO→DOWN.
+    opposing=0.27 < Gate8b zero-point (0.30) so Kelly survives the multiplier and Gate 8 fires."""
     signal = make_signal(direction=0, calibrated_prob=0.35)
     kw = base_kwargs(signal)
-    kw["fresh_kalshi_mid"] = 0.60
+    kw["fresh_kalshi_mid"] = 0.77
     r = checklist.run(**kw)
     assert not r.passed
     assert r.failed_gate == 8
-    assert r.kalshi_mid_at_block == pytest.approx(0.60)
+    assert r.kalshi_mid_at_block == pytest.approx(0.77)
 
 
 def test_gate8_passes_no_down_when_kalshi_mid_close(checklist):
-    """kalshi_mid=0.55 → opposing=0.05 < threshold=0.08 → Gate 8 passes."""
+    """kalshi_mid=0.55 → opposing=0.05 < threshold=0.25 → Gate 8 passes."""
     signal = make_signal(direction=0, calibrated_prob=0.35)
     kw = base_kwargs(signal)
     kw["fresh_kalshi_mid"] = 0.55
@@ -237,35 +238,54 @@ def test_gate8_passes_no_down_when_kalshi_mid_close(checklist):
 
 
 def test_gate8_blocks_yes_up_when_kalshi_mid_low(checklist):
-    """kalshi_mid=0.40 → opposing=0.10 > threshold=0.08 → Gate 8 blocks YES→UP."""
+    """kalshi_mid=0.23 → opposing=0.27 > threshold=0.25 → Gate 8 blocks YES→UP.
+    opposing=0.27 < Gate8b zero-point (0.30) so Kelly survives the multiplier and Gate 8 fires."""
     signal = make_signal(direction=1, calibrated_prob=0.65)
     kw = base_kwargs(signal)
-    kw["fresh_kalshi_mid"] = 0.40
+    kw["fresh_kalshi_mid"] = 0.23
     r = checklist.run(**kw)
     assert not r.passed
     assert r.failed_gate == 8
 
 
 def test_gate8_oi_squeeze_compound(checklist):
-    """OI squeeze: oi_delta_pct=0.002 AND NO→DOWN → effective_threshold=0.02. kalshi_mid=0.53 → opposing=0.03 > 0.02."""
+    """OI squeeze: oi_delta_pct=0.002 AND NO→DOWN → effective_threshold=0.0625. kalshi_mid=0.57 → opposing=0.07 > 0.0625."""
     signal = make_signal(direction=0, calibrated_prob=0.35, regime_features={"oi_delta_pct": 0.002})
     kw = base_kwargs(signal)
-    kw["fresh_kalshi_mid"] = 0.53
+    kw["fresh_kalshi_mid"] = 0.57
     r = checklist.run(**kw)
     assert not r.passed
     assert r.failed_gate == 8
 
 
 def test_gate8_kelly_multiplier_reduces_dollars(checklist):
-    """kalshi_mid=0.60 for NO bet: opposing=0.10, mult=1-0.10/0.20=0.50 → kelly_dollars*0.50."""
+    """kalshi_mid=0.55 for NO bet: opposing=0.05, mult=1-0.05/0.30≈0.83 → kelly_dollars reduced."""
     signal = make_signal(direction=0, calibrated_prob=0.35)
     kw = base_kwargs(signal)
     # Use a kalshi_mid that passes the hard gate but triggers the multiplier
-    kw["fresh_kalshi_mid"] = 0.55  # opposing=0.05, mult=1-0.05/0.20=0.75 < 1.0; passes hard gate (0.05 < 0.08)
+    kw["fresh_kalshi_mid"] = 0.55  # opposing=0.05, mult≈0.83; passes hard gate (0.05 < 0.25)
     r_no_mult = checklist.run(**{**base_kwargs(signal), "fresh_kalshi_mid": 0.50})
     r_with_mult = checklist.run(**kw)
     # With opposing margin, kelly_dollars should be less
     assert r_with_mult.kelly_dollars < r_no_mult.kelly_dollars
+
+
+def test_high_confidence_k15_passes_when_kalshi_disagrees_moderately(checklist):
+    """k15=0.89 YES@29¢, Kalshi=0.29 → opposing=0.21 < threshold=0.25 → passes all gates.
+
+    Regression: old Gate 8 threshold (0.08) and Gate 8b denominator (0.20) both blocked
+    this scenario even though k15=0.89 at 29¢ is a 60¢-edge call validated as WIN.
+    """
+    signal = make_signal(direction=1, calibrated_prob=0.89)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 29
+    kw["best_bid_cents"] = 28
+    kw["fresh_kalshi_mid"] = 0.29
+    kw["available_contracts"] = 200  # pre-multiplier Kelly ~109 contracts at 29¢
+    r = checklist.run(**kw)
+    assert r.passed
+    assert r.kelly_contracts >= 1
+    assert r.kelly_dollars > 0
 
 
 def test_gate8_drift_shrink_halves_kelly(checklist):
@@ -293,10 +313,10 @@ def test_gate8_both_shrinks_stack(checklist):
     signal = make_signal(direction=0, calibrated_prob=0.35)
     r_base = checklist.run(**base_kwargs(signal))
     kw = base_kwargs(signal)
-    kw["fresh_kalshi_mid"] = 0.55  # opposing=0.05, mult=0.75
+    kw["fresh_kalshi_mid"] = 0.55  # opposing=0.05, mult=1-0.05/0.30≈0.833
     kw["is_drifting"] = True
     r_both = checklist.run(**kw)
-    expected = r_base.kelly_dollars * 0.75 * 0.5
+    expected = r_base.kelly_dollars * (1.0 - 0.05 / 0.30) * 0.5
     assert r_both.kelly_dollars == pytest.approx(expected, rel=0.01)
 
 
