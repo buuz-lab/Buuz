@@ -1350,28 +1350,7 @@ class KronosV2:
                 except Exception:
                     pending = 25
                 if pending >= 25:
-                    try:
-                        self._redis.set("calibration_drift:pending_refits", 0)
-                        rows = self._db.execute(
-                            "SELECT kronos_raw, direction, outcome FROM trades "
-                            "WHERE outcome IS NOT NULL AND features_stale=0 "
-                            "ORDER BY timestamp DESC LIMIT 300"
-                        ).fetchall()
-                        if rows:
-                            raw_probs = np.array([r[0] for r in rows], dtype=float)
-                            directions = np.array([r[1] for r in rows], dtype=float)
-                            outcomes_arr = np.array([r[2] for r in rows], dtype=float)
-                            y_up = (directions == outcomes_arr).astype(float)
-                            self._calibrator.fit(raw_probs, y_up)
-                            os.makedirs("models", exist_ok=True)
-                            self._calibrator.save(config.CALIBRATOR_MODEL_PATH)
-                            self._drift_monitor.reset_baseline()
-                            logger.info(
-                                f"Calibrator refit: n_samples={self._calibrator.n_samples} "
-                                f"passthrough={self._calibrator._passthrough}"
-                            )
-                    except Exception as exc:
-                        logger.warning(f"Calibrator refit failed: {exc}")
+                    self._refit_calibrator()
 
                 logger.info(
                     f"Trade resolved: {position.ticker} trade_id={position.trade_id} "
@@ -1379,6 +1358,36 @@ class KronosV2:
                 )
             except Exception as exc:
                 logger.warning(f"Failed to check resolution for {position.ticker}: {exc}")
+
+    def _refit_calibrator(self) -> None:
+        """Refit isotonic calibrator on combined trades + gate_rejections outcomes (most recent 300)."""
+        try:
+            self._redis.set("calibration_drift:pending_refits", 0)
+            rows = self._db.execute(
+                """SELECT kronos_raw, direction, outcome FROM (
+                       SELECT kronos_raw, direction, outcome, timestamp FROM trades
+                       WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw IS NOT NULL
+                       UNION ALL
+                       SELECT kronos_raw, direction, outcome, timestamp FROM gate_rejections
+                       WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw IS NOT NULL
+                   ) ORDER BY timestamp DESC LIMIT 300"""
+            ).fetchall()
+            if rows:
+                raw_probs = np.array([r[0] for r in rows], dtype=float)
+                directions = np.array([r[1] for r in rows], dtype=float)
+                outcomes_arr = np.array([r[2] for r in rows], dtype=float)
+                y_up = (directions == outcomes_arr).astype(float)
+                self._calibrator.fit(raw_probs, y_up)
+                os.makedirs("models", exist_ok=True)
+                self._calibrator.save(config.CALIBRATOR_MODEL_PATH)
+                self._drift_monitor.reset_baseline()
+                logger.info(
+                    f"Calibrator refit: n_samples={self._calibrator.n_samples} "
+                    f"passthrough={self._calibrator._passthrough} "
+                    f"sources=trades+gate_rejections"
+                )
+        except Exception as exc:
+            logger.warning(f"Calibrator refit failed: {exc}")
 
     def _resolve_gate_rejections(self) -> None:
         cutoff = time.time() - 900  # only resolve rows ≥15 min old
@@ -1428,6 +1437,12 @@ class KronosV2:
                     f"Gate rejection resolved: {ticker} gate={failed_gate} "
                     f"would_have={'WON' if outcome == 1 else 'LOST'}"
                 )
+                try:
+                    pending = int(self._redis.incr("calibration_drift:pending_refits") or 0)
+                except Exception:
+                    pending = 0
+                if pending >= 25:
+                    self._refit_calibrator()
             except Exception as exc:
                 logger.warning(f"Failed to resolve gate rejection {rejection_id}: {exc}")
 
