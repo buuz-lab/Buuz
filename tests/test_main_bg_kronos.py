@@ -52,6 +52,7 @@ def _make_system() -> "main.KronosV2":
     system._cached_kronos = None
     system._store = MagicMock()
     system._kronos = MagicMock()
+    system._kronos_k15 = MagicMock()
     system._fusion = MagicMock()
     system._checklist = MagicMock()
     system._router = MagicMock()
@@ -161,6 +162,7 @@ class TestKronosBackgroundLoop:
         ts = pd.Timestamp("2024-01-01 12:00:00", tz="UTC")
         system._store.get_ohlcv.return_value = _make_df(ts, 12)
         system._kronos.run_monte_carlo.return_value = 0.65
+        system._kronos_k15.run_monte_carlo.return_value = 0.70
         system._get_15min_reference_price = MagicMock(return_value=95000.0)
 
         async def mock_sleep(n):
@@ -181,6 +183,7 @@ class TestKronosBackgroundLoop:
         ts = pd.Timestamp("2024-01-01 12:00:00", tz="UTC")
         system._store.get_ohlcv.return_value = _make_df(ts, 12)
         system._kronos.run_monte_carlo.return_value = 0.65
+        system._kronos_k15.run_monte_carlo.return_value = 0.70
         system._get_15min_reference_price = MagicMock(return_value=95000.0)
 
         sleep_calls = [0]
@@ -193,8 +196,9 @@ class TestKronosBackgroundLoop:
         with patch("asyncio.sleep", side_effect=mock_sleep):
             asyncio.run(system._kronos_background_loop())
 
-        # Two iterations, same candle → MC called exactly twice (k5 + k15 on first iteration only)
-        assert system._kronos.run_monte_carlo.call_count == 2
+        # Two iterations, same candle → each engine called exactly once (on first iteration only)
+        assert system._kronos.run_monte_carlo.call_count == 1
+        assert system._kronos_k15.run_monte_carlo.call_count == 1
 
     def test_continues_after_mc_exception(self):
         """Loop stays alive after an MC exception and processes the next new candle."""
@@ -224,6 +228,7 @@ class TestKronosBackgroundLoop:
             return 0.70
 
         system._kronos.run_monte_carlo.side_effect = mc_side
+        system._kronos_k15.run_monte_carlo.return_value = 0.75
         system._get_15min_reference_price = MagicMock(return_value=95000.0)
 
         sleep_calls = [0]
