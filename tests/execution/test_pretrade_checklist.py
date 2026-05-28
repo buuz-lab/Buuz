@@ -432,3 +432,102 @@ def test_min_price_allows_trade_at_boundary(checklist):
     kw["available_contracts"] = 200  # Kelly at 20¢ requests ~105 contracts
     r = checklist.run(**kw)
     assert r.passed
+
+
+# ── Gate 8: confidence-aware threshold ───────────────────────────────────────
+
+def test_gate8_low_confidence_signal_blocked_at_mild_kalshi_disagreement(checklist):
+    """Low k15 confidence (prob=0.60, distance=0.10 < 0.15) → threshold=0.10.
+    kalshi_mid=0.38 → opposing=0.12 > 0.10 → Gate 8 blocks even at mild disagreement."""
+    signal = make_signal(direction=1, calibrated_prob=0.60)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 38
+    kw["best_bid_cents"] = 37
+    kw["available_contracts"] = 200
+    kw["fresh_kalshi_mid"] = 0.38
+    r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 8
+
+
+def test_gate8_medium_confidence_signal_blocked_at_moderate_kalshi_disagreement(checklist):
+    """Medium k15 confidence (prob=0.70, distance=0.20 in 0.15–0.29) → threshold=0.15.
+    kalshi_mid=0.30 → opposing=0.20 > 0.15 → Gate 8 blocks."""
+    signal = make_signal(direction=1, calibrated_prob=0.70)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 30
+    kw["best_bid_cents"] = 29
+    kw["available_contracts"] = 200
+    kw["fresh_kalshi_mid"] = 0.30
+    r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 8
+
+
+def test_gate8_medium_confidence_passes_when_kalshi_barely_aligned(checklist):
+    """Medium k15 confidence (prob=0.65, distance=0.15) → threshold=0.15.
+    kalshi_mid=0.36 → opposing=0.14 < 0.15 → passes Gate 8."""
+    signal = make_signal(direction=1, calibrated_prob=0.65)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 36
+    kw["best_bid_cents"] = 35
+    kw["available_contracts"] = 200
+    kw["fresh_kalshi_mid"] = 0.36
+    r = checklist.run(**kw)
+    assert r.failed_gate != 8
+
+
+def test_gate8_high_confidence_still_passes_at_29c_kalshi(checklist):
+    """High k15 confidence (prob=0.89, distance=0.39 ≥ 0.30) → threshold=0.25.
+    kalshi_mid=0.29 → opposing=0.21 < 0.25 → passes. Regression: session-15 case."""
+    signal = make_signal(direction=1, calibrated_prob=0.89)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 29
+    kw["best_bid_cents"] = 28
+    kw["available_contracts"] = 200
+    kw["fresh_kalshi_mid"] = 0.29
+    r = checklist.run(**kw)
+    assert r.passed
+
+
+# ── Gate 10: DeepSeek trend-direction conflict ────────────────────────────────
+
+def test_gate10_blocks_yes_when_deepseek_trending_down(checklist):
+    """trending_down + direction=YES → Gate 10 blocks (Kronos bullish in confirmed downtrend)."""
+    signal = make_signal(direction=1, calibrated_prob=0.70, deepseek_regime="trending_down")
+    r = checklist.run(**base_kwargs(signal))
+    assert not r.passed
+    assert r.failed_gate == 10
+
+
+def test_gate10_blocks_no_when_deepseek_trending_up(checklist):
+    """trending_up + direction=NO → Gate 10 blocks (Kronos bearish in confirmed uptrend)."""
+    signal = make_signal(direction=0, calibrated_prob=0.30, deepseek_regime="trending_up")
+    kw = base_kwargs(signal)
+    r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 10
+
+
+def test_gate10_passes_no_during_trending_down(checklist):
+    """trending_down + direction=NO → Gate 10 passes (direction agrees with trend)."""
+    signal = make_signal(direction=0, calibrated_prob=0.30, deepseek_regime="trending_down")
+    kw = base_kwargs(signal)
+    r = checklist.run(**kw)
+    assert r.failed_gate != 10
+
+
+def test_gate10_passes_yes_during_trending_up(checklist):
+    """trending_up + direction=YES → Gate 10 passes (direction agrees with trend)."""
+    signal = make_signal(direction=1, calibrated_prob=0.70, deepseek_regime="trending_up")
+    kw = base_kwargs(signal)
+    r = checklist.run(**kw)
+    assert r.failed_gate != 10
+
+
+def test_gate10_does_not_fire_on_other_regimes(checklist):
+    """ranging / high_uncertainty / neutral do not trigger Gate 10."""
+    for regime in ("ranging", "high_uncertainty", "neutral"):
+        signal = make_signal(direction=1, calibrated_prob=0.70, deepseek_regime=regime)
+        r = checklist.run(**base_kwargs(signal))
+        assert r.failed_gate != 10, f"Gate 10 incorrectly fired for regime '{regime}'"

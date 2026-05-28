@@ -333,6 +333,52 @@ class TestProcessMarketSecondFetch:
 
         system._monitor.add_position.assert_not_called()
 
+    def test_main_loop_fires_on_cache_event_not_fixed_timer(self):
+        """_main_loop awaits _cache_updated_event, not a fixed 300s sleep.
+
+        Pre-setting the event means _run_cycle runs immediately — no timer wait.
+        After the cycle, the event is cleared so the loop waits for the next BG update.
+        """
+        system = _make_system()
+        system._cache_updated_event = asyncio.Event()
+
+        cycle_count = [0]
+
+        def fake_run_cycle():
+            cycle_count[0] += 1
+            system._running = False
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        async def run():
+            system._cache_updated_event.set()
+            with patch("asyncio.to_thread", side_effect=fake_to_thread), \
+                 patch.object(system, "_run_cycle", side_effect=fake_run_cycle):
+                await asyncio.wait_for(system._main_loop(), timeout=2.0)
+
+        asyncio.run(run())
+        assert cycle_count[0] == 1
+        assert not system._cache_updated_event.is_set()
+
+    def test_bg_loop_sets_cache_updated_event_after_mc(self):
+        """BG loop sets _cache_updated_event each time it writes a fresh MC result."""
+        system = _make_system()
+        system._cache_updated_event = asyncio.Event()
+        ts = pd.Timestamp("2024-01-01 12:00:00", tz="UTC")
+        system._store.get_ohlcv.return_value = _make_df(ts, 12)
+        system._kronos.run_monte_carlo.return_value = 0.65
+        system._kronos_k15.run_monte_carlo.return_value = 0.70
+        system._get_15min_reference_price = MagicMock(return_value=95000.0)
+
+        async def mock_sleep(_):
+            system._running = False
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            asyncio.run(system._kronos_background_loop())
+
+        assert system._cache_updated_event.is_set()
+
     def test_fill_price_from_second_fetch(self):
         """fill_price_cents passed to _record_trade_sqlite uses fresh second-fetch ask."""
         system = _make_system()

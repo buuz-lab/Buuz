@@ -10,6 +10,92 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-28 session 16: Gate 10 (DeepSeek trend conflict) added. Gate 8 made confidence-aware. Monitor P&L formula fixed. Main loop converted from fixed 300s timer to event-driven on BG loop completion. 382 tests pass.**
+
+**Session 16: accuracy investigation + timing fix**
+
+**Root causes identified (2026-05-28, 32% win rate day):**
+1. `trending_down + YES` trades firing repeatedly (5 consecutive losses at 28–34¢) — no gate blocked directional conflict with DeepSeek regime.
+2. Gate 8 threshold widened to 0.25 in session 15 to protect one high-confidence case (k15=0.89 at 29¢). Side effect: YES bets at 28–34¢ with moderate k15 confidence no longer blocked (opposing=0.22 < 0.25).
+3. Monitor P&L formula wrong for NO direction trades: treated `fill_price_cents` as the YES price, swapping win/loss payout ratios. Showed −$2149; true P&L is −$171 (Kalshi shows −$145; $26 gap = fees).
+4. Main loop ran on a fixed 300s wall-clock timer, independent of when BG loop finished MC. ~7.7% of cycles fired while BG loop was mid-computation (23s window), reading the previous candle's k15 instead of the freshest one.
+
+**Changes:**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/execution/pretrade_checklist.py` | **Gate 10** (new): `trending_down + YES` or `trending_up + NO` → hard block (failed_gate=10). **Gate 8 confidence-aware threshold**: `signal_confidence = abs(calibrated_prob - 0.5)`; ≥0.30 → threshold 0.25, ≥0.15 → 0.15, <0.15 → 0.10. OI-squeeze compound still applies (÷4). |
+| `main.py` | `_cache_updated_event = asyncio.Event()` added to `__init__`. BG loop calls `self._cache_updated_event.set()` after writing cache. `_main_loop` now `await self._cache_updated_event.wait()` + `.clear()` instead of fixed 300s sleep. |
+| `scripts/monitor.sh` | P&L formula fixed: `kelly_contracts*(100-fill_price_cents)/100` on wins, `-kelly_contracts*fill_price_cents/100` on losses. Direction-independent (fill_price_cents is always the price paid). |
+| `tests/execution/test_pretrade_checklist.py` | 9 new tests: 4 confidence-aware Gate 8 scenarios, 5 Gate 10 scenarios. |
+| `tests/execution/test_gate7_cvd.py` | Fixed `_make_signal` default `deepseek_regime` from `"trending_up"` → `"ranging"` (Gate 10 correctly fires on trending_up+NO). |
+| `tests/test_main_bg_kronos.py` | 2 new tests: BG loop sets event after MC, main loop fires on event not timer. |
+
+**Gate 8 confidence-aware threshold detail:**
+
+| k15_cal range | distance from 0.5 | Gate 8 threshold |
+|---|---|---|
+| ≥0.80 or ≤0.20 | ≥0.30 | **0.25** (session 15 regression case preserved) |
+| 0.65–0.79 or 0.21–0.35 | 0.15–0.29 | **0.15** |
+| 0.35–0.65 | <0.15 | **0.10** |
+
+Uses `signal.calibrated_prob` (the k15-calibrated, bootstrap-shrunk combined prob) as the confidence proxy.
+
+**Gate 10 retroactive impact on 2026-05-28:**
+- Would have blocked 5 trades (trending_down + YES): 1 WIN, 4 LOSS → net positive
+- Gate 8 confidence tiers would have blocked 4 additional losses at 28–38¢ fills
+
+**Event-driven main loop:**
+- Old: `asyncio.sleep(max(0, SIGNAL_INTERVAL_SECONDS - elapsed))` — fires on 300s wall clock
+- New: `await self._cache_updated_event.wait(); self._cache_updated_event.clear()` — fires only after BG loop posts fresh MC result
+- Cadence unchanged (~5 min, one per 5-min candle close). Race window eliminated: `_run_cycle` can never fire while BG loop is mid-computation.
+
+**P&L accounting (correct formula):**
+```sql
+SUM(CASE WHEN outcome=1 THEN kelly_contracts*(100-fill_price_cents)/100.0
+         WHEN outcome=0 THEN -kelly_contracts*fill_price_cents/100.0 END)
+```
+`fill_price_cents` is always the price paid (NO fill for NO trades, YES fill for YES trades). The formula is direction-independent. True all-time P&L as of session 16: **−$171** (vs Kalshi −$145; gap = fees).
+
+**Commits:** session 16
+
+---
+
+**As of 2026-05-27 session 15: Gate 8 threshold widened 0.08→0.25. Gate 8b denominator /0.20→/0.30. Bootstrap floor bug fixed. Depth check capped to available (no longer hard-fails). Terminal monitor script added. 371 tests pass.**
+
+**Session 15: Gate 8 + Gate 8b recalibration + depth cap**
+
+**Root cause:** k15=0.89 at 29¢ YES was blocked by `"Kelly size rounds to 0 contracts after Kalshi Kelly multiplier"`. Two compounding bugs:
+1. Gate 8 threshold (0.08) was tuned when k15 was flat at 0.558. With isotonic passthrough (k15_cal ≈ k15_raw), high-confidence k15 calls are reliable through moderate Kalshi disagreement. 0.08 = "Kalshi must only be 58% to block us" — too sensitive for a well-calibrated signal.
+2. Gate 8b denominator `/0.20` zeroed Kelly at opposing≥0.20, hitting the Gate 2 rounding-to-0 path before Gate 8 could fire. Bootstrap floor check then failed because `is_bootstrap and kelly_dollars > 0` evaluated on the post-multiplier (zeroed) value.
+
+**Changes:**
+
+| File | Change |
+|------|--------|
+| `config.py` | `KALSHI_CONSENSUS_THRESHOLD` 0.08 → 0.25 (Kalshi must price ≥75% against us to hard-block) |
+| `btc_kalshi_system/execution/pretrade_checklist.py` | Gate 8b denominator `/0.20` → `/0.30`; save `_pre_mult_kelly_dollars` before multiplier for bootstrap floor; depth check caps to `available_contracts` instead of hard-failing |
+| `tests/execution/test_pretrade_checklist.py` | 6 existing tests updated for new thresholds; 3 new tests: `test_high_confidence_k15_passes_when_kalshi_disagrees_moderately`, `test_gate2_depth_capped_to_available`, `test_gate2_zero_depth_still_fails` |
+
+**Gate 8 validation (live results after fix):**
+- 02:04 YES→UP 29¢: WIN ✓ (the exact blocked case, now passes)
+- 02:09 YES→UP 51¢: WIN ✓
+- 02:19 YES→UP: LOSS ✗ — but CVD=-0.81, Gate 7 shadow would have blocked correctly (CVD now 4/4 when opposing)
+
+**Depth cap behavior change:** Previously, if Kelly wanted N contracts and orderbook had M < N, Gate 2 hard-failed (`"Insufficient depth: need N, M available"`). Now: caps `kelly_contracts = available_contracts`, recalculates `kelly_dollars`, and proceeds. `available_contracts == 0` still hard-fails.
+
+**Bootstrap floor bug fixed:** Gate 8b multiplier can zero `kelly_dollars`. The floor check `is_bootstrap and kelly_dollars > 0` must use the pre-multiplier value. Fixed by saving `_pre_mult_kelly_dollars = kelly_dollars` before multiplier application.
+
+**k15 calibration status:** ~171 resolved samples, isotonic passthrough active. `k15_cal ≈ k15_raw`. k15 is the effective signal for direction and sizing. k5 stored for analysis only.
+
+**Gate 7 CVD status:** 4/4 correct when opposing. 02:19 LOSS (CVD=-0.81) is the clearest example. Still shadow mode — not activated as hard gate yet.
+
+**Terminal monitor script added:** `scripts/monitor.sh` — color-coded bash script, refreshes every 30s. Sections: BG Loop, Gate Rejections, Trades, P&L, Regime snapshot (CVD/LP/funding/fear_greed), Last Activity. Run with: `bash "/Users/ezrakornberg/Kronos V2/scripts/monitor.sh"`
+
+**Commits:** `ac47663` (Gate 8/8b + bootstrap fix), `9288e2e` (depth cap)
+
+---
+
 **As of 2026-05-27 session 14: k15_calibrated_prob + candle_progress logging added. Deribit _MIN_DAYS_TO_EXPIRY lowered 3→1. Two pre-existing test bugs fixed. 368 tests pass.**
 
 **Session 14: k15 vs k5 timing analysis instrumentation**
@@ -258,7 +344,7 @@ Commit `0e7e137`. 3 new tests added.
 **Test count:** 362 (338 baseline + 24 new)
 
 **Key new constants:**
-- `KALSHI_CONSENSUS_THRESHOLD = 0.08` — Gate 8 fires when Kalshi prices ≥8% against our direction
+- `KALSHI_CONSENSUS_THRESHOLD = 0.25` — Gate 8 fires when Kalshi prices ≥25% against our direction (raised from 0.08 in session 15)
 - `CALIBRATOR_MODEL_PATH = "models/calibrator.pkl"` — calibrator persistence path
 
 **Key new behavior:**
@@ -316,7 +402,7 @@ BTC dropped ~20% (May 20→76k). Market bounced (mean-reversion). Kronos stayed 
 | 1b | Add `CalibrationDriftMonitor.reset_baseline()` — call after each calibrator refit | `calibration_drift_monitor.py` |
 | 1b | Bootstrap shrink 0.8→0.4 when `is_drifting()=True` in fusion | `fusion.py` |
 | 2 | Gate 8 hard block: Kalshi consensus at 8% threshold (OI squeeze compound at 2%) | `pretrade_checklist.py`, `config.py` |
-| 2 | Gate 8b continuous Kelly multiplier: `max(0, 1 - opposing_margin/0.20)` | `pretrade_checklist.py` |
+| 2 | Gate 8b continuous Kelly multiplier: `max(0, 1 - opposing_margin/0.30)` (was /0.20, widened session 15) | `pretrade_checklist.py` |
 | 2 | Drift monitor → Kelly: 50% shrink when `is_drifting()` | `pretrade_checklist.py` |
 | 2 | Gate 8 logged to `gate_rejections` with `failed_gate=8`; fresh second-fetch mid used | `main.py`, `pretrade_checklist.py` |
 | 3 | New `DirectionWinRateTracker`: 30-trade rolling per-direction win rate → 40% Kelly shrink when <45% | new file, `kelly.py`, `main.py` |
@@ -327,7 +413,7 @@ BTC dropped ~20% (May 20→76k). Market bounced (mean-reversion). Kronos stayed 
 
 **Key constants added:**
 - `CALIBRATOR_MODEL_PATH = "models/calibrator.pkl"` in config.py
-- `KALSHI_CONSENSUS_THRESHOLD = 0.08` in config.py
+- `KALSHI_CONSENSUS_THRESHOLD = 0.08` in config.py (raised to 0.25 in session 15)
 
 **Key gotchas for implementation:**
 - `y_up = int(direction == outcome)` for the correct label. direction=0, outcome=0 → y_up=1 (market UP); direction=0, outcome=1 → y_up=0 (market DOWN = NO win). This is `(directions == outcomes).astype(float)` in numpy.

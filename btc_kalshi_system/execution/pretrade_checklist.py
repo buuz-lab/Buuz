@@ -152,10 +152,28 @@ class PreTradeChecklist:
             if distance < 150:
                 return fail(6, f"Composite price ${composite_price:,.0f} within $150 of strike ${signal.strike:,.0f} (distance ${distance:.0f})")
 
-        # Gate 8 — Kalshi consensus hard block
+        # Gate 10 — DeepSeek trend-direction conflict
+        # When the regime classifier identifies a confirmed trend that directly
+        # opposes our trade direction, the market is systematically moving against
+        # us and Kronos is likely seeing noise/bounces. Block unconditionally.
+        if (signal.deepseek_regime == "trending_down" and signal.direction == 1) or \
+                (signal.deepseek_regime == "trending_up" and signal.direction == 0):
+            side = "YES→UP" if signal.direction == 1 else "NO→DOWN"
+            return fail(10, f"DeepSeek regime '{signal.deepseek_regime}' contradicts {side}")
+
+        # Gate 8 — Kalshi consensus hard block (confidence-aware threshold)
+        # High-conviction signals (k15_cal far from 0.5) tolerate more Kalshi
+        # disagreement. Low-conviction signals must respect the market more.
+        signal_confidence = abs(signal.calibrated_prob - 0.5)
+        if signal_confidence >= 0.30:     # k15_cal ≥ 0.80 or ≤ 0.20
+            gate8_base = 0.25
+        elif signal_confidence >= 0.15:   # k15_cal ≥ 0.65 or ≤ 0.35
+            gate8_base = 0.15
+        else:                             # k15_cal between 0.35 and 0.65
+            gate8_base = 0.10
         oi_delta = signal.regime_features.get("oi_delta_pct", 0.0) if signal.regime_features else 0.0
         oi_squeeze = (oi_delta > 0.001) and (signal.direction == 0)
-        effective_threshold = config.KALSHI_CONSENSUS_THRESHOLD / 4.0 if oi_squeeze else config.KALSHI_CONSENSUS_THRESHOLD
+        effective_threshold = gate8_base / 4.0 if oi_squeeze else gate8_base
         opposing = (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid)
         if opposing > effective_threshold:
             side = "NO→DOWN" if signal.direction == 0 else "YES→UP"

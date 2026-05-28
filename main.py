@@ -339,6 +339,7 @@ class KronosV2:
         self._last_deepseek_refresh = 0.0
         self._last_recovery_attempt = 0.0
         self._cached_kronos: dict | None = None
+        self._cache_updated_event = asyncio.Event()
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -371,7 +372,8 @@ class KronosV2:
 
     async def _main_loop(self) -> None:
         while self._running:
-            loop_start = time.time()
+            await self._cache_updated_event.wait()
+            self._cache_updated_event.clear()
             try:
                 # Run the entire cycle in a thread-pool worker so PyTorch inference
                 # (100 forward passes through the Kronos transformer) never blocks
@@ -382,8 +384,6 @@ class KronosV2:
                 await asyncio.to_thread(self._run_cycle)
             except Exception as exc:
                 logger.error(f"Unhandled error in main loop cycle: {exc}")
-            elapsed = time.time() - loop_start
-            await asyncio.sleep(max(0, SIGNAL_INTERVAL_SECONDS - elapsed))
         logger.info("KronosV2 main loop stopped")
 
     async def _kronos_background_loop(self) -> None:
@@ -426,6 +426,7 @@ class KronosV2:
                                 "computed_at": time.time(),
                                 "strike": strike,
                             }
+                            self._cache_updated_event.set()
                             _k15_str = f"{prob_15min:.4f}" if prob_15min is not None else "N/A"
                             logger.info(
                                 f"KronosBG: prob={prob:.4f} prob_15min={_k15_str} "
