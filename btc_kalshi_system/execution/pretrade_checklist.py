@@ -94,7 +94,10 @@ class PreTradeChecklist:
             else:
                 return fail(2, "Kelly size rounds to 0 contracts")
         if kelly_contracts > available_contracts:
-            return fail(2, f"Insufficient depth: need {kelly_contracts} contracts, {available_contracts} available")
+            if available_contracts == 0:
+                return fail(2, "Insufficient depth: 0 contracts available")
+            kelly_contracts = available_contracts
+            kelly_dollars = kelly_contracts * (trade_price_cents / 100)
 
         # Gate 8b — Kalshi Kelly multiplier (continuous gradient reduction before hard block)
         opposing_margin = max(0.0, (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid))

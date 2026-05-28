@@ -88,6 +88,33 @@ def test_gate2_insufficient_depth(checklist):
     assert r.failed_gate == 2
 
 
+def test_gate2_depth_capped_to_available(checklist):
+    """Kelly wants N contracts but only M available (M>0) → trade with M, don't block.
+
+    Regression: previously hard-failed on depth, leaving edge on the table when
+    the orderbook had fewer contracts than Kelly requested (e.g. 10 available, 27 wanted).
+    """
+    signal = make_signal(direction=1, calibrated_prob=0.85)
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 37
+    kw["best_bid_cents"] = 36
+    kw["available_contracts"] = 5   # Kelly will want far more than 5 at 85%/37¢
+    r = checklist.run(**kw)
+    assert r.passed
+    assert r.kelly_contracts == 5
+    assert r.kelly_dollars == pytest.approx(5 * 0.37, rel=0.01)
+
+
+def test_gate2_zero_depth_still_fails(checklist):
+    """available_contracts=0 → still fails Gate 2 (nothing to buy)."""
+    signal = make_signal(direction=1, calibrated_prob=0.85)
+    kw = base_kwargs(signal)
+    kw["available_contracts"] = 0
+    r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 2
+
+
 def test_gate3_high_uncertainty_thin_edge(checklist):
     signal = make_signal(calibrated_prob=0.52, deepseek_regime="high_uncertainty")
     kw = base_kwargs(signal)
