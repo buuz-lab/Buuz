@@ -1383,8 +1383,15 @@ class KronosV2:
                 raw_probs = np.array([r[0] for r in rows], dtype=float)
                 directions = np.array([r[1] for r in rows], dtype=float)
                 outcomes_arr = np.array([r[2] for r in rows], dtype=float)
-                y_up = (directions == outcomes_arr).astype(float)
-                self._calibrator.fit(raw_probs, y_up)
+                # Target = P(YES happened), not P(direction_correct).
+                # outcome=1 means the predicted direction was correct:
+                #   direction=1 (YES trade) + outcome=1 → YES happened → y=1
+                #   direction=0 (NO trade)  + outcome=1 → NO happened  → y=0
+                # Calibrator maps kronos_raw → calibrated_P(YES), matching
+                # how the checklist consumes calibrated_prob (win_prob =
+                # calibrated_prob for YES, 1-calibrated_prob for NO).
+                y_yes = np.where(directions == 1, outcomes_arr, 1.0 - outcomes_arr)
+                self._calibrator.fit(raw_probs, y_yes)
                 os.makedirs("models", exist_ok=True)
                 self._calibrator.save(config.CALIBRATOR_MODEL_PATH)
                 self._drift_monitor.reset_baseline()
