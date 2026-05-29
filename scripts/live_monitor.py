@@ -53,9 +53,10 @@ def grep_last(path, pattern, n=6):
     if not path or not os.path.exists(path):
         return []
     try:
-        out = subprocess.run(["grep", pattern, path],
-                             capture_output=True, text=True, timeout=3)
-        lines = [l for l in out.stdout.strip().split("\n") if l]
+        # tail last 5000 lines then grep — avoids scanning huge files
+        tail = subprocess.run(["tail", "-n", "5000", path],
+                              capture_output=True, text=True, timeout=3)
+        lines = [l for l in tail.stdout.split("\n") if pattern in l and l]
         return lines[-n:]
     except Exception:
         return []
@@ -160,7 +161,7 @@ def make_bg_panel(log) -> Panel:
     for line in lines:
         k5     = re.search(r"prob=([0-9.]+)", line)
         k15    = re.search(r"prob_15min=([0-9.]+)", line)
-        candle = re.search(r"candle=(\S+)", line)
+        candle = re.search(r"candle=(\S+ \S+)", line)
         strike = re.search(r"strike=([0-9.]+)", line)
         cv  = candle.group(1) if candle else "?"
         k5v = k5.group(1) if k5 else "?"
@@ -301,7 +302,7 @@ def make_regime_panel(log) -> Panel:
     ds_line = ds_lines[-1] if ds_lines else ""
 
     def extract(key):
-        m = re.search(rf"'{key}': ([-0-9.]+)", line)
+        m = re.search(rf"'{key}': ([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", line)
         return float(m.group(1)) if m else None
 
     def signed_text(v, label):
@@ -341,6 +342,14 @@ def make_regime_panel(log) -> Panel:
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
+def safe_panel(fn, *args, title=""):
+    try:
+        return fn(*args)
+    except Exception as e:
+        return Panel(Text(f"Error: {e}", style="red dim"), title=title,
+                     border_style="bright_black")
+
+
 def render():
     log = latest_log()
     try:
@@ -350,12 +359,12 @@ def render():
 
     out = Group(
         make_header(),
-        make_bg_panel(log),
-        make_trades_panel(db),
-        make_rejections_panel(db),
-        make_pnl_panel(db),
-        make_regime_panel(log),
-        Text(f"\n  [dim]Ctrl+C to stop[/dim]"),
+        safe_panel(make_bg_panel,         log,  title="BG LOOP"),
+        safe_panel(make_trades_panel,      db,   title="TRADES"),
+        safe_panel(make_rejections_panel,  db,   title="GATE REJECTIONS"),
+        safe_panel(make_pnl_panel,         db,   title="P&L"),
+        safe_panel(make_regime_panel,      log,  title="REGIME"),
+        Text("\n  [dim]Ctrl+C to stop[/dim]"),
     )
     db.close()
     return out
