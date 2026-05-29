@@ -38,11 +38,13 @@ def today_pst_epoch() -> int:
 
 def latest_log():
     try:
-        logs = sorted(
-            [f for f in os.listdir(LOG_DIR) if f.startswith("kronos_") and f.endswith(".log")],
-            reverse=True,
-        )
-        return os.path.join(LOG_DIR, logs[0]) if logs else None
+        logs = [f for f in os.listdir(LOG_DIR)
+                if f.startswith("kronos_") and f.endswith(".log")
+                and f != "kronos_stdout.log"]
+        if not logs:
+            return None
+        logs.sort(key=lambda f: os.path.getmtime(os.path.join(LOG_DIR, f)), reverse=True)
+        return os.path.join(LOG_DIR, logs[0])
     except Exception:
         return None
 
