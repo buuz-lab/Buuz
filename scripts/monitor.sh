@@ -170,45 +170,75 @@ while true; do
   # ── P&L ───────────────────────────────────────────────────────────
   echo ""
   echo -e "${BOLD}${CYAN}▶ P&L${RESET}"
-  stats=$(sqlite3 "$DB" "
+
+  # timestamps stored as UTC ISO8601; PDT = UTC-7
+  # strftime('%Y-%m-%d', substr(timestamp,1,19), '-7 hours') converts to PDT date
+  today_stats=$(sqlite3 "$DB" "
     SELECT
       COUNT(*),
       SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END),
       SUM(CASE WHEN outcome=0 THEN 1 ELSE 0 END),
       ROUND(100.0*SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END)/
-        NULLIF(SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END),0),1)
+        NULLIF(SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END),0),1),
+      ROUND(SUM(
+        CASE WHEN outcome=1 THEN kelly_contracts*(100-fill_price_cents)/100.0
+             WHEN outcome=0 THEN -kelly_contracts*fill_price_cents/100.0
+             ELSE 0 END), 2)
+    FROM trades
+    WHERE outcome IS NOT NULL
+      AND strftime('%Y-%m-%d', substr(timestamp,1,19), '-7 hours')
+        = strftime('%Y-%m-%d', 'now', '-7 hours');
+  " 2>/dev/null)
+  t_total=$(echo "$today_stats" | cut -d'|' -f1)
+  t_wins=$(echo "$today_stats"  | cut -d'|' -f2)
+  t_losses=$(echo "$today_stats"| cut -d'|' -f3)
+  t_wr=$(echo "$today_stats"    | cut -d'|' -f4)
+  t_pnl=$(echo "$today_stats"   | cut -d'|' -f5)
+
+  all_stats=$(sqlite3 "$DB" "
+    SELECT
+      COUNT(*),
+      SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END),
+      SUM(CASE WHEN outcome=0 THEN 1 ELSE 0 END),
+      ROUND(100.0*SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END)/
+        NULLIF(SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END),0),1),
+      ROUND(SUM(
+        CASE WHEN outcome=1 THEN kelly_contracts*(100-fill_price_cents)/100.0
+             WHEN outcome=0 THEN -kelly_contracts*fill_price_cents/100.0
+             ELSE 0 END), 2)
     FROM trades WHERE outcome IS NOT NULL;
   " 2>/dev/null)
-  total=$(echo "$stats" | cut -d'|' -f1)
-  wins=$(echo "$stats"  | cut -d'|' -f2)
-  losses=$(echo "$stats"| cut -d'|' -f3)
-  wr=$(echo "$stats"    | cut -d'|' -f4)
+  total=$(echo "$all_stats"  | cut -d'|' -f1)
+  wins=$(echo "$all_stats"   | cut -d'|' -f2)
+  losses=$(echo "$all_stats" | cut -d'|' -f3)
+  wr=$(echo "$all_stats"     | cut -d'|' -f4)
+  pnl=$(echo "$all_stats"    | cut -d'|' -f5)
 
-  pnl=$(sqlite3 "$DB" "
-    SELECT ROUND(SUM(
-      CASE WHEN outcome=1 THEN kelly_contracts*(100-fill_price_cents)/100.0
-           WHEN outcome=0 THEN -kelly_contracts*fill_price_cents/100.0
-           ELSE 0 END), 2)
-    FROM trades WHERE outcome IS NOT NULL;
-  " 2>/dev/null)
+  # color helpers
+  _color_wr() {
+    local n="$1" val="$2"
+    if [ -n "$n" ] && (( $(echo "$n >= 55" | bc -l) )); then echo -e "${BOLD}${GREEN}${val}%${RESET}"
+    elif [ -n "$n" ] && (( $(echo "$n >= 48" | bc -l) )); then echo -e "${YELLOW}${val}%${RESET}"
+    else echo -e "${RED}${val}%${RESET}"; fi
+  }
+  _color_pnl() {
+    local n="$1" val="$2"
+    if [ -n "$n" ] && (( $(echo "$n >= 0" | bc -l) )); then echo -e "${BOLD}${GREEN}+\$${val}${RESET}"
+    else echo -e "${BOLD}${RED}\$${val}${RESET}"; fi
+  }
 
-  wr_num=$(echo "$wr" | grep -oE '[0-9]+\.?[0-9]*' | head -1)
-  if [ -n "$wr_num" ] && (( $(echo "$wr_num >= 55" | bc -l) )); then
-    wr_c="${BOLD}${GREEN}${wr}%${RESET}"
-  elif [ -n "$wr_num" ] && (( $(echo "$wr_num >= 48" | bc -l) )); then
-    wr_c="${YELLOW}${wr}%${RESET}"
-  else
-    wr_c="${RED}${wr}%${RESET}"
-  fi
+  t_wr_num=$(echo "$t_wr"   | grep -oE '[0-9]+\.?[0-9]*' | head -1)
+  t_pnl_num=$(echo "$t_pnl" | grep -oE '[-]?[0-9]+\.?[0-9]*' | head -1)
+  wr_num=$(echo "$wr"       | grep -oE '[0-9]+\.?[0-9]*' | head -1)
+  pnl_num=$(echo "$pnl"     | grep -oE '[-]?[0-9]+\.?[0-9]*' | head -1)
 
-  pnl_num=$(echo "$pnl" | grep -oE '[-]?[0-9]+\.?[0-9]*' | head -1)
-  if [ -n "$pnl_num" ] && (( $(echo "$pnl_num >= 0" | bc -l) )); then
-    pnl_c="${BOLD}${GREEN}+\$${pnl}${RESET}"
-  else
-    pnl_c="${BOLD}${RED}\$${pnl}${RESET}"
-  fi
+  t_wr_c=$(_color_wr "$t_wr_num" "$t_wr")
+  t_pnl_c=$(_color_pnl "$t_pnl_num" "$t_pnl")
+  wr_c=$(_color_wr "$wr_num" "$wr")
+  pnl_c=$(_color_pnl "$pnl_num" "$pnl")
 
-  echo -e "  Trades: ${WHITE}$total${RESET}  Wins: ${GREEN}$wins${RESET}  Losses: ${RED}$losses${RESET}  WR: ${wr_c}  Net: ${pnl_c}"
+  echo -e "  ${BOLD}Today (PDT):${RESET}  Trades: ${WHITE}${t_total}${RESET}  Wins: ${GREEN}${t_wins}${RESET}  Losses: ${RED}${t_losses}${RESET}  WR: ${t_wr_c}  Net: ${t_pnl_c}"
+  echo -e "  ${DIM}All-time:${RESET}     Trades: ${WHITE}${total}${RESET}  Wins: ${GREEN}${wins}${RESET}  Losses: ${RED}${losses}${RESET}  WR: ${wr_c}  Net: ${pnl_c}"
 
   # ── Regime ────────────────────────────────────────────────────────
   echo ""
