@@ -8,14 +8,13 @@ import sqlite3
 import subprocess
 import time
 
-from rich.console import Console
-from rich.layout import Layout
+from rich import box
+from rich.columns import Columns
+from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
-from rich import box
 from rich.text import Text
-from rich.columns import Columns
 
 DB = "/Users/ezrakornberg/Kronos V2/trades.db"
 LOG_DIR = "/Users/ezrakornberg/Kronos V2/logs"
@@ -24,17 +23,17 @@ REFRESH = 5
 console = Console()
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Time / log helpers ────────────────────────────────────────────────────────
 
 def pst_now():
     return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=8)
 
 
 def today_pst_epoch() -> int:
-    pst = pst_now()
-    midnight = datetime.datetime(pst.year, pst.month, pst.day, 8, 0, 0,
-                                 tzinfo=datetime.timezone.utc)
-    return int(midnight.timestamp())
+    p = pst_now()
+    midnight_pst_utc = datetime.datetime(p.year, p.month, p.day, 8, 0, 0,
+                                         tzinfo=datetime.timezone.utc)
+    return int(midnight_pst_utc.timestamp())
 
 
 def latest_log():
@@ -48,41 +47,44 @@ def latest_log():
         return None
 
 
-def grep_last(log_path, pattern, n=5):
-    if not log_path or not os.path.exists(log_path):
+def grep_last(path, pattern, n=6):
+    if not path or not os.path.exists(path):
         return []
     try:
-        out = subprocess.run(["grep", pattern, log_path], capture_output=True, text=True, timeout=3)
+        out = subprocess.run(["grep", pattern, path],
+                             capture_output=True, text=True, timeout=3)
         lines = [l for l in out.stdout.strip().split("\n") if l]
         return lines[-n:]
     except Exception:
         return []
 
 
+# ── Color helpers ─────────────────────────────────────────────────────────────
+
 def color_prob(val) -> Text:
     try:
         n = float(val)
     except (TypeError, ValueError):
-        return Text(str(val), style="dim")
+        return Text("—", style="dim")
     s = f"{n:.2f}"
-    if n >= 0.70:   return Text(s, style="bold green")
-    if n >= 0.55:   return Text(s, style="green")
-    if n <= 0.30:   return Text(s, style="bold red")
-    if n <= 0.45:   return Text(s, style="red")
+    if n >= 0.70: return Text(s, style="bold green")
+    if n >= 0.55: return Text(s, style="green")
+    if n <= 0.30: return Text(s, style="bold red")
+    if n <= 0.45: return Text(s, style="red")
     return Text(s, style="yellow")
 
 
 def color_result(outcome) -> Text:
-    if outcome == 1:   return Text("WIN",  style="bold green")
-    if outcome == 0:   return Text("LOSS", style="bold red")
-    return Text("...", style="yellow")
+    if outcome == 1:  return Text("WIN",  style="bold green")
+    if outcome == 0:  return Text("LOSS", style="bold red")
+    return Text("...",  style="yellow dim")
 
 
 def color_pnl(val) -> Text:
     try:
         n = float(val)
-        if n >= 0: return Text(f"+${n:.2f}", style="bold green")
-        return Text(f"${n:.2f}", style="bold red")
+        return Text(f"+${n:.2f}" if n >= 0 else f"${n:.2f}",
+                    style="bold green" if n >= 0 else "bold red")
     except Exception:
         return Text("—", style="dim")
 
@@ -102,181 +104,180 @@ def color_fill(fill) -> Text:
     try:
         n = int(fill)
         s = f"{n}¢"
-        if n <= 35 or n >= 65: return Text(s, style="bold magenta")
-        return Text(s, style="white")
+        return Text(s, style="bold magenta") if (n <= 35 or n >= 65) else Text(s, style="white")
     except Exception:
         return Text("—", style="dim")
 
 
 def color_dir(direction) -> Text:
-    if direction == 1: return Text("YES→UP",  style="green")
-    return Text("NO→DOWN", style="red")
+    if direction == 1: return Text("YES→UP",  style="bold green")
+    return Text("NO→DOWN", style="bold red")
 
 
 def color_regime(r) -> Text:
-    styles = {
-        "trending_up":       "green",
-        "trending_down":     "red",
-        "high_uncertainty":  "yellow",
-        "ranging":           "dim",
-    }
-    return Text(str(r), style=styles.get(str(r), "dim"))
+    styles = {"trending_up": "green", "trending_down": "red",
+               "high_uncertainty": "yellow", "ranging": "dim"}
+    return Text(str(r or "?"), style=styles.get(str(r), "dim"))
 
 
 def color_gate(gate) -> Text:
     colors = {2: "dim", 3: "yellow", 4: "yellow", 5: "yellow",
-              7: "cyan", 8: "magenta", 9: "blue", 10: "red"}
+               7: "cyan", 8: "magenta", 9: "blue", 10: "red"}
     return Text(f"G{gate}", style=colors.get(gate, "white"))
 
 
-# ── DB queries ────────────────────────────────────────────────────────────────
+# ── DB helpers ────────────────────────────────────────────────────────────────
 
 def open_db():
-    return sqlite3.connect(f"file:{DB}?mode=ro", uri=True,
-                           check_same_thread=False)
+    return sqlite3.connect(f"file:{DB}?mode=ro", uri=True, check_same_thread=False)
 
 
-def get_trades(db, limit=8):
-    return db.execute("""
-        SELECT strftime('%H:%M', substr(timestamp,1,19), '-8 hours'),
-               ticker, direction, fill_price_cents,
-               printf('%.2f', kelly_dollars), kelly_contracts, outcome
-        FROM trades
-        WHERE strftime('%Y-%m-%d', substr(timestamp,1,19), '-8 hours')
-            = strftime('%Y-%m-%d', 'now', '-8 hours')
-        ORDER BY timestamp DESC LIMIT ?
-    """, (limit,)).fetchall()
+def today_filter_trades():
+    return ("strftime('%Y-%m-%d', substr(timestamp,1,19), '-8 hours')"
+            " = strftime('%Y-%m-%d', 'now', '-8 hours')")
 
 
-def get_rejections(db, limit=10):
-    epoch = today_pst_epoch()
-    return db.execute("""
-        SELECT strftime('%H:%M', datetime(timestamp,'unixepoch'), '-8 hours'),
-               failed_gate, ROUND(k15_calibrated_prob,2),
-               would_be_fill_cents, deepseek_regime, outcome
-        FROM gate_rejections
-        WHERE timestamp >= ?
-        ORDER BY timestamp DESC LIMIT ?
-    """, (epoch, limit)).fetchall()
-
-
-def get_pnl(db):
-    today = db.execute("""
-        SELECT COUNT(*),
-               SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END),
-               SUM(CASE WHEN outcome=0 THEN 1 ELSE 0 END),
-               ROUND(100.0*SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END)/
-                 NULLIF(SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END),0),1),
-               ROUND(SUM(CASE WHEN outcome=1 THEN kelly_contracts*(100-fill_price_cents)/100.0
-                              WHEN outcome=0 THEN -kelly_contracts*fill_price_cents/100.0
-                              ELSE 0 END),2)
-        FROM trades WHERE outcome IS NOT NULL
-          AND strftime('%Y-%m-%d', substr(timestamp,1,19), '-8 hours')
-            = strftime('%Y-%m-%d', 'now', '-8 hours')
-    """).fetchone()
-    alltime = db.execute("""
-        SELECT COUNT(*),
-               SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END),
-               SUM(CASE WHEN outcome=0 THEN 1 ELSE 0 END),
-               ROUND(100.0*SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END)/
-                 NULLIF(SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END),0),1),
-               ROUND(SUM(CASE WHEN outcome=1 THEN kelly_contracts*(100-fill_price_cents)/100.0
-                              WHEN outcome=0 THEN -kelly_contracts*fill_price_cents/100.0
-                              ELSE 0 END),2)
-        FROM trades WHERE outcome IS NOT NULL
-    """).fetchone()
-    return today, alltime
-
-
-# ── Panels ────────────────────────────────────────────────────────────────────
+# ── Panel builders ────────────────────────────────────────────────────────────
 
 def make_header() -> Text:
-    t = pst_now().strftime("%H:%M:%S PST  %Y-%m-%d")
-    return Text(f"  KRONOS MONITOR  ─  {t}  ─  refresh {REFRESH}s  ", style="bold cyan on black")
+    t = pst_now().strftime("%H:%M:%S  %a %Y-%m-%d  PST")
+    out = Text()
+    out.append("  KRONOS MONITOR", style="bold cyan")
+    out.append(f"  —  {t}  —  refresh {REFRESH}s  ", style="dim")
+    return out
 
 
 def make_bg_panel(log) -> Panel:
     lines = grep_last(log, "KronosBG:", 4)
-    t = Table(box=None, show_header=False, padding=(0, 1))
-    t.add_column("candle", style="dim",  width=18)
-    t.add_column("k5",     width=10)
-    t.add_column("k15",    width=10)
-    t.add_column("strike", style="dim",  width=14)
+    t = Table(box=None, show_header=True, header_style="dim",
+              expand=True, padding=(0, 2))
+    t.add_column("Candle (UTC)",   style="dim",  min_width=20, no_wrap=True)
+    t.add_column("k5",             min_width=6,  no_wrap=True)
+    t.add_column("k15",            min_width=6,  no_wrap=True)
+    t.add_column("Strike",         style="dim",  min_width=10, no_wrap=True)
     for line in lines:
-        k5     = re.search(r"prob=([0-9.]+)",        line)
-        k15    = re.search(r"prob_15min=([0-9.]+)",  line)
-        candle = re.search(r"candle=(\S+)",           line)
-        strike = re.search(r"strike=([0-9.]+)",       line)
-        cv = (candle.group(1) if candle else "?")[-16:]
-        k5v  = k5.group(1) if k5 else "?"
+        k5     = re.search(r"prob=([0-9.]+)", line)
+        k15    = re.search(r"prob_15min=([0-9.]+)", line)
+        candle = re.search(r"candle=(\S+)", line)
+        strike = re.search(r"strike=([0-9.]+)", line)
+        cv  = candle.group(1) if candle else "?"
+        k5v = k5.group(1) if k5 else "?"
         k15v = k15.group(1) if k15 else "?"
-        sv   = f"${float(strike.group(1)):,.0f}" if strike else "?"
-        row_k15 = color_prob(k15v)
-        row_k15.stylize("bold")
-        t.add_row(cv, color_prob(k5v), row_k15, sv)
-    return Panel(t, title="[bold cyan]BG LOOP[/]", border_style="bright_black")
+        sv  = f"${float(strike.group(1)):,.0f}" if strike else "?"
+        bold_k15 = color_prob(k15v)
+        bold_k15.stylize("bold")
+        t.add_row(cv, color_prob(k5v), bold_k15, sv)
+    return Panel(t, title="[bold cyan]BG LOOP[/]  [dim]last 4 candles[/]",
+                 border_style="bright_black")
 
 
 def make_trades_panel(db) -> Panel:
-    rows = get_trades(db, 8)
+    rows = db.execute(f"""
+        SELECT strftime('%H:%M', substr(timestamp,1,19), '-8 hours') as pst,
+               ticker, direction, fill_price_cents,
+               printf('%.2f', kelly_dollars), kelly_contracts, outcome,
+               CASE WHEN outcome=1 THEN ROUND(kelly_contracts*(100-fill_price_cents)/100.0,2)
+                    WHEN outcome=0 THEN ROUND(-kelly_contracts*fill_price_cents/100.0,2)
+                    ELSE NULL END as pnl
+        FROM trades
+        WHERE {today_filter_trades()}
+        ORDER BY timestamp DESC LIMIT 10
+    """).fetchall()
+
     t = Table(box=box.SIMPLE, show_header=True, header_style="dim",
-              padding=(0, 1))
-    t.add_column("PST",      width=5)
-    t.add_column("market",   width=10)
-    t.add_column("dir",      width=8)
-    t.add_column("fill",     width=5)
-    t.add_column("kelly",    width=6)
-    t.add_column("size",     width=4)
-    t.add_column("result",   width=6)
+              expand=True, padding=(0, 1))
+    t.add_column("PST",      min_width=5,  no_wrap=True)
+    t.add_column("Market",   min_width=8,  no_wrap=True)
+    t.add_column("Dir",      min_width=8,  no_wrap=True)
+    t.add_column("Fill",     min_width=4,  no_wrap=True)
+    t.add_column("Kelly $",  min_width=7,  no_wrap=True)
+    t.add_column("Size",     min_width=4,  no_wrap=True)
+    t.add_column("P&L",      min_width=7,  no_wrap=True)
+    t.add_column("Result",   min_width=5,  no_wrap=True)
+
     for row in rows:
-        pst_t, ticker, direction, fill, kelly, contracts, outcome = row
-        mkt = re.sub(r"KXBTC15M-\d+MAY\d+", "", ticker)
+        pst_t, ticker, direction, fill, kelly, contracts, outcome, pnl = row
+        mkt = re.sub(r"KXBTC15M-\d{2}MAY\d{2}", "", ticker)
         t.add_row(
-            pst_t, mkt, color_dir(direction),
+            pst_t or "—",
+            mkt or "—",
+            color_dir(direction),
             color_fill(fill),
             Text(f"${kelly}", style="yellow"),
             Text(f"{contracts}x", style="dim"),
+            color_pnl(pnl) if pnl is not None else Text("—", style="dim"),
             color_result(outcome),
         )
-    return Panel(t, title="[bold cyan]TRADES TODAY[/]", border_style="bright_black")
+    return Panel(t, title="[bold cyan]TRADES TODAY[/]  [dim]last 10[/]",
+                 border_style="bright_black")
 
 
 def make_rejections_panel(db) -> Panel:
-    rows = get_rejections(db, 10)
+    epoch = today_pst_epoch()
+    rows = db.execute("""
+        SELECT strftime('%H:%M', datetime(timestamp,'unixepoch'), '-8 hours') as pst,
+               failed_gate,
+               ROUND(k15_calibrated_prob, 2),
+               would_be_fill_cents,
+               deepseek_regime,
+               outcome
+        FROM gate_rejections
+        WHERE timestamp >= ?
+        ORDER BY timestamp DESC LIMIT 12
+    """, (epoch,)).fetchall()
+
     t = Table(box=box.SIMPLE, show_header=True, header_style="dim",
-              padding=(0, 1))
-    t.add_column("PST",     width=5)
-    t.add_column("gate",    width=4)
-    t.add_column("k15cal",  width=6)
-    t.add_column("fill",    width=5)
-    t.add_column("regime",             width=18)
-    t.add_column("result",  width=6)
+              expand=True, padding=(0, 1))
+    t.add_column("PST",      min_width=5,  no_wrap=True)
+    t.add_column("Gate",     min_width=4,  no_wrap=True)
+    t.add_column("k15cal",   min_width=6,  no_wrap=True)
+    t.add_column("Fill",     min_width=4,  no_wrap=True)
+    t.add_column("Regime",   min_width=16, no_wrap=True)
+    t.add_column("Result",   min_width=5,  no_wrap=True)
+
     for row in rows:
         pst_t, gate, k15cal, fill, regime, outcome = row
         t.add_row(
-            pst_t,
+            pst_t or "—",
             color_gate(gate),
             color_prob(k15cal),
             color_fill(fill) if fill else Text("—", style="dim"),
             color_regime(regime),
             color_result(outcome),
         )
-    return Panel(t, title="[bold cyan]GATE REJECTIONS TODAY[/]", border_style="bright_black")
+    return Panel(t, title="[bold cyan]GATE REJECTIONS TODAY[/]  [dim]last 12[/]",
+                 border_style="bright_black")
 
 
 def make_pnl_panel(db) -> Panel:
-    today, alltime = get_pnl(db)
-    t = Table(box=None, show_header=False, padding=(0, 2))
-    t.add_column("label",   width=14)
-    t.add_column("trades",  width=8)
-    t.add_column("record",  width=12)
-    t.add_column("wr",      width=8)
-    t.add_column("net",     width=12)
+    def query(where=""):
+        return db.execute(f"""
+            SELECT COUNT(*),
+                   SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN outcome=0 THEN 1 ELSE 0 END),
+                   ROUND(100.0*SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END)/
+                     NULLIF(SUM(CASE WHEN outcome IS NOT NULL THEN 1 ELSE 0 END),0),1),
+                   ROUND(SUM(
+                     CASE WHEN outcome=1 THEN kelly_contracts*(100-fill_price_cents)/100.0
+                          WHEN outcome=0 THEN -kelly_contracts*fill_price_cents/100.0
+                          ELSE 0 END), 2)
+            FROM trades WHERE outcome IS NOT NULL {where}
+        """).fetchone()
 
-    def row(label, data, label_style="bold"):
+    today   = query(f"AND {today_filter_trades()}")
+    alltime = query()
+
+    t = Table(box=None, show_header=False, expand=True, padding=(0, 3))
+    t.add_column("Label",   min_width=14, style="bold")
+    t.add_column("Trades",  min_width=7)
+    t.add_column("Record",  min_width=10)
+    t.add_column("WR",      min_width=7)
+    t.add_column("Net P&L", min_width=10)
+
+    def add_row(label, data, label_style):
         n, w, l, wr, pnl = data
         n = n or 0; w = w or 0; l = l or 0
-        record = Text(f"{w}W / {l}L", style="default")
+        record = Text(f"{w}W / {l}L")
         t.add_row(
             Text(label, style=label_style),
             Text(str(n), style="white"),
@@ -285,48 +286,55 @@ def make_pnl_panel(db) -> Panel:
             color_pnl(pnl),
         )
 
-    row("Today (PST)", today, "bold")
-    row("All-time",    alltime, "dim")
+    add_row("Today (PST)", today,   "bold white")
+    add_row("All-time",    alltime, "dim")
+
     return Panel(t, title="[bold cyan]P&L[/]", border_style="bright_black")
 
 
 def make_regime_panel(log) -> Panel:
     lines = grep_last(log, "regime:features", 1)
     line = lines[-1] if lines else ""
-    t = Table(box=None, show_header=False, padding=(0, 2))
-    t.add_column(width=16)
-    t.add_column(width=16)
-    t.add_column(width=16)
-    t.add_column(width=24)
+    ds_lines = grep_last(log, "DeepSeek context", 1)
+    ds_line = ds_lines[-1] if ds_lines else ""
 
-    def signed(key, label):
+    def extract(key):
         m = re.search(rf"'{key}': ([-0-9.]+)", line)
-        if not m: return Text(f"{label}:?", style="dim")
-        v = float(m.group(1))
-        style = "green" if v >= 0.3 else "red" if v <= -0.3 else "yellow"
-        return Text(f"{label}:{v:.3f}", style=style)
+        return float(m.group(1)) if m else None
 
-    cvd  = signed("cvd_normalized", "CVD")
-    lp   = signed("large_print_direction", "LP")
-    fund = re.search(r"'funding_rate': ([-0-9.]+)", line)
+    def signed_text(v, label):
+        if v is None: return Text(f"{label}: —", style="dim")
+        style = "green" if v >= 0.3 else "red" if v <= -0.3 else "yellow"
+        return Text(f"{label}: {v:+.3f}", style=style)
+
+    cvd  = extract("cvd_normalized")
+    lp   = extract("large_print_direction")
+    fund = extract("funding_rate")
     fg   = re.search(r"'fear_greed_label': '([^']+)'", line)
-    ds   = grep_last(log, "DeepSeek context", 1)
-    ds_regime = re.search(r"regime=(\S+)", ds[-1]) if ds else None
-    ds_text = color_regime(ds_regime.group(1)) if ds_regime else Text("?", style="dim")
+    ds_r = re.search(r"regime=(\S+)", ds_line)
+    ds_c = re.search(r"confidence=([\d.]+)", ds_line)
+
+    t = Table(box=None, show_header=False, expand=True, padding=(0, 3))
+    t.add_column(min_width=18)
+    t.add_column(min_width=18)
+    t.add_column(min_width=20)
+    t.add_column(min_width=20)
+    t.add_column(min_width=22)
+
+    ds_text = Text("DeepSeek: ", style="dim")
+    if ds_r:
+        ds_text.append_text(color_regime(ds_r.group(1)))
+        if ds_c:
+            ds_text.append(f"  conf:{ds_c.group(1)}", style="dim")
 
     t.add_row(
-        cvd, lp,
-        Text(f"fund:{fund.group(1)[:9] if fund else '?'}", style="dim"),
-        Text(f"fear/greed: {fg.group(1) if fg else '?'}", style="dim"),
+        signed_text(cvd, "CVD"),
+        signed_text(lp,  "LargePrint"),
+        Text(f"Funding: {fund:.6f}" if fund else "Funding: —", style="dim"),
+        Text(f"Fear/Greed: {fg.group(1) if fg else '—'}", style="dim"),
+        ds_text,
     )
-    regime_row = Table(box=None, show_header=False, padding=(0,2))
-    regime_row.add_column(width=20)
-    regime_row.add_row(Text("DeepSeek: ", style="dim") + ds_text)
-    return Panel(
-        Columns([t, regime_row]),
-        title="[bold cyan]REGIME[/]",
-        border_style="bright_black",
-    )
+    return Panel(t, title="[bold cyan]REGIME[/]", border_style="bright_black")
 
 
 # ── Main render ───────────────────────────────────────────────────────────────
@@ -336,34 +344,23 @@ def render():
     try:
         db = open_db()
     except Exception as e:
-        return Panel(Text(f"DB error: {e}", style="red"), title="ERROR")
+        return Panel(Text(f"DB error: {e}", style="red"))
 
-    layout = Layout()
-    layout.split_column(
-        Layout(name="header",     size=1),
-        Layout(name="bg",         size=8),
-        Layout(name="middle",     size=18),
-        Layout(name="pnl",        size=6),
-        Layout(name="regime",     size=5),
+    out = Group(
+        make_header(),
+        make_bg_panel(log),
+        make_trades_panel(db),
+        make_rejections_panel(db),
+        make_pnl_panel(db),
+        make_regime_panel(log),
+        Text(f"\n  [dim]Ctrl+C to stop[/dim]"),
     )
-    layout["middle"].split_row(
-        Layout(name="trades",     ratio=1),
-        Layout(name="rejections", ratio=1),
-    )
-
-    layout["header"].update(make_header())
-    layout["bg"].update(make_bg_panel(log))
-    layout["trades"].update(make_trades_panel(db))
-    layout["rejections"].update(make_rejections_panel(db))
-    layout["pnl"].update(make_pnl_panel(db))
-    layout["regime"].update(make_regime_panel(log))
-
     db.close()
-    return layout
+    return out
 
 
 def main():
-    with Live(render(), refresh_per_second=1, screen=True) as live:
+    with Live(render(), refresh_per_second=1, screen=True, console=console) as live:
         while True:
             time.sleep(REFRESH)
             live.update(render())
