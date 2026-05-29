@@ -578,3 +578,47 @@ def test_gate10_kelly_reduced_for_high_conf_conflict(checklist):
     assert conflict_r.passed
     assert aligned_r.failed_gate != 10
     assert conflict_r.kelly_dollars < aligned_r.kelly_dollars
+
+
+# ── High-uncertainty Kelly shrink ─────────────────────────────────────────────
+
+def test_high_uncertainty_passes_but_kelly_is_halved(checklist):
+    """high_uncertainty regime → checklist passes with 50% of normal kelly_dollars."""
+    uncertain = make_signal(calibrated_prob=0.75, deepseek_regime="high_uncertainty")
+    normal    = make_signal(calibrated_prob=0.75, deepseek_regime="neutral")
+    r_u = checklist.run(**base_kwargs(uncertain))
+    r_n = checklist.run(**base_kwargs(normal))
+    assert r_u.passed
+    assert abs(r_u.kelly_dollars - r_n.kelly_dollars * 0.5) < 0.01
+
+
+def test_high_uncertainty_kelly_contracts_reduced(checklist):
+    """high_uncertainty kelly_contracts is less than neutral at same prob."""
+    uncertain = make_signal(calibrated_prob=0.80, deepseek_regime="high_uncertainty")
+    normal    = make_signal(calibrated_prob=0.80, deepseek_regime="neutral")
+    r_u = checklist.run(**base_kwargs(uncertain))
+    r_n = checklist.run(**base_kwargs(normal))
+    assert r_u.passed
+    assert r_u.kelly_contracts < r_n.kelly_contracts
+
+
+def test_high_uncertainty_shrink_does_not_block(checklist):
+    """high_uncertainty should reduce size, never hard-block on its own."""
+    signal = make_signal(calibrated_prob=0.65, deepseek_regime="high_uncertainty")
+    r = checklist.run(**base_kwargs(signal))
+    assert r.passed
+    assert r.kelly_contracts > 0
+
+
+def test_other_regimes_not_shrunk(checklist):
+    """ranging, trending_up, neutral regimes are not affected by the shrink."""
+    normal_kelly = None
+    for regime in ("neutral", "ranging", "trending_up"):
+        signal = make_signal(calibrated_prob=0.75, deepseek_regime=regime)
+        r = checklist.run(**base_kwargs(signal))
+        assert r.passed
+        if normal_kelly is None:
+            normal_kelly = r.kelly_dollars
+        assert abs(r.kelly_dollars - normal_kelly) < 0.01, (
+            f"Regime '{regime}' unexpectedly changed kelly: {r.kelly_dollars} vs {normal_kelly}"
+        )

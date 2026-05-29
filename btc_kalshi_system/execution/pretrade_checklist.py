@@ -125,6 +125,20 @@ class PreTradeChecklist:
                 else:
                     return fail(2, "Kelly size rounds to 0 contracts after drift shrink")
 
+        # High-uncertainty Kelly shrink — 50% when DeepSeek regime is high_uncertainty.
+        # Kronos generates confident-looking signals during choppy markets but they are
+        # noise: May 28 showed 39.5% WR (vs 83% in ranging) across 43 trades.
+        if signal.deepseek_regime == "high_uncertainty":
+            kelly_dollars *= 0.5
+            kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
+            if kelly_contracts == 0:
+                if is_bootstrap and kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
+                    kelly_contracts = 1
+                elif kelly_dollars >= (trade_price_cents / 100) * 0.5:
+                    kelly_contracts = 1
+                else:
+                    return fail(2, "Kelly size rounds to 0 contracts after high_uncertainty shrink")
+
         # Gate 3 — High uncertainty + thin edge
         edge_from_center = abs(signal.calibrated_prob - 0.5)
         if signal.deepseek_regime == "high_uncertainty" and edge_from_center < 0.05:
