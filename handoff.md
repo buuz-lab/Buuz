@@ -10,6 +10,28 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-05-29 session 17: Calibrator replaced: IsotonicRegression → quadratic LogisticRegression on [raw, raw²]. train_calibrator.py now trains on kronos_raw_15min. 394 tests pass.**
+
+**Session 17: quadratic logistic calibrator**
+
+**Root cause:** `IsotonicRegression(increasing=True)` cannot learn the inverted-U relationship in k15_raw: Spearman correlation of −0.12, k15_raw > 0.8 → P(up) = 0.38. Monotone-increasing constraint forced the calibrator to assign high calibrated values to high raw inputs even when they predicted DOWN.
+
+**Changes:**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/models/calibrator.py` | Replace `IsotonicRegression` with `LogisticRegression` fitting on `[raw, raw²]` features. Rename internal `_iso` → `_model`. `transform()` calls `predict_proba` and clips to `[0,1]`. `save()`/`load()` use `"model"` key; `load()` falls back to `"iso"` for backward compatibility with existing `.joblib` files. |
+| `scripts/train_calibrator.py` | Query now selects `kronos_raw_15min` with `AND kronos_raw_15min IS NOT NULL`. Prints warning if fewer than 200 rows have `kronos_raw_15min` (data is sparse). |
+| `tests/models/test_calibrator.py` | Updated `test_monotonicity_guard_reverts_worse_fit` to use `_model` instead of `_iso`. Added `test_calibrator_uses_logistic_regression`, `test_inverted_signal_calibrated_below_half`, `test_passthrough_still_works_below_min_samples_logistic`. |
+
+**Why LogisticRegression on [raw, raw²]:** quadratic features let the model fit a parabola in calibrated probability — capturing both monotone and inverted-U shapes without a monotonicity constraint. LogisticRegression's L2 regularization prevents overfitting on the ~300-sample window.
+
+**Backward compatibility:** `Calibrator.load()` falls back to reading the `"iso"` key if `"model"` is absent. Any existing `calibrator.pkl` saved with the old isotonic code will load and behave as passthrough (IsotonicRegression object stored in `_model`, which does not have `predict_proba`). Re-run `python3 scripts/train_calibrator.py` after deploying to replace the file with a logistic-trained model.
+
+**Commits:** session 17
+
+---
+
 **As of 2026-05-28 session 16: Gate 10 (DeepSeek trend conflict) added. Gate 8 made confidence-aware. Monitor P&L formula fixed. Main loop converted from fixed 300s timer to event-driven on BG loop completion. 382 tests pass.**
 
 **Session 16: accuracy investigation + timing fix**

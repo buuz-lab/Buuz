@@ -54,8 +54,8 @@ def main() -> None:
     conn = sqlite3.connect(args.db)
     try:
         rows = conn.execute(
-            "SELECT kronos_raw, direction, outcome FROM trades "
-            "WHERE outcome IS NOT NULL AND features_stale=0 "
+            "SELECT kronos_raw_15min, direction, outcome FROM trades "
+            "WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL "
             "ORDER BY timestamp DESC LIMIT ?",
             (args.window,),
         ).fetchall()
@@ -63,7 +63,9 @@ def main() -> None:
         conn.close()
 
     n = len(rows)
-    print(f"Training-ready rows in {args.db}: {n}")
+    print(f"Training-ready rows (with kronos_raw_15min) in {args.db}: {n}")
+    if n < 200:
+        print(f"WARNING: only {n} rows have kronos_raw_15min — data is sparse, calibration may be unreliable")
 
     if n < args.min_rows:
         sys.exit(

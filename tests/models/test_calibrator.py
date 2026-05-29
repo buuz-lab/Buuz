@@ -143,7 +143,7 @@ def test_monotonicity_guard_reverts_worse_fit():
     # First fit: clean data — calibrator engages
     raw_clean, outcomes_clean = _synthetic_data(n=400, seed=1)
     cal.fit(raw_clean, outcomes_clean)
-    iso_after_first = cal._iso
+    model_after_first = cal._model
     brier_after_first = cal._prev_brier
 
     # Second fit: perfectly contradictory (high raw → low outcome) → Brier worsens
@@ -151,9 +151,9 @@ def test_monotonicity_guard_reverts_worse_fit():
     outcomes_bad = (raw_bad < 0.5).astype(float)  # inverted correlation → bad calibration
     cal.fit(raw_bad, outcomes_bad)
 
-    # If Brier worsened, the iso should have been reverted
+    # If Brier worsened, the model should have been reverted
     if brier_after_first is not None:
-        assert cal._iso is iso_after_first or cal._prev_brier <= brier_after_first + 1e-6
+        assert cal._model is model_after_first or cal._prev_brier <= brier_after_first + 1e-6
 
 
 def test_save_load_with_correct_labels():
@@ -169,3 +169,37 @@ def test_save_load_with_correct_labels():
         cal.save(path)
         cal2 = Calibrator.load(path)
         assert cal2.transform(0.7) == pytest.approx(expected, abs=1e-9)
+
+
+# ── quadratic logistic calibrator (Phase 3) ───────────────────────────────────
+
+def test_calibrator_uses_logistic_regression():
+    """Calibrator should use LogisticRegression, not IsotonicRegression."""
+    from sklearn.linear_model import LogisticRegression
+    cal = Calibrator()
+    raw, outcomes = _synthetic_data(n=500)
+    cal.fit(raw, outcomes)
+    assert isinstance(cal._model, LogisticRegression)
+
+
+def test_inverted_signal_calibrated_below_half():
+    """High raw→low outcome (k15_raw>0.8 = P(up)=0.38) should calibrate below 0.5."""
+    rng = np.random.default_rng(7)
+    n = 600
+    raw = rng.uniform(0.0, 1.0, n)
+    # Inverted-U: high raw (>0.7) → mostly outcome=0; mid range → mostly outcome=1
+    p_outcome = np.where(raw > 0.7, 0.15, np.where(raw < 0.3, 0.25, 0.75))
+    outcomes = (rng.uniform(0, 1, n) < p_outcome).astype(float)
+    cal = Calibrator()
+    cal.fit(raw, outcomes)
+    assert cal.transform(0.9) < 0.5
+
+
+def test_passthrough_still_works_below_min_samples_logistic():
+    """Passthrough is preserved below _MIN_SAMPLES with the logistic calibrator."""
+    cal = Calibrator()
+    raw, outcomes = _synthetic_data(n=150)
+    cal.fit(raw, outcomes)
+    assert cal._passthrough is True
+    for p in [0.1, 0.5, 0.9]:
+        assert cal.transform(p) == pytest.approx(p)
