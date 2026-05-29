@@ -9,9 +9,7 @@ import subprocess
 import time
 
 from rich import box
-from rich.columns import Columns
-from rich.console import Console, Group
-from rich.live import Live
+from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -342,39 +340,35 @@ def make_regime_panel(log) -> Panel:
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
-def safe_panel(fn, *args, title=""):
+def safe_print(fn, *args, title=""):
     try:
-        return fn(*args)
+        console.print(fn(*args))
     except Exception as e:
-        return Panel(Text(f"Error: {e}", style="red dim"), title=title,
-                     border_style="bright_black")
-
-
-def render():
-    log = latest_log()
-    try:
-        db = open_db()
-    except Exception as e:
-        return Panel(Text(f"DB error: {e}", style="red"))
-
-    out = Group(
-        make_header(),
-        safe_panel(make_bg_panel,         log,  title="BG LOOP"),
-        safe_panel(make_trades_panel,      db,   title="TRADES"),
-        safe_panel(make_rejections_panel,  db,   title="GATE REJECTIONS"),
-        safe_panel(make_pnl_panel,         db,   title="P&L"),
-        safe_panel(make_regime_panel,      log,  title="REGIME"),
-        Text("\n  [dim]Ctrl+C to stop[/dim]"),
-    )
-    db.close()
-    return out
+        console.print(Panel(Text(f"Error in {title}: {e}", style="red dim"),
+                            border_style="bright_black"))
 
 
 def main():
-    with Live(render(), refresh_per_second=1, screen=True, console=console) as live:
-        while True:
+    while True:
+        os.system("clear")
+        log = latest_log()
+        try:
+            db = open_db()
+        except Exception as e:
+            console.print(f"[red]DB error: {e}[/red]")
             time.sleep(REFRESH)
-            live.update(render())
+            continue
+
+        console.print(make_header())
+        safe_print(make_bg_panel,        log,  title="BG LOOP")
+        safe_print(make_trades_panel,    db,   title="TRADES")
+        safe_print(make_rejections_panel, db,  title="GATE REJECTIONS")
+        safe_print(make_pnl_panel,       db,   title="P&L")
+        safe_print(make_regime_panel,    log,  title="REGIME")
+        console.print("\n[dim]  Ctrl+C to stop[/dim]")
+
+        db.close()
+        time.sleep(REFRESH)
 
 
 if __name__ == "__main__":
