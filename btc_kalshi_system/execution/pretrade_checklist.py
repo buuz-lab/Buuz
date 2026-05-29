@@ -153,13 +153,25 @@ class PreTradeChecklist:
                 return fail(6, f"Composite price ${composite_price:,.0f} within $150 of strike ${signal.strike:,.0f} (distance ${distance:.0f})")
 
         # Gate 10 — DeepSeek trend-direction conflict
-        # When the regime classifier identifies a confirmed trend that directly
-        # opposes our trade direction, the market is systematically moving against
-        # us and Kronos is likely seeing noise/bounces. Block unconditionally.
+        # High-confidence signals (|cal - 0.5| >= 0.20) may be detecting a genuine
+        # regime shift before DeepSeek relabels — allow at 50% Kelly.
+        # Low-confidence signals in a confirmed opposing trend are noise — block.
         if (signal.deepseek_regime == "trending_down" and signal.direction == 1) or \
                 (signal.deepseek_regime == "trending_up" and signal.direction == 0):
-            side = "YES→UP" if signal.direction == 1 else "NO→DOWN"
-            return fail(10, f"DeepSeek regime '{signal.deepseek_regime}' contradicts {side}")
+            conflict_confidence = abs(signal.calibrated_prob - 0.5)
+            if conflict_confidence >= 0.20:
+                kelly_dollars *= 0.5
+                kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
+                if kelly_contracts == 0:
+                    if is_bootstrap and kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
+                        kelly_contracts = 1
+                    elif kelly_dollars >= (trade_price_cents / 100) * 0.5:
+                        kelly_contracts = 1
+                    else:
+                        return fail(10, "DeepSeek conflict: Kelly rounds to 0 after 50% reduction")
+            else:
+                side = "YES→UP" if signal.direction == 1 else "NO→DOWN"
+                return fail(10, f"DeepSeek regime '{signal.deepseek_regime}' contradicts {side} (low confidence)")
 
         # Gate 8 — Kalshi consensus hard block (confidence-aware threshold)
         # High-conviction signals (k15_cal far from 0.5) tolerate more Kalshi
