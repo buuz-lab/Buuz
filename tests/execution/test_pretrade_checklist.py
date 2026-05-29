@@ -490,94 +490,21 @@ def test_gate8_high_confidence_still_passes_at_29c_kalshi(checklist):
     assert r.passed
 
 
-# ── Gate 10: DeepSeek trend-direction conflict ────────────────────────────────
+# ── Gate 10 removed ───────────────────────────────────────────────────────────
 
-def test_gate10_blocks_yes_when_deepseek_trending_down(checklist):
-    """trending_down + direction=YES, low confidence → Gate 10 hard blocks."""
+def test_gate10_removed_trending_down_yes_now_passes(checklist):
+    """Gate 10 removed — trending_down + YES→UP is no longer blocked."""
     signal = make_signal(direction=1, calibrated_prob=0.55, deepseek_regime="trending_down")
     r = checklist.run(**base_kwargs(signal))
-    assert not r.passed
-    assert r.failed_gate == 10
+    assert r.passed
 
 
-def test_gate10_blocks_no_when_deepseek_trending_up(checklist):
-    """trending_up + direction=NO, low confidence → Gate 10 hard blocks."""
+def test_gate10_removed_trending_up_no_now_passes(checklist):
+    """Gate 10 removed — trending_up + NO→DOWN is no longer blocked."""
     signal = make_signal(direction=0, calibrated_prob=0.45, deepseek_regime="trending_up")
-    kw = base_kwargs(signal)
-    r = checklist.run(**kw)
-    assert not r.passed
-    assert r.failed_gate == 10
-
-
-def test_gate10_passes_no_during_trending_down(checklist):
-    """trending_down + direction=NO → Gate 10 passes (direction agrees with trend)."""
-    signal = make_signal(direction=0, calibrated_prob=0.30, deepseek_regime="trending_down")
-    kw = base_kwargs(signal)
-    r = checklist.run(**kw)
-    assert r.failed_gate != 10
-
-
-def test_gate10_passes_yes_during_trending_up(checklist):
-    """trending_up + direction=YES → Gate 10 passes (direction agrees with trend)."""
-    signal = make_signal(direction=1, calibrated_prob=0.70, deepseek_regime="trending_up")
-    kw = base_kwargs(signal)
-    r = checklist.run(**kw)
-    assert r.failed_gate != 10
-
-
-def test_gate10_does_not_fire_on_other_regimes(checklist):
-    """ranging / high_uncertainty / neutral do not trigger Gate 10."""
-    for regime in ("ranging", "high_uncertainty", "neutral"):
-        signal = make_signal(direction=1, calibrated_prob=0.70, deepseek_regime=regime)
-        r = checklist.run(**base_kwargs(signal))
-        assert r.failed_gate != 10, f"Gate 10 incorrectly fired for regime '{regime}'"
-
-
-# ── Gate 10: hybrid — 50% Kelly for high-confidence counter-trend ─────────────
-
-def test_gate10_high_conf_no_passes_with_reduced_kelly(checklist):
-    """trending_up + NO→DOWN + k15_cal=0.15 (distance=0.35) → passes, kelly halved."""
-    signal = make_signal(direction=0, calibrated_prob=0.15, deepseek_regime="trending_up")
     r = checklist.run(**base_kwargs(signal))
     assert r.passed
-    assert r.failed_gate != 10
-    assert r.kelly_contracts > 0
 
-
-def test_gate10_high_conf_yes_passes_with_reduced_kelly(checklist):
-    """trending_down + YES→UP + k15_cal=0.85 (distance=0.35) → passes, kelly halved."""
-    signal = make_signal(direction=1, calibrated_prob=0.85, deepseek_regime="trending_down")
-    r = checklist.run(**base_kwargs(signal))
-    assert r.passed
-    assert r.failed_gate != 10
-    assert r.kelly_contracts > 0
-
-
-def test_gate10_boundary_0_30_passes_with_reduced_kelly(checklist):
-    """k15_cal=0.30 (distance=0.20, exactly at threshold) → 50% Kelly, not a hard block."""
-    signal = make_signal(direction=0, calibrated_prob=0.30, deepseek_regime="trending_up")
-    r = checklist.run(**base_kwargs(signal))
-    assert r.passed
-    assert r.failed_gate != 10
-
-
-def test_gate10_just_below_boundary_blocks(checklist):
-    """k15_cal=0.31 (distance=0.19, below threshold) → hard block."""
-    signal = make_signal(direction=0, calibrated_prob=0.31, deepseek_regime="trending_up")
-    r = checklist.run(**base_kwargs(signal))
-    assert not r.passed
-    assert r.failed_gate == 10
-
-
-def test_gate10_kelly_reduced_for_high_conf_conflict(checklist):
-    """High-confidence conflict kelly_dollars is less than aligned-regime kelly_dollars."""
-    conflict_signal = make_signal(direction=0, calibrated_prob=0.15, deepseek_regime="trending_up")
-    aligned_signal  = make_signal(direction=0, calibrated_prob=0.15, deepseek_regime="trending_down")
-    conflict_r = checklist.run(**base_kwargs(conflict_signal))
-    aligned_r  = checklist.run(**base_kwargs(aligned_signal))
-    assert conflict_r.passed
-    assert aligned_r.failed_gate != 10
-    assert conflict_r.kelly_dollars < aligned_r.kelly_dollars
 
 
 # ── High-uncertainty Kelly shrink ─────────────────────────────────────────────
