@@ -52,7 +52,8 @@ GOOD_KWARGS = dict(
 def test_gate7_no_longer_blocks_yes_up_with_negative_cvd():
     """direction=1, cvd=-0.4 → checklist passes (Gate 7 is shadow-only)."""
     checklist = _make_checklist()
-    signal = _make_signal(direction=1, cvd=-0.4)
+    # calibrated_prob=0.76 gives edge=0.16 at ask=60¢, clearing the ranging Gate 5 floor (0.15)
+    signal = _make_signal(direction=1, cvd=-0.4, calibrated_prob=0.76)
     kwargs = {**GOOD_KWARGS, "best_ask_cents": 60, "best_bid_cents": 58}
     result = checklist.run(signal=signal, **kwargs)
     assert result.passed

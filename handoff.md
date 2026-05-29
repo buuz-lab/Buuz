@@ -4,11 +4,39 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Accumulate 500 training-ready 21-feature rows (~June 2), train and deploy the RegimeModel, then flip `PAPER_TRADING=false` and go live (~June 5–7).
+**Current focus:** Improve signal quality and gate precision while accumulating the ~500 deribit-clean rows needed to train the RegimeModel. Key active items: (1) calibrator activates on k15 data in ~5 days — run `train_calibrator.py` when k15 count hits 300; (2) Gate 5 now regime-aware — monitor ranging trade volume drop and win rate improvement; (3) all regimes currently losing — regime model training is the biggest untrained gap but is ~5 weeks away.
 
 ---
 
 ## Current Progress
+
+**As of 2026-05-29 session 18: Deep signal analysis. Regime-aware Gate 5 deployed (ranging requires 15% edge, high_uncertainty requires 8%). Confirmed regime model cannot be trained yet (215 clean rows vs 500 needed). 394+ tests pass.**
+
+**Session 18: signal analysis + regime-aware Gate 5**
+
+**Key findings:**
+
+| Finding | Detail |
+|---------|--------|
+| k15_raw is anti-correlated with P(up) | Spearman = −0.12. k15_raw > 0.8 → P(up) = 38% (n=52). Signal is partially inverted at high conviction. |
+| Regime model has never been trained | `regime_model.pkl` does not exist. 0/630 trades have active regime prob. The 0.4 regime weight in fusion is dead weight. |
+| All regimes losing money | ranging −$0.10/trade (n=474), high_uncertainty −$0.84/trade (n=119), trending_up −$1.63/trade (n=17), trending_down −$0.43/trade (n=20) |
+| Ranging dead zone | calibrated_prob 0.55–0.65 → 23% win rate (36 trades). Above 0.65 → 60% win rate (126 trades). |
+| All deribit-clean data is 5 days old | deribit_stale=0 rows only since 2026-05-25. 215 total vs 500 needed for regime model. ~5 weeks away at 60 clean trades/day. |
+| Do not restart from 145 "cleanest" rows | Dirty vs clean win rate nearly identical (48.9% vs 47.9%). Outcome labels and kronos_raw are valid across all rows. Restarting would push calibrator activation 2+ weeks further. |
+| S/R proximity signal is flat | hourly_sr_proximity win rates 45–52% across all buckets. 24h high/low is a range-position indicator, not true S/R. Not actionable. |
+
+**Changes — session 18:**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/execution/pretrade_checklist.py` | **Gate 5 regime-aware**: ranging → `min_required = max(base_min, 0.15)`; high_uncertainty → `max(base_min, 0.08)`. Targets the 0.55–0.65 cal_prob dead zone in ranging (23% win rate). Failure message now includes regime. Tests added for all four branches. |
+
+**Regime model status:** Cannot train until ≥500 clean rows (features_stale=0 AND deribit_stale=0). Currently 215. ETA ~5 weeks. Do NOT attempt to train early — underfitting at 215 rows produces confidently wrong regime labels and will make Gate 2 harmful when enforced.
+
+**Calibrator status:** k15_raw count = 118. Needs 300 to activate. At ~40 k15 trades/day → activates in ~4–5 days. Run `python3 scripts/train_calibrator.py` when count hits 300.
+
+---
 
 **As of 2026-05-29 session 17: Calibrator replaced: IsotonicRegression → quadratic LogisticRegression on [raw, raw²]. train_calibrator.py now trains on kronos_raw_15min. 394 tests pass.**
 
@@ -780,6 +808,24 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 ## Next Steps
 
+**Immediate (this week):**
+
+1. **Run `python3 scripts/train_calibrator.py` when k15_raw count hits 300.** Check: `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL`. At ~40/day this is ~5 days from 2026-05-29. After training, verify Brier drops and logistic coefficients make sense (raw² term should have negative coefficient confirming inverted-U shape).
+
+2. **Monitor Gate 5 ranging filter impact.** Expect a significant drop in ranging trade volume (the 0.55–0.65 cal prob zone was ~36 trades out of 474). Track: `SELECT deepseek_regime, failed_gate, COUNT(*) FROM gate_rejections WHERE failed_gate=5 AND DATE(timestamp) >= date('now','-7 days') GROUP BY deepseek_regime`. Win rate on ranging trades passing Gate 5 should move from 47% toward 60%.
+
+3. **Investigate high_uncertainty oversizing.** −$0.84/trade at 51% win rate means Kelly is ignoring something. Check whether high_uncertainty fills are systematically at unfavorable prices (spread eating edge). Query: `SELECT AVG(fill_price_cents), AVG(pnl_dollars) FROM trades WHERE deepseek_regime='high_uncertainty' AND outcome IS NOT NULL`.
+
+**Medium-term (~4–6 weeks):**
+
+4. **Train regime model when clean rows ≥ 500.** `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND deribit_stale=0 AND atm_iv IS NOT NULL`. Run `python3 scripts/train_regime.py --dry-run` first. Deploy in shadow mode (REGIME_GATE2_ENFORCING=false), observe ~50 trades, then enforce.
+
+5. **Segmented calibrators after regime model is deployed.** Train a separate logistic calibrator on ranging-only rows. Ranging will have 600+ k15 rows by then. This is the next calibration improvement after the global logistic calibrator activates.
+
+---
+
+**Historical next steps (preserved for reference):**
+
 0. ✅ **Deribit Options Feed live and verified (session 6, 2026-05-24).** `options:features` writing correctly (TTL 400–600s). First `deribit_stale=0` trade confirmed 2026-05-25T05:40Z (`atm_iv=30.9`). Both feeds healthy. **Do NOT retrain the 27-feature model until ≥500 `deribit_stale=0` rows accumulated — separate from the 21-feature retrain gate.** Monitor: `sqlite3 trades.db "SELECT COUNT(*) FROM trades WHERE deribit_stale=0"`
 
 1. **Wire StratifiedEdgeTracker into Gate 4 after ~50 trades.** After session 4 fixes land, run ~50 trades and check `self._stratified_edge.summary()`. Wire `is_above_threshold(signal.deepseek_regime)` into Gate 4 — if a regime has fewer than 1 recorded trade, `is_above_threshold` returns `False` (blocks). **Important:** do NOT compare `summary()` against `self._edge_tracker.current_edge()` for parity — they measure the same metric (realized edge) but over different populations (global vs per-regime). A difference is expected and not a bug. Instead, validate that `"unknown"` bucket has low count and non-`"unknown"` buckets are accumulating.
@@ -960,6 +1006,16 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 - **`gate_rejections.shadow` column** — added via migration (`_GATE_REJECTIONS_COLUMN_MIGRATIONS`). Historical real blocks have `shadow=0` (default). Shadow observations have `shadow=1`. Always filter by `shadow` when analyzing gate effectiveness to avoid mixing the two populations.
 
+- **k15_raw is anti-correlated with P(up): Spearman = −0.12.** High k15_raw (>0.8) → P(up) = 38% (n=52 clean rows). The logistic [raw, raw²] calibrator can learn this inverted-U. Isotonic could not.
+
+- **Regime model has NEVER been trained.** `regime_model.pkl` does not exist. Do not attempt training below 500 deribit-clean rows — produces confidently wrong labels. All clean rows are from 2026-05-25 onward.
+
+- **Gate 5 is now regime-aware.** ranging: `min_required = max(spread+0.005, 0.15)`. high_uncertainty: `max(spread+0.005, 0.08)`. trending_up/down: unchanged. The 0.15 threshold filters the 0.55–0.65 cal_prob dead zone in ranging (23% win rate on 36 trades). Do not reduce the 0.15 threshold without fresh win-rate data showing the dead zone has resolved.
+
+- **Do not retrain calibrator on kronos_raw (5min).** Session 17 changed `train_calibrator.py` to query `kronos_raw_15min`. The old isotonic model trained on 5min raw is now replaced. Mixing 5min and 15min raw in one calibrator would corrupt it.
+
+- **Dirty rows (features_stale=1 or deribit_stale=1) are valid for calibrator training.** The stale flags indicate bad feature values for the regime model, not bad kronos_raw or outcome labels. The calibrator only uses kronos_raw_15min + outcome — use all rows, not just clean ones.
+
 - **`dump.rdb` and `trades.db.bak.*` must NOT be committed.**
 
 - **`RANGING_SHRINK=0.7`, `_BOOTSTRAP_SHRINK=0.8`, `_UNCERTAINTY_SHRINK=0.5`** — do not equate.
@@ -973,3 +1029,56 @@ With the background loop, the 23s per run stops being on the critical path entir
 - **Restart procedure (launchd):** `launchctl unload ~/Library/LaunchAgents/com.kronos.v2.plist && launchctl load ~/Library/LaunchAgents/com.kronos.v2.plist` — launchd will restart automatically on crash. Logs in `logs/launchd_stdout.log` and `logs/launchd_stderr.log`. Old manual procedure (direct python3) is superseded.
 
 - **Feed health check:** `redis-cli ttl regime:features` should return 400–600. If -2, feed is down. `redis-cli get regime:features:lkg` shows LKG age via `_lkg_written_at` field.
+
+---
+
+## Future Roadmap
+
+Ordered by data requirements. Each item has a clear trigger condition before implementation begins.
+
+### Phase 1 — Calibrator activates (~June 3–5)
+**Trigger:** `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL` ≥ 300.
+
+- Run `python3 scripts/train_calibrator.py`. Verify Brier drops vs passthrough. Verify logistic coefficient on raw² is negative (confirms inverted-U learned correctly).
+- Add calibrator auto-retrain to `auto_retrain.py` (currently only retrains regime model). Calibrator should retrain every 200 new k15 rows, same pattern as regime model.
+- Monitor: does Gate 5 ranging filter improve win rate toward 60%? If not, the signal quality problem is deeper than calibration.
+
+### Phase 2 — Regime model trains (~early July)
+**Trigger:** `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND deribit_stale=0 AND atm_iv IS NOT NULL` ≥ 500.
+
+- Run `python3 scripts/train_regime.py --dry-run`. Check Brier < 0.25 and feature importances make sense (funding_rate, cvd_normalized, brti_momentum should rank high).
+- Deploy in shadow mode (REGIME_GATE2_ENFORCING=false). Observe ~50 trades. Gate 2 disagreement rate should be < 35% — if higher, the model is noisy and needs more data before enforcing.
+- Once enforcing, the 0.4 regime weight in fusion.py becomes real. Expect calibrated_prob distribution to widen slightly.
+- Add `kronos_raw_15min` and `kronos_raw` as features 29–30 in the NEXT retrain after this one (not this one — too soon, not enough k15 rows per regime to be meaningful).
+
+### Phase 3 — Segmented calibrators (~August)
+**Trigger:** ≥ 500 k15_raw rows per regime for ranging (trending regimes may never hit this and should stay on global calibrator).
+
+- Train a separate logistic [raw, raw²] calibrator on ranging-only rows.
+- In `fusion.py`, route `calibrator.transform()` through a `SegmentedCalibrator` wrapper that checks `deepseek_regime` and dispatches to the right model, falling back to global for regimes without enough data.
+- Expect the ranging calibrator to learn a more aggressive compression (closer to 0.5) than the global one.
+- high_uncertainty: train segmented calibrator only if ≥ 400 k15 rows accumulate. Otherwise keep on global.
+
+### Phase 4 — MC path weighting with S/R (~late 2026, if ever)
+**Trigger:** hourly_sr_proximity win rate shows a consistent pattern across ≥ 200 trades per bucket. Currently flat (45–52% across all buckets). Requires redefining S/R from 24h high/low (range position) to pivot-point or volume-cluster based levels.
+
+- The correct approach: post-process `predicted_closes` array in `run_monte_carlo()` by downweighting paths that would require breaking through a strong S/R level. Clean architectural change that doesn't touch the Kronos model.
+- Do not pursue until the SR signal is demonstrably non-flat. Current data does not support it.
+
+### Phase 5 — Go live (PAPER_TRADING=false)
+**Prerequisites before flipping:**
+- [ ] Regime model trained and deployed (Gate 2 enforcing for ≥50 trades without degrading win rate)
+- [ ] Calibrator active on k15 data (not passthrough)
+- [ ] Ranging win rate ≥ 52% over 100+ trades after Gate 5 regime-aware filter
+- [ ] high_uncertainty per-trade P&L positive or flat (currently −$0.84/trade)
+- [ ] 14-day rolling win rate > 52% overall
+
+### Signals to watch continuously
+These don't require implementation — just monitoring queries to run weekly:
+
+| Signal | Query | Action trigger |
+|--------|-------|----------------|
+| Gate 5 ranging blocks | `SELECT COUNT(*) FROM gate_rejections WHERE failed_gate=5 AND deepseek_regime='ranging' AND DATE(timestamp) >= date('now','-7 days')` | If < 5/day, ranging signal improved; consider lowering 0.15 threshold |
+| high_uncertainty P&L | `SELECT AVG(pnl_dollars) FROM trades WHERE deepseek_regime='high_uncertainty' AND outcome IS NOT NULL AND DATE(timestamp) >= date('now','-14 days')` | If still < −0.50/trade after calibrator activates, consider suppressing regime entirely |
+| Gate 2 shadow disagreement | `SELECT COUNT(*) FROM trades WHERE regime_prob IS NOT NULL AND ((direction=1 AND regime_prob < 0.5) OR (direction=0 AND regime_prob >= 0.5))` | If > 40% after regime model deploys, do not enforce Gate 2 yet |
+| k15 calibration health | `python3 scripts/train_calibrator.py --dry-run` | Run weekly once calibrator is active; Brier should trend downward |

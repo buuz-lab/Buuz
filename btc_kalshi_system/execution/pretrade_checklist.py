@@ -152,9 +152,15 @@ class PreTradeChecklist:
         # For "yes": edge = P(up) - ask_price
         # For "no":  edge = P(down) - no_price = (1 - P(up)) - (1 - bid_price) = bid_price - P(up)
         signal_edge = win_prob - market_price
-        min_required = spread_dollars + 0.005
+        base_min = spread_dollars + 0.005
+        if signal.deepseek_regime == "ranging":
+            min_required = max(base_min, 0.15)
+        elif signal.deepseek_regime == "high_uncertainty":
+            min_required = max(base_min, 0.08)
+        else:
+            min_required = base_min
         if signal_edge <= min_required:
-            return fail(5, f"Signal edge {signal_edge:.4f} does not exceed spread + 0.005 ({min_required:.4f})")
+            return fail(5, f"Signal edge {signal_edge:.4f} does not exceed min required {min_required:.4f} (regime={signal.deepseek_regime})")
 
         # Gate 6 — Strike proximity check (KXBTCD / strike markets only)
         # For KXBTC15M up/down markets _extract_strike uses the last completed

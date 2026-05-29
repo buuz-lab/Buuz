@@ -622,3 +622,47 @@ def test_other_regimes_not_shrunk(checklist):
         assert abs(r.kelly_dollars - normal_kelly) < 0.01, (
             f"Regime '{regime}' unexpectedly changed kelly: {r.kelly_dollars} vs {normal_kelly}"
         )
+
+
+# ── Gate 5 regime-aware edge floor ──────────────────────────────────────────
+
+def test_gate5_ranging_edge_below_015_fails(checklist):
+    # ranging requires edge >= 0.15; edge=0.10 should fail Gate 5
+    signal = make_signal(calibrated_prob=0.60, deepseek_regime="ranging")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 48  # spread=$0.02, base_min=$0.025, ranging floor=0.15
+    r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 5
+
+
+def test_gate5_ranging_edge_above_015_passes(checklist):
+    # ranging requires edge >= 0.15; edge=0.16 should pass Gate 5
+    signal = make_signal(calibrated_prob=0.66, deepseek_regime="ranging")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 48  # spread=$0.02, ranging min_required=0.15
+    r = checklist.run(**kw)
+    assert r.passed
+
+
+def test_gate5_high_uncertainty_edge_below_008_fails(checklist):
+    # high_uncertainty requires edge >= 0.08; edge=0.07 should fail Gate 5
+    signal = make_signal(calibrated_prob=0.57, deepseek_regime="high_uncertainty")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 48  # spread=$0.02, high_uncertainty min_required=0.08
+    r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 5
+
+
+def test_gate5_trending_up_passes_with_small_edge(checklist):
+    # trending_up uses base threshold only; edge=0.006 > spread+0.005=0.005 → passes
+    signal = make_signal(calibrated_prob=0.506, deepseek_regime="trending_up")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 50  # spread=$0, min_required=$0.005
+    r = checklist.run(**kw)
+    assert r.passed
