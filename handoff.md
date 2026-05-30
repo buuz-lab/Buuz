@@ -4,11 +4,49 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Improve signal quality and gate precision while accumulating the ~500 deribit-clean rows needed to train the RegimeModel. Key active items: (1) calibrator activates on k15 data in ~5 days — run `train_calibrator.py` when k15 count hits 300; (2) Gate 5 now regime-aware — monitor ranging trade volume drop and win rate improvement; (3) all regimes currently losing — regime model training is the biggest untrained gap but is ~5 weeks away.
+**Current focus:** Monitor calibrator auto-retrain and trending_down shrink impact. Next milestone: deribit_stale=0 rows hit 500 → regime model retrain. Key active items: (1) calibrator now auto-retrains every 2h via cron; (2) trending_down gets 50% shrink (same as high_uncertainty) — empirical data showed 76.9% avg k15 confidence with 28.6% win rate (inverted signal); (3) regime model ETA ~5 days (230/500 deribit-clean rows as of 2026-05-30).
 
 ---
 
 ## Current Progress
+
+**As of 2026-05-30 session 19: Calibrator system overhaul. trending_down shrink added. Calibrator retrained on k15 data (Brier 0.2708→0.2463). Auto-retrain cron wired. 390 tests pass.**
+
+**Session 19: calibrator improvements + auto-retrain**
+
+**Key findings driving changes:**
+- k5 0.80+ bucket: avg calibrated prob 92%, actual win rate 52.4% — severe overconfidence (historical, from isotonic/passthrough era)
+- k15 0.80+ bucket: avg k15 93%, actual win rate 39.4% — inverted signal at high confidence
+- trending_down regime: k15 averaging 76.9% confidence, 28.6% win rate — k15 is an inverted signal in this regime
+- k5 and k15 never disagree in direction (k15 only evaluated on trades that already passed k5 gates — structural, not informational)
+
+**Changes — session 19:**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/models/calibrator.py` | `_MIN_SAMPLES` lowered 300→100 — allows calibrator to fit on 129 available k15 rows (was blocking activation) |
+| `btc_kalshi_system/signal/fusion.py` | `_TRENDING_DOWN_SHRINK = 0.5` added; `elif deepseek_regime == "trending_down": combined = 0.5 + (combined - 0.5) * _TRENDING_DOWN_SHRINK` — 50% shrink (same as high_uncertainty). Empirical basis: 76.9% avg k15 → 28.6% win rate is an inverted signal, not noise. |
+| `tests/models/test_calibrator.py` | Updated 3 tests that hardcoded 300-sample threshold to use 100 (direct consequence of _MIN_SAMPLES change) |
+| `scripts/auto_retrain_calibrator.py` | **New** — cron-driven calibrator auto-retrain. Three triggers: emergency (Brier > 0.25 on last 50 k15 rows), row-based (+50 k15 rows), time-based (7 days). Marker at `models/calibrator_last_trained.json`. |
+| `models/calibrator.pkl` | Retrained on 129 k15 rows; Brier improved 0.2708→0.2463; high-confidence squashing now reflects k15 empirical inversion (raw=0.90→cal=0.43) |
+| crontab | Added `0 */2 * * *` entry for `auto_retrain_calibrator.py` |
+
+**Calibrator transform curve (current):**
+```
+raw=0.50 → cal=0.517
+raw=0.60 → cal=0.548
+raw=0.70 → cal=0.577
+raw=0.80 → cal=0.456   ← inversion begins
+raw=0.90 → cal=0.433   ← high confidence = below-50% output
+raw=0.95 → cal=0.441
+```
+The inversion above ~0.78 reflects that k15 high-confidence outputs are empirically anti-correlated with wins. Combined with the trending_down shrink, very high-confidence trades in trending_down will rarely pass Gate 5.
+
+**Watch for:** calibrator Brier on next auto-retrain runs — if Brier stays above 0.25 the emergency trigger will fire every 2h. Monitor `logs/auto_retrain_calibrator.log`. Consider raising `_EMERGENCY_BRIER_THRESHOLD` to 0.26 if it causes churn without improvement.
+
+**Commits:** `bc583b5` (calibrator changes), `97fa222` (auto_retrain_calibrator.py)
+
+---
 
 **As of 2026-05-29 session 18: Deep signal analysis. Regime-aware Gate 5 deployed (ranging requires 15% edge, high_uncertainty requires 8%). Confirmed regime model cannot be trained yet (215 clean rows vs 500 needed). 394+ tests pass.**
 
@@ -810,11 +848,13 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 **Immediate (this week):**
 
-1. **Run `python3 scripts/train_calibrator.py` when k15_raw count hits 300.** Check: `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL`. At ~40/day this is ~5 days from 2026-05-29. After training, verify Brier drops and logistic coefficients make sense (raw² term should have negative coefficient confirming inverted-U shape).
+1. **Monitor calibrator auto-retrain.** Check `logs/auto_retrain_calibrator.log` after each 2h cron run. Emergency trigger fires when Brier > 0.25 on last 50 k15 rows — current Brier is 0.2527, just above threshold. If it fires every run without improving, raise `_EMERGENCY_BRIER_THRESHOLD` to 0.26 in `scripts/auto_retrain_calibrator.py`. Marker file at `models/calibrator_last_trained.json` — check it exists after first real run.
 
-2. **Monitor Gate 5 ranging filter impact.** Expect a significant drop in ranging trade volume (the 0.55–0.65 cal prob zone was ~36 trades out of 474). Track: `SELECT deepseek_regime, failed_gate, COUNT(*) FROM gate_rejections WHERE failed_gate=5 AND DATE(timestamp) >= date('now','-7 days') GROUP BY deepseek_regime`. Win rate on ranging trades passing Gate 5 should move from 47% toward 60%.
+2. **Monitor trending_down shrink impact.** With `_TRENDING_DOWN_SHRINK=0.5`, combined signals in trending_down will be much more conservative. Track Gate 5 rejections: `SELECT failed_gate, COUNT(*) FROM gate_rejections WHERE deepseek_regime='trending_down' AND DATE(timestamp) >= date('now','-7 days') GROUP BY failed_gate`. Expect more Gate 5 rejections in trending_down as signals get squeezed toward 0.5.
 
-3. **Investigate high_uncertainty oversizing.** −$0.84/trade at 51% win rate means Kelly is ignoring something. Check whether high_uncertainty fills are systematically at unfavorable prices (spread eating edge). Query: `SELECT AVG(fill_price_cents), AVG(pnl_dollars) FROM trades WHERE deepseek_regime='high_uncertainty' AND outcome IS NOT NULL`.
+3. **Monitor Gate 5 ranging filter impact.** Track: `SELECT deepseek_regime, failed_gate, COUNT(*) FROM gate_rejections WHERE failed_gate=5 AND DATE(timestamp) >= date('now','-7 days') GROUP BY deepseek_regime`. Win rate on ranging trades passing Gate 5 should move from 47% toward 60%.
+
+4. **Investigate high_uncertainty oversizing.** −$0.84/trade at 51% win rate means Kelly is ignoring something. Check whether high_uncertainty fills are systematically at unfavorable prices (spread eating edge). Query: `SELECT AVG(fill_price_cents), AVG(pnl_dollars) FROM trades WHERE deepseek_regime='high_uncertainty' AND outcome IS NOT NULL`.
 
 **Medium-term (~4–6 weeks):**
 
@@ -1018,7 +1058,7 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 - **`dump.rdb` and `trades.db.bak.*` must NOT be committed.**
 
-- **`RANGING_SHRINK=0.7`, `_BOOTSTRAP_SHRINK=0.8`, `_UNCERTAINTY_SHRINK=0.5`** — do not equate.
+- **`_RANGING_SHRINK=0.7`, `_BOOTSTRAP_SHRINK=0.8`, `_UNCERTAINTY_SHRINK=0.5`, `_TRENDING_DOWN_SHRINK=0.5`** — do not equate. trending_down and high_uncertainty use the same shrink factor (0.5) but for different empirical reasons: high_uncertainty is noisy, trending_down has an inverted k15 signal (76.9% avg confidence → 28.6% win rate).
 
 - **DeepSeek returns `NEUTRAL_DEFAULT` on 402, not `SAFE_DEFAULT`.**
 
@@ -1036,11 +1076,12 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 Ordered by data requirements. Each item has a clear trigger condition before implementation begins.
 
-### Phase 1 — Calibrator activates (~June 3–5)
-**Trigger:** `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL` ≥ 300.
+### Phase 1 — Calibrator activates ✅ COMPLETE (2026-05-30)
 
-- Run `python3 scripts/train_calibrator.py`. Verify Brier drops vs passthrough. Verify logistic coefficient on raw² is negative (confirms inverted-U learned correctly).
-- Add calibrator auto-retrain to `auto_retrain.py` (currently only retrains regime model). Calibrator should retrain every 200 new k15 rows, same pattern as regime model.
+- ✅ Calibrator retrained on 129 k15 rows; Brier improved 0.2708→0.2463; passthrough=False
+- ✅ `_MIN_SAMPLES` lowered 300→100 to allow fitting on available k15 data
+- ✅ `auto_retrain_calibrator.py` added — triggers every 2h via cron (`0 */2 * * *`); +50 row, 7-day, and Brier>0.25 emergency triggers
+- ✅ `_TRENDING_DOWN_SHRINK=0.5` added in fusion.py — addresses empirical inverted-signal in trending_down
 - Monitor: does Gate 5 ranging filter improve win rate toward 60%? If not, the signal quality problem is deeper than calibration.
 
 ### Phase 2 — Regime model trains (~early July)
