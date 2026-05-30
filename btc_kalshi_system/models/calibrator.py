@@ -31,29 +31,50 @@ class Calibrator:
     def fit(self, raw_probs: np.ndarray, outcomes: np.ndarray) -> "Calibrator":
         raw_probs = np.asarray(raw_probs, dtype=float)
         outcomes = np.asarray(outcomes, dtype=float)
-        self._n_samples = len(raw_probs)
-        if len(raw_probs) < _MIN_SAMPLES:
+        n = len(raw_probs)
+        self._n_samples = n
+
+        # Holdout split: newest 20% (min 20 rows) as unseen evaluation set.
+        # Data is expected ordered newest-first (ORDER BY timestamp DESC).
+        # Train on older rows; gate deployment on holdout Brier vs passthrough.
+        n_holdout = max(20, n // 5)
+        n_train = n - n_holdout
+        if n_train < _MIN_SAMPLES:
             self._passthrough = True
             return self
 
+        raw_train, y_train = raw_probs[n_holdout:], outcomes[n_holdout:]
+        raw_holdout, y_holdout = raw_probs[:n_holdout], outcomes[:n_holdout]
+
+        X_train = np.column_stack([raw_train, raw_train ** 2])
+        new_model = LogisticRegression(max_iter=1000)
+        new_model.fit(X_train, y_train)
+
+        X_holdout = np.column_stack([raw_holdout, raw_holdout ** 2])
+        holdout_preds = np.clip(new_model.predict_proba(X_holdout)[:, 1], 0.0, 1.0)
+        holdout_brier = float(np.mean((holdout_preds - y_holdout) ** 2))
+        passthrough_holdout_brier = float(np.mean((raw_holdout - y_holdout) ** 2))
+
         prev_model = self._model
         prev_passthrough = self._passthrough
+        beats_passthrough = holdout_brier < passthrough_holdout_brier
+        beats_prev = self._prev_brier is None or holdout_brier < self._prev_brier
 
-        self._passthrough = False
-        X = np.column_stack([raw_probs, raw_probs ** 2])
-        new_model = LogisticRegression(max_iter=1000)
-        new_model.fit(X, outcomes)
-        self._model = new_model
-
-        new_brier = self.brier_score(raw_probs, outcomes)
-        if self._prev_brier is not None and new_brier > self._prev_brier:
+        if beats_passthrough and beats_prev:
+            self._model = new_model
+            self._passthrough = False
+            self._prev_brier = holdout_brier
+        else:
             logger.warning(
-                f"Calibrator: new Brier {new_brier:.4f} > previous {self._prev_brier:.4f} — reverting"
+                f"Calibrator: holdout Brier {holdout_brier:.4f} vs passthrough "
+                f"{passthrough_holdout_brier:.4f}"
+                + (f", prev {self._prev_brier:.4f}" if self._prev_brier is not None else "")
+                + " — reverting"
             )
             self._model = prev_model
             self._passthrough = prev_passthrough
-        else:
-            self._prev_brier = new_brier
+            if prev_passthrough:
+                self._prev_brier = passthrough_holdout_brier
 
         return self
 

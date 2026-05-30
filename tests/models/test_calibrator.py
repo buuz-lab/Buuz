@@ -35,9 +35,14 @@ def test_transform_output_in_unit_interval():
 
 def test_calibrated_output_differs_from_raw_after_fit():
     cal = Calibrator()
-    raw, outcomes = _synthetic_data(n=2000)
+    # Inverted signal: raw > 0.6 → mostly outcome=0. Logistic learns the inversion
+    # and beats passthrough on holdout, so calibrator deploys.
+    rng = np.random.default_rng(7)
+    n = 2000
+    raw = rng.uniform(0, 1, n)
+    p_outcome = np.where(raw > 0.6, 0.15, 0.85)
+    outcomes = (rng.uniform(0, 1, n) < p_outcome).astype(float)
     cal.fit(raw, outcomes)
-    # Isotonic regression should move at least some probabilities
     diffs = [abs(cal.transform(float(p)) - float(p)) for p in np.linspace(0.1, 0.9, 9)]
     assert max(diffs) > 1e-6
 
@@ -124,36 +129,41 @@ def test_fit_uses_y_up_labels():
     assert cal_correct.transform(0.7) != cal_inverted.transform(0.7)
 
 
-def test_min_samples_is_100():
-    """Passthrough should be True for n=99, False for n=100."""
+def test_minimum_training_rows_is_100():
+    """_MIN_SAMPLES=100 applies to the training split, not total rows.
+    With 20% holdout: n=123 → n_train=99 → passthrough; n=124 → n_train=100 → fits."""
+    # n=123: n_holdout=24, n_train=99 < 100 → passthrough
     cal_under = Calibrator()
-    raw, outcomes = _synthetic_data(n=99)
-    cal_under.fit(raw, outcomes)
+    raw_under = np.array([0.1] * 62 + [0.9] * 61)
+    y_under = np.array([1.0] * 62 + [0.0] * 61)
+    cal_under.fit(raw_under, y_under)
     assert cal_under._passthrough is True
 
+    # n=124: n_holdout=24, n_train=100 = _MIN_SAMPLES → fits (clear inversion beats passthrough)
     cal_at = Calibrator()
-    raw, outcomes = _synthetic_data(n=100)
-    cal_at.fit(raw, outcomes)
+    raw_at = np.array([0.1] * 62 + [0.9] * 62)
+    y_at = np.array([1.0] * 62 + [0.0] * 62)
+    cal_at.fit(raw_at, y_at)
     assert cal_at._passthrough is False
 
 
-def test_monotonicity_guard_reverts_worse_fit():
-    """After a clean fit, a contradictory fit that worsens Brier should be reverted."""
+def test_holdout_guard_reverts_when_fit_does_not_beat_passthrough():
+    """After a good fit, a second fit where holdout Brier ≥ passthrough reverts to first model."""
     cal = Calibrator()
-    # First fit: clean data — calibrator engages
-    raw_clean, outcomes_clean = _synthetic_data(n=400, seed=1)
-    cal.fit(raw_clean, outcomes_clean)
+    # First fit: clear inversion — beats passthrough on holdout, deploys
+    raw_good = np.array([0.1] * 200 + [0.9] * 200)
+    y_good = np.array([1.0] * 200 + [0.0] * 200)
+    cal.fit(raw_good, y_good)
+    assert not cal._passthrough
     model_after_first = cal._model
-    brier_after_first = cal._prev_brier
 
-    # Second fit: perfectly contradictory (high raw → low outcome) → Brier worsens
-    raw_bad = np.linspace(0.1, 0.9, 400)
-    outcomes_bad = (raw_bad < 0.5).astype(float)  # inverted correlation → bad calibration
-    cal.fit(raw_bad, outcomes_bad)
+    # Second fit: all raw=0.5 — model outputs ~0.5 = same as passthrough, can't beat it
+    raw_flat = np.full(400, 0.5)
+    y_flat = np.tile([0.0, 1.0], 200)
+    cal.fit(raw_flat, y_flat)
 
-    # If Brier worsened, the model should have been reverted
-    if brier_after_first is not None:
-        assert cal._model is model_after_first or cal._prev_brier <= brier_after_first + 1e-6
+    # Holdout Brier(model) ≈ passthrough Brier ≈ 0.25 → no improvement → revert
+    assert cal._model is model_after_first
 
 
 def test_save_load_with_correct_labels():
@@ -176,8 +186,10 @@ def test_save_load_with_correct_labels():
 def test_calibrator_uses_logistic_regression():
     """Calibrator should use LogisticRegression, not IsotonicRegression."""
     from sklearn.linear_model import LogisticRegression
+    # Clear inversion so calibrator deploys (needed to assert _model is set)
     cal = Calibrator()
-    raw, outcomes = _synthetic_data(n=500)
+    raw = np.array([0.1] * 250 + [0.9] * 250)
+    outcomes = np.array([1.0] * 250 + [0.0] * 250)
     cal.fit(raw, outcomes)
     assert isinstance(cal._model, LogisticRegression)
 
