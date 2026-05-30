@@ -218,6 +218,7 @@ def make_rejections_panel(db) -> Panel:
     rows = db.execute("""
         SELECT strftime('%H:%M', datetime(timestamp,'unixepoch'), '-8 hours') as pst,
                failed_gate,
+               ROUND(kronos_raw_15min, 2),
                ROUND(k15_calibrated_prob, 2),
                would_be_fill_cents,
                deepseek_regime,
@@ -231,16 +232,18 @@ def make_rejections_panel(db) -> Panel:
               expand=True, padding=(0, 1))
     t.add_column("PST",      min_width=5,  no_wrap=True)
     t.add_column("Gate",     min_width=4,  no_wrap=True)
+    t.add_column("k15raw",   min_width=6,  no_wrap=True)
     t.add_column("k15cal",   min_width=6,  no_wrap=True)
     t.add_column("Fill",     min_width=4,  no_wrap=True)
     t.add_column("Regime",   min_width=16, no_wrap=True)
     t.add_column("Result",   min_width=5,  no_wrap=True)
 
     for row in rows:
-        pst_t, gate, k15cal, fill, regime, outcome = row
+        pst_t, gate, k15raw, k15cal, fill, regime, outcome = row
         t.add_row(
             pst_t or "—",
             color_gate(gate),
+            color_prob(k15raw),
             color_prob(k15cal),
             color_fill(fill) if fill else Text("—", style="dim"),
             color_regime(regime),

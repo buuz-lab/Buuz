@@ -1,13 +1,14 @@
 """
-Train the RegimeModel from instrumented trades in trades.db.
+Train the RegimeModel from instrumented trades + gate_rejections in trades.db.
 
-Run this script once you have ≥500 resolved trades with captured regime features
-(check `python3 scripts/regime_training_progress.py` if available, or run this
-script — it will refuse to train when the qualifying-row count is too low).
+Run this script once you have ≥500 qualifying rows combined (trades + gate
+rejections).  Gate rejections are included by default to reduce selection bias —
+placed trades cleared all gates and skew toward higher-confidence signals.
 
 Usage:
     python3 scripts/train_regime.py [--db trades.db] [--out models/regime.pkl]
                                     [--test-size 100] [--min-rows 500] [--dry-run]
+                                    [--trades-only]
 
 Filtering rules
 ---------------
@@ -16,6 +17,17 @@ A trade row qualifies for training iff:
     funding_rate    IS NOT NULL  (excludes pre-instrumentation rows from before
                                   the schema migration that added these columns)
     outcome         IS NOT NULL  (trade has been resolved by Kalshi)
+
+A gate_rejection row qualifies iff:
+    shadow          = 0          (real block, not CVD shadow logging)
+    aged_out        = 0          (resolved with a real outcome, not timed out)
+    outcome         IS NOT NULL
+    features        IS NOT NULL  (has captured feature JSON blob)
+    The JSON blob must contain funding_rate (same era gate as trades filter).
+
+Gate rejections store 21/28 features in a JSON blob; the 7 Deribit+btc_24h_return
+features (added session 6+) are absent and filled with NaN.  XGBoost handles NaN
+natively by learning a default split direction for missing values.
 
 Label semantics
 ---------------
@@ -56,6 +68,7 @@ Metrics reported
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -165,30 +178,91 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--legacy", action="store_true",
                    help="Use only the original 6 features. Allows training on rows collected "
                         "before Phase 1 (no new IS NOT NULL filters). Pair with --force --min-rows 100.")
+    p.add_argument("--trades-only", action="store_true",
+                   help="Exclude gate_rejections from training data (uses placed trades only).")
     return p.parse_args()
 
 
-def load_dataset(db_path: str, max_rows: int | None = None, legacy: bool = False) -> list[tuple]:
+# Features present in gate_rejection JSON blobs (21 of 28).
+# The 7 Deribit+btc_24h_return features are absent and will be filled with NaN.
+_GR_JSON_FEATURES = {
+    "funding_rate", "funding_rate_trend", "oi_delta_pct", "cvd_normalized",
+    "basis_spread_pct", "brti_volatility_1h", "cvd_velocity", "cvd_acceleration",
+    "brti_momentum_5min", "brti_momentum_15min", "candle_progress", "hour_sin",
+    "hour_cos", "kalshi_implied_prob", "funding_window_proximity", "trend_slope_1h",
+    "trend_r2_1h", "hourly_sr_proximity", "range_breakout_flag", "tape_speed_tpm",
+    "large_print_direction",
+}
+
+_GR_QUERY = """
+SELECT features, direction, outcome, kronos_raw_15min, timestamp
+FROM gate_rejections
+WHERE shadow = 0
+  AND aged_out = 0
+  AND outcome IS NOT NULL
+  AND features IS NOT NULL
+ORDER BY timestamp ASC
+"""
+
+
+def load_gate_rejections(conn: sqlite3.Connection, feature_cols: list[str]) -> list[tuple]:
+    """Parse gate_rejection JSON blobs into the same row format as trades."""
+    rows_out = []
+    for features_json, direction, outcome, kronos_raw, ts in conn.execute(_GR_QUERY):
+        try:
+            f = json.loads(features_json)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if f.get("funding_rate") is None:
+            continue
+        feat_vals = [f.get(col, float("nan")) if col in _GR_JSON_FEATURES else float("nan")
+                     for col in feature_cols]
+        # kronos_raw_15min stands in for kronos_calibrated (only used for agreement metric)
+        rows_out.append(tuple(feat_vals) + (direction, outcome, kronos_raw or 0.5, ts))
+    return rows_out
+
+
+def load_dataset(
+    db_path: str,
+    max_rows: int | None = None,
+    legacy: bool = False,
+    include_rejections: bool = True,
+) -> list[tuple]:
     if not Path(db_path).exists():
         sys.exit(f"Database not found: {db_path}")
-    # _FEATURE_COLS now has 28 entries (features 22–27 from Deribit + Feature 28
-    # btc_24h_return). Always use _EXTRA_FILTERS_28 when not legacy so the query
-    # requires deribit_stale=0, atm_iv IS NOT NULL, and btc_24h_return IS NOT NULL.
-    # use_28=True implies use_27=True — the 28-feature model is a strict superset.
     query = _build_query(legacy=legacy, use_28=not legacy)
     conn = sqlite3.connect(db_path)
     try:
-        if max_rows is not None:
-            rows = conn.execute(
-                query.replace("ORDER BY timestamp ASC",
-                              f"ORDER BY timestamp DESC LIMIT {max_rows}")
-            ).fetchall()
-            rows = list(reversed(rows))
+        trade_rows = conn.execute(query).fetchall()
+        if include_rejections and not legacy:
+            active_cols = _FEATURE_COLS
+            gr_rows = load_gate_rejections(conn, active_cols)
         else:
-            rows = conn.execute(query).fetchall()
+            gr_rows = []
     finally:
         conn.close()
-    return rows
+
+    # Timestamp is the last element — trades use ISO strings, gate_rejections use
+    # Unix floats. Normalize to string for a consistent sort key.
+    def _ts_key(r):
+        ts = r[-1]
+        if isinstance(ts, (int, float)):
+            import datetime
+            return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
+        return str(ts)
+
+    all_rows = trade_rows + gr_rows
+    all_rows.sort(key=_ts_key)
+
+    if include_rejections and not legacy:
+        print(f"  trades: {len(trade_rows)}  gate_rejections: {len(gr_rows)}  combined: {len(all_rows)}")
+
+    # Strip the trailing timestamp before returning (build_xy expects n_features + 3 cols).
+    all_rows = [r[:-1] for r in all_rows]
+
+    if max_rows is not None and len(all_rows) > max_rows:
+        all_rows = all_rows[-max_rows:]
+    return all_rows
 
 
 def build_xy(rows: list[tuple], n_features: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -232,7 +306,12 @@ def main() -> None:
     if args.legacy:
         print("--legacy mode: using original 6 features (no new IS NOT NULL filters)")
 
-    rows = load_dataset(args.db, max_rows=args.max_rows, legacy=args.legacy)
+    rows = load_dataset(
+        args.db,
+        max_rows=args.max_rows,
+        legacy=args.legacy,
+        include_rejections=not args.trades_only,
+    )
     n_total = len(rows)
     print(f"Qualifying rows in {args.db}: {n_total}")
     if args.max_rows is not None:
@@ -366,6 +445,22 @@ def main() -> None:
         print("WARNING: Brier > 0.25 (CV mean, worse than a coin flip). Do NOT deploy this model.")
     print()
 
+    # ── Feature importances (shown in dry-run too) ───────────────────────────
+    importances = model._clf.feature_importances_
+    total_importance = float(importances.sum())
+    ranked = sorted(zip(active_cols, importances), key=lambda x: x[1], reverse=True)
+    print("Feature importances (descending):")
+    for feat, imp in ranked:
+        print(f"  {feat:<25s}  {imp:.4f}")
+    top_feat, top_imp = ranked[0]
+    if total_importance == 0:
+        print("WARNING: all feature importances are zero — model may not have learned anything.")
+    elif (top_imp / total_importance) > 0.60:
+        print(
+            f"\nWARNING: '{top_feat}' accounts for {top_imp / total_importance:.1%} of total "
+            "importance. The model is essentially a single-feature classifier."
+        )
+
     if args.dry_run:
         print("\n--dry-run set — model NOT saved.")
         return
@@ -377,22 +472,6 @@ def main() -> None:
     print("Restart KronosV2 to pick it up. Gate 2 will run in SHADOW mode by default")
     print("(config.REGIME_GATE2_ENFORCING=False) — observe disagreement logs for ~50")
     print("trades, then flip to True to enable enforcement.")
-
-    # ── Feature importances ───────────────────────────────────────────────────
-    importances = model._clf.feature_importances_
-    total_importance = float(importances.sum())
-    ranked = sorted(zip(active_cols, importances), key=lambda x: x[1], reverse=True)
-    print("\nFeature importances (descending):")
-    for feat, imp in ranked:
-        print(f"  {feat:<25s}  {imp:.4f}")
-    top_feat, top_imp = ranked[0]
-    if total_importance == 0:
-        print("WARNING: all feature importances are zero — model may not have learned anything.")
-    elif (top_imp / total_importance) > 0.60:
-        print(
-            f"\nWARNING: '{top_feat}' accounts for {top_imp / total_importance:.1%} of total "
-            "importance. The model is essentially a single-feature classifier."
-        )
 
 
 if __name__ == "__main__":

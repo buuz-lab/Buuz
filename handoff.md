@@ -4,21 +4,86 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Monitor calibrator auto-retrain impact. Next milestone: deribit_stale=0 rows hit 500 → regime model retrain. Key active items: (1) calibrator now auto-retrains every 2h via cron; (2) regime model ETA ~5 days (230/500 deribit-clean rows as of 2026-05-30).
+**Current focus:** Regime model live as of 2026-05-30 (session 21). Bootstrap mode over — fusion now runs `0.6 × kronos_cal + 0.4 × regime_prob`. Gate 2 in shadow mode. Calibrator in passthrough, 763/883 rows (~2–3 days to auto-retrain threshold).
 
 ---
 
 ## Current Progress
 
-**As of 2026-05-30 session 19: Calibrator system overhaul. Calibrator retrained on k15 data (Brier 0.2708→0.2463). Auto-retrain cron wired. 390 tests pass.**
+**As of 2026-05-30 session 21: Regime model trained and live. Bootstrap mode over. Gate 2 shadow mode. live_monitor shows k15raw + k15cal separately. train_regime.py now includes gate_rejections to fix selection bias.**
 
-**Session 19: calibrator improvements + auto-retrain**
+**Session 21: regime model deployment**
+
+**Changes — session 21:**
+
+| File | Change |
+|------|--------|
+| `scripts/train_regime.py` | **Gate rejections included by default**: `load_gate_rejections()` parses features JSON blob; merges with trades, sorts by timestamp; 7 missing Deribit+btc_24h_return features filled as NaN (XGBoost handles natively). `--trades-only` flag to revert to old behavior. Feature importances now shown in `--dry-run` mode. |
+| `scripts/live_monitor.py` | Gate rejections panel now shows `k15raw` and `k15cal` as separate columns (previously only k15cal, which was misleading in passthrough mode). |
+| `models/regime.pkl` | **New** — XGBoost regime model trained on 1099 rows (171 trades + 928 gate rejections). Brier=0.203 ± 0.028, Accuracy=71.3%, Kronos agreement=60%. Top feature: `kalshi_implied_prob` (19%). |
+
+**Why gate rejections in regime model training:**
+Placed trades cleared all gates — they skew toward higher-confidence signals, mid-range fill prices, and lower uncertainty. Training on trades-only means the model learns the filtered distribution, not the full market distribution. Gate rejections are ~85% of available labeled data and cover the full signal range.
+
+**Regime model dry-run results:**
+- 1099 combined rows (171 trades + 928 gate_rejections)
+- CV Brier: 0.203 ± 0.026 (< 0.25 coin flip; std < 0.05 = consistent across time windows)
+- CV Accuracy: 71.3%, improving fold-over-fold (66% → 71% → 74%)
+- Kronos agreement: 60% — model adds independent signal, not just echoing Kronos
+- No single-feature dominance: top feature `kalshi_implied_prob` at 19%
+- Deribit features contributing: `iv_rv_spread` #2 at 5.5%
+
+**What changes with regime model live:**
+- Signal fusion: was `0.5 + (k15_cal - 0.5) × 0.8` (bootstrap shrink). Now: `0.6 × k15_cal + 0.4 × regime_prob`
+- Gate 2 regime enforcement: `REGIME_GATE2_ENFORCING=False` — shadow mode only, logs disagreements but does NOT block trades
+- Watch logs for `Gate 2 shadow` lines over ~50 trades, then evaluate whether to flip `REGIME_GATE2_ENFORCING=True`
+
+**Next milestones:**
+1. Calibrator auto-retrain at 883 rows (~2–3 days, currently 763). Run `python3 scripts/train_calibrator.py --dry-run` before allowing save.
+2. After ~50 trades under regime model: audit Gate 2 shadow disagreements, decide on `REGIME_GATE2_ENFORCING`.
+3. After calibrator deploys: 2-week clean data window → proper gate audit.
+
+---
+
+**As of 2026-05-30 session 20: Train/holdout split + regime-aware calibrator. Calibrator passthrough but ready to deploy with regime as third feature. 395 tests pass.**
+
+**Session 20: train/holdout split + regime-aware calibrator**
+
+**Changes — session 20:**
+
+| File | Change |
+|------|--------|
+| `btc_kalshi_system/models/calibrator.py` | **Train/holdout split**: `fit()` now holds out newest 20% (min 20 rows) as unseen eval set; only deploys if holdout Brier < passthrough Brier AND < `_prev_brier`; when reverting from passthrough, updates `_prev_brier` to passthrough holdout Brier. **Regime-aware**: `regimes=None` param added to `fit()`; when provided, builds 3-feature matrix `[raw, raw², regime_score]`; `_regime_aware` flag set on deploy; `transform(raw_prob, regime=None)` uses 3-feature vector when `_regime_aware`, 2-feature otherwise (backward compat). `_REGIME_ENCODING` dict: `trending_up=1.0`, `trending_down=-1.0`, `ranging=high_uncertainty=0.0`. `save()`/`load()` persist `regime_aware`. |
+| `btc_kalshi_system/signal/fusion.py` | `calibrator.transform()` call now passes `regime=deepseek_regime` |
+| `main.py` | All 3 `transform()` calls pass `regime=signal.deepseek_regime`. `_refit_calibrator()`: queries `deepseek_regime` column from both tables; passes `regimes=` array to `fit()` (None for k5 fallback path). |
+| `scripts/train_calibrator.py` | `_UNION_QUERY` now selects `deepseek_regime`; passes `regimes=` to `cal.fit()` |
+| `tests/models/test_calibrator.py` | 5 new regime-aware tests: `_regime_aware` flag set, false without regimes, transform differs by regime, unknown regime uses 0.0, save/load preserves flag. 22 total tests. |
+| `tests/signal/test_fusion_kronos_raw.py` | Updated mock assertion to include `regime="trending_up"` |
+
+**Effective minimum rows (after holdout):**
+- `n_holdout = max(20, n // 5)` — at 124 total rows: n_holdout=24, n_train=100 = `_MIN_SAMPLES` → fits
+- At 123 rows: n_train=99 → passthrough
+- The 883-row guard in auto_retrain is unaffected (it gates total rows, not n_train)
+
+**Why regime encoding is `±1`/`0`:**
+- `trending_up=+1.0`, `trending_down=-1.0`: logistic can learn that same k15_raw has opposite implications in these regimes
+- `ranging=high_uncertainty=0.0`: neutral; calibrator treats them identically unless data says otherwise
+- Unknown/None regimes also map to 0.0 via safe `dict.get()` lookup
+
+**Commit:** `12e3a24`
+
+---
+
+**As of 2026-05-30 session 19: Calibrator system overhaul + training pipeline expansion + Gate 9 removal. Calibrator currently passthrough (identity). _MIN_ROWS=883 in auto_retrain. 390 tests pass.**
+
+**Session 19: calibrator improvements + training expansion + Gate 9 removal**
 
 **Key findings driving changes:**
 - k5 0.80+ bucket: avg calibrated prob 92%, actual win rate 52.4% — severe overconfidence (historical, from isotonic/passthrough era)
 - k15 0.80+ bucket: avg k15 93%, actual win rate 39.4% — inverted signal at high confidence
 - trending_down regime: k15 averaging 76.9% confidence, 28.6% win rate — k15 is an inverted signal in this regime
 - k5 and k15 never disagree in direction (k15 only evaluated on trades that already passed k5 gates — structural, not informational)
+- Calibrator trained on trades-only had selection bias: never saw low-confidence/rejected signals
 
 **Changes — session 19:**
 
@@ -27,24 +92,34 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 | `btc_kalshi_system/models/calibrator.py` | `_MIN_SAMPLES` lowered 300→100 — allows calibrator to fit on 129 available k15 rows (was blocking activation) |
 | `btc_kalshi_system/signal/fusion.py` | No change — `trending_down` shrink was added then reverted; only `high_uncertainty` and `ranging` have shrink cases. |
 | `tests/models/test_calibrator.py` | Updated 3 tests that hardcoded 300-sample threshold to use 100 (direct consequence of _MIN_SAMPLES change) |
-| `scripts/auto_retrain_calibrator.py` | **New** — cron-driven calibrator auto-retrain. Three triggers: emergency (Brier > 0.25 on last 50 k15 rows), row-based (+50 k15 rows), time-based (7 days). Marker at `models/calibrator_last_trained.json`. |
-| `models/calibrator.pkl` | Retrained on 129 k15 rows; Brier improved 0.2708→0.2463; high-confidence squashing now reflects k15 empirical inversion (raw=0.90→cal=0.43) |
+| `scripts/auto_retrain_calibrator.py` | **New** — cron-driven calibrator auto-retrain. Three triggers: emergency (Brier > 0.25 on last 50 k15 rows), row-based (+50 combined rows), time-based (7 days). `_MIN_ROWS=883`. Marker at `models/calibrator_last_trained.json`. |
+| `scripts/train_calibrator.py` | Training query replaced with UNION of trades + gate_rejections (eliminates selection bias). `min_rows` guard uses `total_available` count not windowed count. `AND failed_gate != 9` removed (redundant with `shadow=0`). |
+| `main.py` | Gate 9 (edge-flip shadow, ~50 lines) removed from `_process_market`. `flip_price_cents` column retained for schema backward compatibility with existing rows. |
+| `models/calibrator.pkl` | Forced to passthrough (identity). Current state: `passthrough=True`, `n_samples=300` (stale). |
+| `models/calibrator_last_trained.json` | Written manually: `trained_at_rows=130`, timestamp `2026-05-30T12:45:22Z`. |
 | crontab | Added `0 */2 * * *` entry for `auto_retrain_calibrator.py` |
 
-**Calibrator transform curve (current):**
-```
-raw=0.50 → cal=0.517
-raw=0.60 → cal=0.548
-raw=0.70 → cal=0.577
-raw=0.80 → cal=0.456   ← inversion begins
-raw=0.90 → cal=0.433   ← high confidence = below-50% output
-raw=0.95 → cal=0.441
-```
-The inversion above ~0.78 reflects that k15 high-confidence outputs are empirically anti-correlated with wins. This affects all regimes equally through the calibrated probability — no regime-specific shrink is applied for trending_down.
+**Calibrator history this session (in order):**
+1. **Retrained on 129 k15 rows (trades only):** Brier 0.2708→0.2463. Inversion crossover at raw=0.57 — raw=0.90 mapped to cal=0.43. System was fading essentially all bullish signals above 57% conviction (the crossover stripping YES bets).
+2. **Training expanded to UNION trades + gate_rejections (680 combined rows):** Curve collapsed to constant ~0.57–0.58 for all inputs — all directional gradient removed. Gate 5 rejected most trades due to Kelly=0 (combined ≈ 0.54–0.55).
+3. **Forced to passthrough:** `state["passthrough"] = True` written directly to `.pkl`. Identity transform restores full directional signal. This was the correct fix — not enough regime diversity in 680 rows to train a stable logistic curve.
+4. **`_MIN_ROWS` raised to 883:** 683 combined rows as of 2026-05-30 + 200 genuinely new observations required before next retrain. At ~50 k15-ready rows/day, ETA ~4 days.
 
-**Watch for:** calibrator Brier on next auto-retrain runs — if Brier stays above 0.25 the emergency trigger will fire every 2h. Monitor `logs/auto_retrain_calibrator.log`. Consider raising `_EMERGENCY_BRIER_THRESHOLD` to 0.26 if it causes churn without improvement.
+**Current calibrator state:**
+- `passthrough=True` → `calibrator.transform(raw) = raw` (identity, no transformation)
+- Emergency trigger dormant while passthrough is active (no Brier baseline to compare)
+- Marker file: `trained_at_rows=130` reflects the last non-passthrough k15-only fit
+- `_prev_brier` staleness gap: after reverting to passthrough, `_prev_brier` inside the calibrator reflects the old 129-row k15 fit (Brier≈0.24), NOT the passthrough baseline. When 883-row retrain fires, run `--dry-run` first and manually compare fitted Brier vs passthrough Brier before allowing save. See memory: `project-calibrator-883-retrain`.
 
-**Commits:** `bc583b5` (calibrator changes), `97fa222` (auto_retrain_calibrator.py)
+**Gate 9 removal:**
+Gate 9 (edge-flip shadow) logged potential NO trades when Gate 2 "Kelly rounds to 0" fired on a YES signal. Used `shadow=2`, `failed_gate=9` in `gate_rejections`. Removed because:
+- `shadow=2` rows were already excluded from training via `WHERE shadow=0` — no training impact
+- No live trade impact (shadow-only)
+- Removes ~50 lines of complexity from `_process_market`
+- `flip_price_cents` column retained in DB schema for backward compatibility with existing rows
+- `AND failed_gate != 9` clause was redundant with `shadow=0` filter and removed from all queries
+
+**Commits:** `bc583b5`, `97fa222`, `b05896a`, `a6683e2`, `57dc3f8`, `bc482df`, `81112aa`, `ca9f363`, `f220981`
 
 ---
 
@@ -848,17 +923,18 @@ Streak tracked in Redis key `trading:loss_streak` — cleared on win, incremente
 
 **Immediate (this week):**
 
-1. **Monitor calibrator auto-retrain.** Check `logs/auto_retrain_calibrator.log` after each 2h cron run. Emergency trigger fires when Brier > 0.25 on last 50 k15 rows — current Brier is 0.2527, just above threshold. If it fires every run without improving, raise `_EMERGENCY_BRIER_THRESHOLD` to 0.26 in `scripts/auto_retrain_calibrator.py`. Marker file at `models/calibrator_last_trained.json` — check it exists after first real run.
+1. **Watch for 883 combined k15-ready rows — manual retrain check required.** When `python3 scripts/auto_retrain_calibrator.py --dry-run` shows row trigger firing AND min-rows guard passes, do NOT let it run automatically. Run `python3 scripts/train_calibrator.py --dry-run` first and manually compare fitted Brier vs passthrough Brier on the same 300-row window. Only allow save if fitted Brier < passthrough Brier by ≥0.005. See memory `project-calibrator-883-retrain` for exact SQL. **Note:** train/holdout split is now live — the auto-revert guard will correctly catch degraded fits. `_prev_brier` is still potentially stale (reflects 129-row k15 fit baseline, not passthrough) — manual verification is still required once. First deployment will use regime as third feature (`_regime_aware=True`).
+   - The in-memory 25-resolution refit is also running continuously. Last attempt (07:10 2026-05-30) missed passthrough by only 0.0006 (Brier 0.2433 vs baseline 0.2427). Watch `logs/launchd_stderr.log` for `Calibrator refit: passthrough=False` — that means it auto-deployed a non-passthrough model.
 
 2. **Monitor Gate 5 ranging filter impact.** Track: `SELECT deepseek_regime, failed_gate, COUNT(*) FROM gate_rejections WHERE failed_gate=5 AND DATE(timestamp) >= date('now','-7 days') GROUP BY deepseek_regime`. Win rate on ranging trades passing Gate 5 should move from 47% toward 60%.
 
-4. **Investigate high_uncertainty oversizing.** −$0.84/trade at 51% win rate means Kelly is ignoring something. Check whether high_uncertainty fills are systematically at unfavorable prices (spread eating edge). Query: `SELECT AVG(fill_price_cents), AVG(pnl_dollars) FROM trades WHERE deepseek_regime='high_uncertainty' AND outcome IS NOT NULL`.
+3. **Investigate high_uncertainty oversizing.** −$0.84/trade at 51% win rate means Kelly is ignoring something. Check whether high_uncertainty fills are systematically at unfavorable prices (spread eating edge). Query: `SELECT AVG(fill_price_cents), AVG(pnl_dollars) FROM trades WHERE deepseek_regime='high_uncertainty' AND outcome IS NOT NULL`.
 
 **Medium-term (~4–6 weeks):**
 
 4. **Train regime model when clean rows ≥ 500.** `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND deribit_stale=0 AND atm_iv IS NOT NULL`. Run `python3 scripts/train_regime.py --dry-run` first. Deploy in shadow mode (REGIME_GATE2_ENFORCING=false), observe ~50 trades, then enforce.
 
-5. **Segmented calibrators after regime model is deployed.** Train a separate logistic calibrator on ranging-only rows. Ranging will have 600+ k15 rows by then. This is the next calibration improvement after the global logistic calibrator activates.
+5. **Segmented calibrators after regime model is deployed.** Full separate calibrators per regime (Phase 3b). Higher accuracy ceiling than the current regime-as-feature model, but needs ~500 rows per regime. Ranging will hit that first (~August). trending_up/down may never have enough rows — those stay on global.
 
 ---
 
@@ -1058,6 +1134,16 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 - **`_RANGING_SHRINK=0.7`, `_BOOTSTRAP_SHRINK=0.8`, `_UNCERTAINTY_SHRINK=0.5`** — do not equate. Only `high_uncertainty` and `ranging` have regime-specific shrinks; `trending_down` and `trending_up` fall through with no adjustment.
 
+- **Calibrator is currently passthrough (identity).** `calibrator.transform(raw) = raw`. Emergency trigger in `auto_retrain_calibrator.py` is dormant while passthrough (no Brier baseline). `n_samples=300` in the `.pkl` is stale from the last non-passthrough fit — ignore it. Next retrain at 883 combined rows requires manual Brier comparison first. When it deploys, `_regime_aware=True` and `transform()` will use 3-feature vector.
+
+- **`_prev_brier` staleness gap at next retrain.** After the passthrough revert, `Calibrator._prev_brier` reflects the old 129-row k15 Brier (~0.24), NOT the passthrough baseline. The train/holdout split (session 20) fixes this going forward: when `fit()` reverts to passthrough, it now updates `_prev_brier = passthrough_holdout_brier`. But the currently serialized `.pkl` still has the stale 0.24 value. Must manually compare fitted holdout Brier vs passthrough holdout Brier at 883-row retrain. See memory `project-calibrator-883-retrain`.
+
+- **Regime-aware calibrator: `_regime_aware` flag gates the feature at `transform()`.** Old `.pkl` files load with `_regime_aware=False` (backward compat default in `load()`). When it first deploys with `regimes=`, `_regime_aware=True` is saved. All 3 transform() call sites in `main.py`, fusion.py, and train_calibrator.py already pass `regime=`. Unknown/None regimes encode to 0.0 — same as ranging.
+
+- **Gate 9 (edge-flip shadow) is removed.** `failed_gate=9` and `shadow=2` rows still exist in the DB from the shadow period — do not mistake them for active data. `flip_price_cents` column retained in `gate_rejections` and `trades` schema for backward compatibility; it is no longer populated by any live code.
+
+- **`gate_rejections` training filter: `WHERE shadow=0` already excludes all Gate 9 rows (which used `shadow=2`).** The old `AND failed_gate != 9` clause was redundant and has been removed from all queries in `train_calibrator.py` and `auto_retrain_calibrator.py`.
+
 - **DeepSeek returns `NEUTRAL_DEFAULT` on 402, not `SAFE_DEFAULT`.**
 
 - **DerivativesFeed re-resolves on ANY exception** (commit `229b88b`). Prior to this fix, only 403/Forbidden triggered failover; timeouts/resets silently kept a dead session alive. If the feed goes quiet again, check `redis-cli ttl regime:features` — TTL of -2 means it expired and feed is down. Restart main.py to recover.
@@ -1074,13 +1160,29 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 Ordered by data requirements. Each item has a clear trigger condition before implementation begins.
 
-### Phase 1 — Calibrator activates ✅ COMPLETE (2026-05-30)
+### Phase 1 — Calibrator infrastructure COMPLETE; waiting for data (2026-05-30)
 
-- ✅ Calibrator retrained on 129 k15 rows; Brier improved 0.2708→0.2463; passthrough=False
-- ✅ `_MIN_SAMPLES` lowered 300→100 to allow fitting on available k15 data
-- ✅ `auto_retrain_calibrator.py` added — triggers every 2h via cron (`0 */2 * * *`); +50 row, 7-day, and Brier>0.25 emergency triggers
-- `trending_down` shrink was considered (76.9% avg k15 → 28.6% win rate) but reverted — no regime-specific shrink for trending_down
-- Monitor: does Gate 5 ranging filter improve win rate toward 60%? If not, the signal quality problem is deeper than calibration.
+**What's been fixed (all complete):**
+- ✅ Label bug fixed: `y_up = int(direction == outcome)` instead of raw `outcome` — NO trades were training backwards before
+- ✅ Training signal switched from k5 → k15: calibrator now maps `kronos_raw_15min` to calibrated prob (15-min horizon matches 15-min markets)
+- ✅ Switched from isotonic → quadratic logistic [raw, raw²]: can learn inverted-U shapes; isotonic was forced monotone-increasing
+- ✅ Calibrator persistence added: survived restarts (was resetting to passthrough on every launchd restart before)
+- ✅ Rolling 300-row window: no longer blending all historical regimes
+- ✅ Training expanded to UNION trades + gate_rejections: selection bias eliminated (was only seeing high-confidence placed trades)
+- ✅ `_MIN_SAMPLES` lowered 300→100; `auto_retrain_calibrator.py` added (cron `0 */2 * * *`; row/time/emergency triggers)
+- ✅ Gate 9 (edge-flip shadow) removed
+- ✅ Train/holdout split: `fit()` holds out newest 20% (min 20); deploys only if holdout Brier < passthrough AND < `_prev_brier`
+- ✅ Regime-aware calibrator: `[raw, raw², regime_score]` feature vector; `trending_up=1.0`, `trending_down=-1.0`, `ranging=0.0`; first deployment activates at 883 rows
+
+**Current state:**
+- **Calibrator currently passthrough (identity)** — 683 combined rows as of 2026-05-30, need 883 before external retrain. At ~50 k15-ready rows/day, ETA ~4 days.
+- In-memory 25-resolution refit running continuously; last attempt (07:10 2026-05-30) missed passthrough threshold by 0.0006 (Brier 0.2433 vs baseline 0.2427)
+- Emergency trigger dormant (no Brier baseline while passthrough)
+
+**What's still missing:**
+1. **More data** — regime diversity is the #1 blocker. Dataset is ~80% ranging/high_uncertainty. Trending_up sessions like 2026-05-30 are filling the gap. First deployment at 883 rows.
+
+**Before next retrain:** manually compare fitted Brier vs passthrough Brier. See memory `project-calibrator-883-retrain`. Do NOT rely on `_prev_brier` auto-revert guard (stale from 129-row fit).
 
 ### Phase 2 — Regime model trains (~early July)
 **Trigger:** `SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL AND features_stale=0 AND deribit_stale=0 AND atm_iv IS NOT NULL` ≥ 500.
@@ -1090,13 +1192,22 @@ Ordered by data requirements. Each item has a clear trigger condition before imp
 - Once enforcing, the 0.4 regime weight in fusion.py becomes real. Expect calibrated_prob distribution to widen slightly.
 - Add `kronos_raw_15min` and `kronos_raw` as features 29–30 in the NEXT retrain after this one (not this one — too soon, not enough k15 rows per regime to be meaningful).
 
-### Phase 3 — Segmented calibrators (~August)
-**Trigger:** ≥ 500 k15_raw rows per regime for ranging (trending regimes may never hit this and should stay on global calibrator).
+### Phase 3 — Regime-aware calibration (~June–August)
 
-- Train a separate logistic [raw, raw²] calibrator on ranging-only rows.
-- In `fusion.py`, route `calibrator.transform()` through a `SegmentedCalibrator` wrapper that checks `deepseek_regime` and dispatches to the right model, falling back to global for regimes without enough data.
-- Expect the ranging calibrator to learn a more aggressive compression (closer to 0.5) than the global one.
-- high_uncertainty: train segmented calibrator only if ≥ 400 k15 rows accumulate. Otherwise keep on global.
+**Phase 3a — Regime as input feature** ✅ COMPLETE (session 20, 2026-05-30)
+- Feature vector extended from `[raw, raw²]` to `[raw, raw², regime_score]`
+- Encoding: `trending_up=1.0`, `trending_down=-1.0`, `ranging=high_uncertainty=0.0`
+- `_regime_aware=True` flag set on deploy; `transform(p, regime=X)` dispatches correctly
+- All callers updated: `fusion.py`, `main.py` (3 sites), `_refit_calibrator()`, `train_calibrator.py`
+- Will activate on first non-passthrough deployment (883+ rows)
+
+**Phase 3b — Fully segmented calibrators** (~August, after Phase 3a deployed and evaluated)
+**Trigger:** ≥500 k15_raw rows per regime for ranging.
+- Train a separate logistic [raw, raw²] calibrator on ranging-only rows
+- In `fusion.py`, route `calibrator.transform()` through a `SegmentedCalibrator` wrapper that checks `deepseek_regime` and dispatches to the right model, falling back to global for regimes without enough data
+- Expect the ranging calibrator to learn a more aggressive compression (closer to 0.5) than the global one
+- high_uncertainty: segmented calibrator only if ≥400 k15 rows accumulate. Otherwise keep on global
+- trending_up/down: probably never enough rows — keep on global or Phase 3a regime-feature model
 
 ### Phase 4 — MC path weighting with S/R (~late 2026, if ever)
 **Trigger:** hourly_sr_proximity win rate shows a consistent pattern across ≥ 200 trades per bucket. Currently flat (45–52% across all buckets). Requires redefining S/R from 24h high/low (range position) to pivot-point or volume-cluster based levels.
