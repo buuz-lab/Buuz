@@ -8,6 +8,12 @@
 #
 # Rolling window: uses min(count, 300) rows — calibrator is a 2-parameter model,
 # recency matters more than volume.
+#
+# Minimum rows: 883 (683 rows as of 2026-05-30 + 200 new observations required).
+# The calibrator is currently in passthrough mode. 500 rows was insufficient —
+# at that volume, regime diversity is too low for the logistic curve to beat
+# passthrough on the evaluation set. The next retrain requires 200 genuinely new
+# observations beyond the current dataset to justify fitting a non-passthrough model.
 """
 Auto-retrain script for the Kronos V2 calibrator.
 
@@ -38,7 +44,7 @@ _MARKER_PATH = "models/calibrator_last_trained.json"
 
 _ROW_TRIGGER_DELTA = 50            # retrain when +50 new k15 rows since last train
 _TIME_TRIGGER_DAYS = 7             # retrain if 7 days elapsed since last train
-_MIN_ROWS = 100                    # refuse to retrain below this
+_MIN_ROWS = 883                    # refuse to retrain below this (683 rows 2026-05-30 + 200 new required)
 _WINDOW = 300                      # rolling window passed to train_calibrator.py
 _EMERGENCY_BRIER_THRESHOLD = 0.25  # worse than near-coin-flip → emergency retrain
 
