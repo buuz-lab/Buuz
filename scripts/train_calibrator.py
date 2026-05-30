@@ -10,7 +10,7 @@ Data sources
 Training rows are drawn from both tables to eliminate selection bias:
   - trades: placed trades with resolved outcomes
   - gate_rejections: blocked signals with resolved counterfactual outcomes
-    (gate=9 shadow tests and shadow=1 rows excluded)
+    (shadow=1 Gate 7 rows excluded via WHERE shadow=0)
 
 Label semantics
 ---------------
@@ -69,7 +69,6 @@ def main() -> None:
             WHERE outcome IS NOT NULL
               AND kronos_raw_15min IS NOT NULL
               AND shadow = 0
-              AND failed_gate != 9
         )
         ORDER BY timestamp DESC LIMIT ?
     """
@@ -80,7 +79,7 @@ def main() -> None:
             UNION ALL
             SELECT kronos_raw_15min FROM gate_rejections
             WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL
-              AND shadow = 0 AND failed_gate != 9
+              AND shadow = 0
         )
     """
 

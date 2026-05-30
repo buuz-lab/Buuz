@@ -64,7 +64,7 @@ def get_k15_ready_count(db_path: str) -> int:
             "    UNION ALL"
             "    SELECT kronos_raw_15min FROM gate_rejections"
             "    WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL"
-            "      AND shadow = 0 AND failed_gate != 9"
+            "      AND shadow = 0"
             ")"
         ).fetchone()[0]
     finally:
