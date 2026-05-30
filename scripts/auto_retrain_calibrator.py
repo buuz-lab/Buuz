@@ -46,16 +46,20 @@ _EMERGENCY_BRIER_THRESHOLD = 0.25  # worse than near-coin-flip → emergency ret
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 def get_k15_ready_count(db_path: str) -> int:
-    """Return COUNT(*) of k15-ready rows in the database."""
+    """Return combined COUNT(*) of k15-ready rows from trades + gate_rejections."""
     if not Path(db_path).exists():
         sys.exit(f"Database not found: {db_path}")
     conn = sqlite3.connect(db_path)
     try:
         count = conn.execute(
-            "SELECT COUNT(*) FROM trades"
-            " WHERE outcome IS NOT NULL"
-            "   AND features_stale = 0"
-            "   AND kronos_raw_15min IS NOT NULL"
+            "SELECT COUNT(*) FROM ("
+            "    SELECT kronos_raw_15min FROM trades"
+            "    WHERE outcome IS NOT NULL AND features_stale = 0 AND kronos_raw_15min IS NOT NULL"
+            "    UNION ALL"
+            "    SELECT kronos_raw_15min FROM gate_rejections"
+            "    WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL"
+            "      AND shadow = 0 AND failed_gate != 9"
+            ")"
         ).fetchone()[0]
     finally:
         conn.close()

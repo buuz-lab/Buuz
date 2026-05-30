@@ -1,9 +1,16 @@
 """
-Train the Calibrator from instrumented trades in trades.db.
+Train the Calibrator from instrumented trades + gate_rejections in trades.db.
 
 Usage:
     python3 scripts/train_calibrator.py [--db trades.db] [--out models/calibrator.pkl]
-                                        [--window 300] [--min-rows 300] [--dry-run]
+                                        [--window 300] [--min-rows 100] [--dry-run]
+
+Data sources
+------------
+Training rows are drawn from both tables to eliminate selection bias:
+  - trades: placed trades with resolved outcomes
+  - gate_rejections: blocked signals with resolved counterfactual outcomes
+    (gate=9 shadow tests and shadow=1 rows excluded)
 
 Label semantics
 ---------------
@@ -51,25 +58,47 @@ def main() -> None:
     if not Path(args.db).exists():
         sys.exit(f"Database not found: {args.db}")
 
+    _UNION_QUERY = """
+        SELECT kronos_raw_15min, direction, outcome, timestamp FROM (
+            SELECT kronos_raw_15min, direction, outcome, timestamp FROM trades
+            WHERE outcome IS NOT NULL
+              AND features_stale = 0
+              AND kronos_raw_15min IS NOT NULL
+            UNION ALL
+            SELECT kronos_raw_15min, direction, outcome, timestamp FROM gate_rejections
+            WHERE outcome IS NOT NULL
+              AND kronos_raw_15min IS NOT NULL
+              AND shadow = 0
+              AND failed_gate != 9
+        )
+        ORDER BY timestamp DESC LIMIT ?
+    """
+    _COUNT_QUERY = """
+        SELECT COUNT(*) FROM (
+            SELECT kronos_raw_15min FROM trades
+            WHERE outcome IS NOT NULL AND features_stale = 0 AND kronos_raw_15min IS NOT NULL
+            UNION ALL
+            SELECT kronos_raw_15min FROM gate_rejections
+            WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL
+              AND shadow = 0 AND failed_gate != 9
+        )
+    """
+
     conn = sqlite3.connect(args.db)
     try:
-        rows = conn.execute(
-            "SELECT kronos_raw_15min, direction, outcome FROM trades "
-            "WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL "
-            "ORDER BY timestamp DESC LIMIT ?",
-            (args.window,),
-        ).fetchall()
+        total_available = conn.execute(_COUNT_QUERY).fetchone()[0]
+        rows = conn.execute(_UNION_QUERY, (args.window,)).fetchall()
     finally:
         conn.close()
 
     n = len(rows)
-    print(f"Training-ready rows (with kronos_raw_15min) in {args.db}: {n}")
-    if n < 200:
-        print(f"WARNING: only {n} rows have kronos_raw_15min — data is sparse, calibration may be unreliable")
+    print(f"Training-ready rows (trades + gate_rejections) in {args.db}: {total_available} available, using {n}")
+    if total_available < 200:
+        print(f"WARNING: only {total_available} combined rows — data is sparse, calibration may be unreliable")
 
-    if n < args.min_rows:
+    if total_available < args.min_rows:
         sys.exit(
-            f"Need ≥{args.min_rows} rows to fit calibrator; have {n}. "
+            f"Need ≥{args.min_rows} rows to fit calibrator; have {total_available}. "
             f"Continue running paper trading and re-run later."
         )
 
