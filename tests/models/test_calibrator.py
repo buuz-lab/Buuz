@@ -4,7 +4,7 @@ import tempfile
 import numpy as np
 import pytest
 
-from btc_kalshi_system.models.calibrator import Calibrator
+from btc_kalshi_system.models.calibrator import Calibrator, _encode_regime
 
 
 def _synthetic_data(n: int = 1000, seed: int = 42):
@@ -268,7 +268,7 @@ def test_transform_with_regime_differs_from_without():
 
 
 def test_transform_regime_unknown_uses_zero_encoding():
-    """Unknown regime string falls back to score=0.0 (same as ranging/high_uncertainty)."""
+    """Unknown regime string falls back to score=0.0, between ranging (0.3) and high_uncertainty (-0.3)."""
     cal = Calibrator()
     raw = np.array([0.1] * 300 + [0.9] * 300)
     outcomes = np.array([1.0] * 300 + [0.0] * 300)
@@ -276,7 +276,18 @@ def test_transform_regime_unknown_uses_zero_encoding():
     cal.fit(raw, outcomes, regimes=regimes)
     result_unknown = cal.transform(0.5, regime="garbage_regime")
     result_ranging = cal.transform(0.5, regime="ranging")
-    assert result_unknown == pytest.approx(result_ranging, abs=1e-9)
+    result_hu = cal.transform(0.5, regime="high_uncertainty")
+    # Unknown (0.0) sits between ranging (0.3) and high_uncertainty (-0.3)
+    assert result_hu <= result_unknown <= result_ranging
+
+
+def test_ranging_and_high_uncertainty_encoded_differently():
+    """ranging (0.3) and high_uncertainty (-0.3) must have distinct encodings so the
+    calibrator can learn that ranging signals are more reliable than high_uncertainty."""
+    assert _encode_regime("ranging") == pytest.approx(0.3)
+    assert _encode_regime("high_uncertainty") == pytest.approx(-0.3)
+    assert _encode_regime("ranging") != pytest.approx(_encode_regime("high_uncertainty"))
+    assert _encode_regime("unknown_junk") == pytest.approx(0.0)  # fallback unchanged
 
 
 def test_regime_save_load_preserves_aware_flag():

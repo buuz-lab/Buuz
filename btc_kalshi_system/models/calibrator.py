@@ -8,10 +8,10 @@ from sklearn.linear_model import LogisticRegression
 _MIN_SAMPLES = 100
 
 _REGIME_ENCODING: dict[str, float] = {
-    "trending_up": 1.0,
-    "trending_down": -1.0,
-    "ranging": 0.0,
-    "high_uncertainty": 0.0,
+    "trending_up":      1.0,
+    "trending_down":   -1.0,
+    "ranging":          0.3,   # 53.7% historical WR — mildly trustworthy
+    "high_uncertainty": -0.3,  # 45.2% historical WR — mildly penalised
 }
 
 
