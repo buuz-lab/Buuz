@@ -550,6 +550,11 @@ class KronosV2:
     # ── Main cycle ────────────────────────────────────────────────────────────
 
     def _run_cycle(self) -> None:
+        # Attempt router recovery before the circuit-breaker check so BOTH_FAILED
+        # can self-heal without a manual restart. _maybe_attempt_recovery is
+        # rate-limited internally (5-min interval) so this is cheap on every cycle.
+        self._router._maybe_attempt_recovery()
+
         # 1. Circuit breaker
         status = self._breaker.check()
         if status.tripped:

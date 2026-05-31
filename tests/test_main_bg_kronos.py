@@ -401,3 +401,37 @@ class TestProcessMarketSecondFetch:
         assert captured_fills[0] == 58, (
             f"Expected fill_price=58 (fresh ask from second fetch), got {captured_fills[0]}"
         )
+
+
+# ── Tests: _run_cycle recovery ────────────────────────────────────────────────
+
+
+class TestRunCycleRecovery:
+
+    def test_both_failed_recovery_attempted_before_breaker_check(self):
+        """_run_cycle must call _router._maybe_attempt_recovery() before the circuit
+        breaker check so BOTH_FAILED can self-heal without a manual service restart."""
+        system = _make_system()
+        call_order = []
+
+        system._router._maybe_attempt_recovery = MagicMock(
+            side_effect=lambda: call_order.append("recovery")
+        )
+
+        def _record_and_trip():
+            call_order.append("check")
+            result = MagicMock()
+            result.tripped = True
+            result.reason = MagicMock(value="both_clients_failed")
+            result.message = "Both clients failed"
+            return result
+
+        system._breaker = MagicMock()
+        system._breaker.check.side_effect = _record_and_trip
+
+        system._run_cycle()
+
+        assert "recovery" in call_order, "_maybe_attempt_recovery was never called"
+        assert "check" in call_order, "breaker.check was never called"
+        assert call_order.index("recovery") < call_order.index("check"), \
+            "recovery must be called before breaker check"

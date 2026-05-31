@@ -4,13 +4,44 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 23 complete. Gate 11 live. Regime weight 0.4→0.2. Disagreement neutralization live. **Next:** calibrator 883-row retrain, then regime v2 retrain after 7+ days of `candle_features`.
+**Current focus:** Session 23 complete (post-session additions: high_uncertainty Kelly shrink removed, calibrator regime encoding differentiated, retrained with Brier 0.2467→0.2449). **Next:** monitor calibrator compression loosening as data accumulates; regime v2 retrain after 7+ days of `candle_features` (~June 7).
 
 ---
 
 ## Current Progress
 
+**As of 2026-05-31 session 23 (post-session): Removed high_uncertainty Kelly shrink. Calibrator regime encoding differentiated (ranging=0.3, high_uncertainty=−0.3). Calibrator retrained: Brier 0.2467→0.2449. Compression map added to train_calibrator.py. 411 tests pass.**
+
 **As of 2026-05-31 session 23: Gate 11 + regime weight 0.4→0.2 + disagreement neutralization + router test fixes. 409 tests pass (395 + 14 new/fixed). ✅ Committed d229d1c. ✅ Service restarted.**
+
+**Session 23 (post-session): high_uncertainty Kelly shrink removal, calibrator encoding + retrain**
+
+**Changes — session 23 post-session:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `btc_kalshi_system/execution/pretrade_checklist.py` | **Removed high_uncertainty Kelly shrink**: the block that halved Kelly dollars + contracts when `deepseek_regime == "high_uncertainty"` is gone. Empirical reason: Gate 5 (regime-aware edge floor) and Gate 3 (high_uncertainty + thin edge) already apply the regime penalty. The Kelly shrink was double-penalizing high_uncertainty signals. Blocked high_uncertainty trades had 68.4% WR vs 45.2% WR for taken trades — the shrink was blocking the stronger signals. Tests updated: `test_high_uncertainty_kelly_same_as_neutral`, `test_high_uncertainty_kelly_contracts_same_as_neutral`, `test_high_uncertainty_strong_k15_no_longer_blocked_by_shrink`. | ✅ |
+| `btc_kalshi_system/models/calibrator.py` | **Regime encoding differentiated**: `ranging` 0.0→0.3 (53.7% historical WR, mildly trustworthy); `high_uncertainty` 0.0→−0.3 (45.2% historical WR, mildly penalised). Previously both mapped to 0.0 — the calibrator could not distinguish them, compressing all mid-range signals identically. Effect: k15_raw=0.80 → k15_cal now 0.5859 (was 0.5511); k15_raw=0.90 → 0.6069; k15_raw=1.00 → 0.6270. Brier improved 0.2467→0.2449 after retrain with new encoding. | ✅ |
+| `scripts/train_calibrator.py` | **Compression map output**: after every fit, prints `k15_raw → k15_cal` for checkpoints [0.60, 0.70, 0.80, 0.90, 1.00] using `regime="trending_up"`. Flag prints `← loosening!` when k15_cal > 0.65 at k15_raw ≥ 0.80 — key signal that calibrator is starting to trust strong signals. **Metadata auto-write**: `calibrator_last_trained.json` now written automatically after every real save (not on `--dry-run`). Previously required manual write. | ✅ |
+| `tests/models/test_calibrator.py` | **2 new calibrator encoding tests**: `test_ranging_and_high_uncertainty_encoded_differently` (asserts `ranging=0.3`, `high_uncertainty=-0.3`, unknown=0.0). `test_transform_regime_unknown_uses_zero_encoding` updated: now asserts `result_hu <= result_unknown <= result_ranging` (unknown=0.0 sits between ranging=0.3 and high_uncertainty=−0.3). Total: 411 tests pass. | ✅ |
+
+**Calibrator compression map after session 23 retrain (trending_up regime):**
+```
+k15_raw → k15_cal
+  0.60 → 0.5345
+  0.70 → 0.5614
+  0.80 → 0.5859
+  0.90 → 0.6069
+  1.00 → 0.6270
+```
+Watch k15_raw=0.80 → k15_cal: if it rises above ~0.65, calibrator is loosening (more data is teaching it to trust strong signals). Currently still well below — system has moderate data; compression will ease as more regime-diverse rows accumulate.
+
+**Why remove the high_uncertainty Kelly shrink:**
+- Gate 3 already blocks thin-edge high_uncertainty signals (`edge_from_center < 0.05`)
+- Gate 5 already requires 8% edge floor for high_uncertainty (vs regime-specific baseline)
+- Gate 8/8b apply Kalshi consensus pressure regardless of regime
+- Double-penalizing via Kelly shrink on top of these gates was over-filtering the 68.4% WR blocked category
+- With the shrink gone, high_uncertainty signals that clear all gates reach their full Kelly size
 
 **Session 23: Gate 11, regime weight, disagreement neutralization, router test fixes**
 
@@ -37,7 +68,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 - Restore `_REGIME_WEIGHT=0.4` and remove neutralization after regime v2 validates. See Future Roadmap — Phase 1b.
 
 **Next milestones:**
-1. **Calibrator 883-row retrain** (~today). Run `python3 scripts/train_calibrator.py --dry-run` before allowing save. See memory `project-calibrator-883-retrain`.
+1. **Monitor calibrator compression loosening.** Run `python3 scripts/train_calibrator.py --dry-run` periodically. Watch for k15_raw=0.80 → k15_cal rising above ~0.65 (flag: `← loosening!`). Currently 0.5859 — still compressed.
 2. **Monitor Gate 11 rejections.** Query: `SELECT COUNT(*), AVG(trade_price_cents), AVG(k15_calibrated_prob) FROM gate_rejections WHERE failed_gate=11 AND outcome IS NOT NULL`. Confirm win rate validates the 15% historical figure.
 3. **Gate 2 enforcement decision.** Run `python3 scripts/regime_confidence_tracker.py` after ~50 shadow trades.
 4. **Regime v2 retrain** after 7+ days of `candle_features` (~672 rows, ETA ~June 7). New label: `btc_direction = close > open`. Drop `kalshi_spread_normalized` (circular). Restore `_REGIME_WEIGHT=0.4` after retrain. Remove disagreement neutralization after regime v2 validates. See Future Roadmap — Phase 1b.
