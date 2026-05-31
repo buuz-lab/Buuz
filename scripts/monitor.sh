@@ -78,7 +78,7 @@ cpad_wr() {
 
 cpad_pnl() {
   local n="$1"
-  if [ -z "$n" ] || [ "$n" = "NULL" ]; then echo -e "${DIM}\$0.00${RESET}"; return; fi
+  if [ -z "$n" ] || [ "$n" = "NULL" ]; then echo -e "${DIM}pending ${RESET}"; return; fi
   if (( $(echo "$n >= 0" | bc -l) )); then echo -e "${BOLD}${GREEN}+\$${n}${RESET}"
   else echo -e "${BOLD}${RED}\$${n}${RESET}"; fi
 }
@@ -143,11 +143,11 @@ while true; do
 
   # ── Trades ────────────────────────────────────────────────────────────
   # trades.timestamp is ISO8601 UTC string; gate_rejections uses Unix epoch
-  # Columns: time(5) mkt(5) dir(3) fill(5) k15raw(6) k15cal(6) kelly(12) result(5)
+  # Columns: time(5) mkt(5) dir(3) fill(5) k15raw(6) k15cal(6) kelly(8) result(5) pnl(8)
   echo ""
   echo -e "${BOLD}${CYAN}▶ TRADES${RESET}  ${DIM}(recent 8)${RESET}"
-  printf "  ${DIM}%-5s  %-5s  %-3s  %-5s  %-6s  %-6s  %-12s  %-5s${RESET}\n" \
-    "time" "mkt" "dir" "fill" "k15raw" "k15cal" "kelly" "result"
+  printf "  ${DIM}%-5s  %-5s  %-3s  %-5s  %-6s  %-6s  %-8s  %-5s  %-8s${RESET}\n" \
+    "time" "mkt" "dir" "fill" "k15raw" "k15cal" "kelly" "result" "p&l"
 
   sqlite3 -separator '|' "$DB" "
     SELECT
@@ -157,19 +157,20 @@ while true; do
       fill_price_cents,
       COALESCE(ROUND(kronos_raw_15min,2),'N/A'),
       COALESCE(ROUND(k15_calibrated_prob,2),'N/A'),
-      kelly_contracts||'x$'||printf('%.2f', kelly_dollars),
+      kelly_contracts||'x',
       CASE WHEN outcome=1 THEN 'WIN'
            WHEN outcome=0 THEN 'LOSS'
-           ELSE '...' END
+           ELSE '...' END,
+      COALESCE(ROUND(pnl_dollars,2),'')
     FROM trades
     ORDER BY timestamp DESC LIMIT 8;
-  " 2>/dev/null | while IFS='|' read -r time mkt dir fill k15raw k15cal kelly result; do
+  " 2>/dev/null | while IFS='|' read -r time mkt dir fill k15raw k15cal kelly result pnl; do
     p_time=$(printf "%-5s" "$time")
     p_mkt=$(printf "%-5s" "$mkt")
     p_fill=$(printf "%-5s" "${fill}¢")
-    p_kelly=$(printf "%-12s" "$kelly")
+    p_kelly=$(printf "%-8s" "$kelly")
 
-    echo -e "  ${DIM}${p_time}${RESET}  ${p_mkt}  $(cpad_dir "$dir")  ${WHITE}${p_fill}${RESET}  $(cpad_prob "$k15raw" 6)  $(cpad_prob "$k15cal" 6)  ${YELLOW}${p_kelly}${RESET}  $(cpad_result "$result" 5)"
+    echo -e "  ${DIM}${p_time}${RESET}  ${p_mkt}  $(cpad_dir "$dir")  ${WHITE}${p_fill}${RESET}  $(cpad_prob "$k15raw" 6)  $(cpad_prob "$k15cal" 6)  ${YELLOW}${p_kelly}${RESET}  $(cpad_result "$result" 5)  $(cpad_pnl "$pnl")"
   done
 
   # ── P&L ───────────────────────────────────────────────────────────────
