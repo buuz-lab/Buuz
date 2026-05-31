@@ -567,38 +567,41 @@ def test_gate11_does_not_fire_no_direction(checklist):
     assert r.failed_gate != 11
 
 
-# ── High-uncertainty Kelly shrink ─────────────────────────────────────────────
+# ── High-uncertainty: no Kelly shrink in checklist ────────────────────────────
+# The 50% shrink in fusion.py already compresses `combined` toward 0.5, reducing
+# stated edge and feeding Gates 3 and 5. The checklist shrink was a redundant
+# sizing filter uncorrelated with signal quality (68.4% WR blocked, 45.2% taken).
 
-def test_high_uncertainty_passes_but_kelly_is_halved(checklist):
-    """high_uncertainty regime → checklist passes with 50% of normal kelly_dollars."""
+def test_high_uncertainty_kelly_same_as_neutral(checklist):
+    """high_uncertainty regime no longer shrinks kelly — fusion handles it."""
     uncertain = make_signal(calibrated_prob=0.75, deepseek_regime="high_uncertainty")
     normal    = make_signal(calibrated_prob=0.75, deepseek_regime="neutral")
     r_u = checklist.run(**base_kwargs(uncertain))
     r_n = checklist.run(**base_kwargs(normal))
     assert r_u.passed
-    assert abs(r_u.kelly_dollars - r_n.kelly_dollars * 0.5) < 0.01
+    assert abs(r_u.kelly_dollars - r_n.kelly_dollars) < 0.01
 
 
-def test_high_uncertainty_kelly_contracts_reduced(checklist):
-    """high_uncertainty kelly_contracts is less than neutral at same prob."""
+def test_high_uncertainty_kelly_contracts_same_as_neutral(checklist):
+    """high_uncertainty no longer reduces contracts vs neutral at same prob."""
     uncertain = make_signal(calibrated_prob=0.80, deepseek_regime="high_uncertainty")
     normal    = make_signal(calibrated_prob=0.80, deepseek_regime="neutral")
     r_u = checklist.run(**base_kwargs(uncertain))
     r_n = checklist.run(**base_kwargs(normal))
     assert r_u.passed
-    assert r_u.kelly_contracts < r_n.kelly_contracts
+    assert r_u.kelly_contracts == r_n.kelly_contracts
 
 
-def test_high_uncertainty_shrink_does_not_block(checklist):
-    """high_uncertainty should reduce size, never hard-block on its own."""
+def test_high_uncertainty_does_not_block(checklist):
+    """high_uncertainty should not hard-block on its own."""
     signal = make_signal(calibrated_prob=0.65, deepseek_regime="high_uncertainty")
     r = checklist.run(**base_kwargs(signal))
     assert r.passed
     assert r.kelly_contracts > 0
 
 
-def test_other_regimes_not_shrunk(checklist):
-    """ranging, trending_up, neutral regimes are not affected by the shrink."""
+def test_other_regimes_kelly_unchanged(checklist):
+    """ranging, trending_up, neutral regimes all produce the same kelly."""
     normal_kelly = None
     for regime in ("neutral", "ranging", "trending_up"):
         signal = make_signal(calibrated_prob=0.75, deepseek_regime=regime)
@@ -609,6 +612,24 @@ def test_other_regimes_not_shrunk(checklist):
         assert abs(r.kelly_dollars - normal_kelly) < 0.01, (
             f"Regime '{regime}' unexpectedly changed kelly: {r.kelly_dollars} vs {normal_kelly}"
         )
+
+
+def test_high_uncertainty_strong_k15_no_longer_blocked_by_shrink(checklist):
+    """Regression: high_uncertainty + strong k15 (0.75) that old shrink would kill.
+
+    Old path: compute_size=0.26, halved to 0.13, 0.13 < 0.25 (0.5×50¢) →
+    fail Gate 2 'rounds to 0 after high_uncertainty shrink'.
+    New path: no shrink → kelly_dollars=0.26 ≥ 0.25 → 1 contract → passes.
+    """
+    signal = make_signal(calibrated_prob=0.75, deepseek_regime="high_uncertainty")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 48
+    with patch.object(checklist._kelly, "compute_size", return_value=0.26), \
+         patch.object(checklist._kelly, "dollars_to_contracts", return_value=0):
+        r = checklist.run(**kw)
+    assert r.passed
+    assert r.kelly_contracts == 1
 
 
 # ── Gate 5 regime-aware edge floor ──────────────────────────────────────────
