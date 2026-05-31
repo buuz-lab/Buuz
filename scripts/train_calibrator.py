@@ -139,6 +139,16 @@ def main() -> None:
     cal.save(args.out)
     print(f"\nSaved calibrator to: {args.out}")
 
+    import datetime, json
+    meta = {
+        "trained_at_rows": n,
+        "trained_at_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "total_rows_at_train": total_available,
+    }
+    meta_path = Path(args.out).parent / "calibrator_last_trained.json"
+    meta_path.write_text(json.dumps(meta, indent=4))
+    print(f"Metadata written to: {meta_path}")
+
 
 if __name__ == "__main__":
     main()
