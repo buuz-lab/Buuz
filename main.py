@@ -1397,7 +1397,7 @@ class KronosV2:
             rows = self._db.execute(
                 """SELECT kronos_raw_15min, direction, outcome, deepseek_regime FROM (
                        SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM trades
-                       WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL
+                       WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL
                        UNION ALL
                        SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM gate_rejections
                        WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw_15min IS NOT NULL AND shadow = 0
@@ -1409,7 +1409,7 @@ class KronosV2:
                 rows = self._db.execute(
                     """SELECT kronos_raw, direction, outcome, NULL FROM (
                            SELECT kronos_raw, direction, outcome, timestamp FROM trades
-                           WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw IS NOT NULL
+                           WHERE outcome IS NOT NULL AND kronos_raw IS NOT NULL
                            UNION ALL
                            SELECT kronos_raw, direction, outcome, timestamp FROM gate_rejections
                            WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw IS NOT NULL AND shadow = 0

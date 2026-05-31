@@ -62,7 +62,6 @@ def main() -> None:
         SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM (
             SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM trades
             WHERE outcome IS NOT NULL
-              AND features_stale = 0
               AND kronos_raw_15min IS NOT NULL
             UNION ALL
             SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM gate_rejections
@@ -75,7 +74,7 @@ def main() -> None:
     _COUNT_QUERY = """
         SELECT COUNT(*) FROM (
             SELECT kronos_raw_15min FROM trades
-            WHERE outcome IS NOT NULL AND features_stale = 0 AND kronos_raw_15min IS NOT NULL
+            WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL
             UNION ALL
             SELECT kronos_raw_15min FROM gate_rejections
             WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL

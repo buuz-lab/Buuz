@@ -4,15 +4,38 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 24 complete. Fixed calibrator double-counting bug (shadow=0 filter). Tightened Gate 8 for high_uncertainty (flat 0.05 threshold). Added Gate 11 calibrator passthrough warning. 416 tests pass. **Next:** monitor calibrator compression loosening; regime v2 retrain after 7+ days of `candle_features` (~June 7).
+**Current focus:** Session 24 complete (two parts). Part 1: calibrator shadow=0 filter, Gate 8 high_uncertainty tightening, Gate 11 warning. Part 2: removed spurious `features_stale=0` filter from calibrator training — stale flags are for regime model only, not calibrator. Row count: 883→998. 416 tests pass. **Next:** monitor calibrator compression; regime v2 retrain ~June 7.
 
 ---
 
 ## Current Progress
 
-**As of 2026-05-31 session 24: Calibrator shadow filter fix, Gate 8 high_uncertainty tightening, Gate 11 passthrough warning. 416 tests pass.**
+**As of 2026-05-31 session 24 (part 2): Remove spurious features_stale=0 from calibrator training. Training-ready rows: 883→998. 416 tests pass.**
 
-**Changes — session 24:**
+**Changes — session 24 part 2:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `scripts/train_calibrator.py` | Removed `AND features_stale = 0` from both `_UNION_QUERY` (trades leg) and `_COUNT_QUERY`. `features_stale` flags bad regime model features, not bad `kronos_raw_15min` or outcome labels. The calibrator only trains on those two columns — stale flags were incorrectly excluding valid training rows. gate_rejections leg was already correct (no filter). Training-ready count: 883 → 998. | ✅ |
+| `main.py` | Same fix in `_refit_calibrator()`: removed `AND features_stale=0` from the trades leg of both the k15 primary UNION query and the k5 fallback UNION query. `aged_out=0` and `shadow=0` on gate_rejections untouched. | ✅ |
+
+**Why this matters:** The calibrator's training signal is solely `(kronos_raw_15min, outcome)`. A stale feature set means the regime model had bad inputs — the Kronos MC result and the market outcome are completely independent of Redis feature freshness. Excluding stale rows was throwing away ~115 valid training examples (the gap between 883 and 998).
+
+**Dry-run verification (post-fix):**
+```
+Training-ready rows: 998 available, using 300
+Pre-retrain Brier:  0.2416
+Post-retrain Brier: 0.2415  (marginal improvement; main gain is window is now 30% richer)
+Compression map (neutral regime):
+  0.80 → 0.5807
+  1.00 → 0.6416
+```
+
+---
+
+**As of 2026-05-31 session 24 (part 1): Calibrator shadow filter fix, Gate 8 high_uncertainty tightening, Gate 11 passthrough warning. 416 tests pass.**
+
+**Changes — session 24 (part 1):**
 
 | File | Change | Status |
 |------|--------|--------|
