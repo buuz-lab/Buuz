@@ -72,6 +72,13 @@ class PreTradeChecklist:
         if trade_price_cents < _MIN_TRADE_PRICE_CENTS:
             return fail(2, f"Trade price {trade_price_cents}¢ below minimum {_MIN_TRADE_PRICE_CENTS}¢ (extreme/illiquid market)")
 
+        # NOTE: Gate 11 uses signal.kronos_calibrated which equals kronos_raw while the
+        # calibrator is in passthrough mode. Once the calibrator activates and compresses
+        # strong signals (e.g. k15_raw=0.80 → k15_cal≈0.55), this gate will silently
+        # deactivate — calibrated values will not reach the 0.75 threshold. This is
+        # intentional: the calibrator's compression is the correct fix for overconfident
+        # signals, making this gate redundant. Monitor gate_rejections failed_gate=11
+        # counts after calibrator deploys to confirm.
         # Gate 11 — Overconfidence guard
         # Block YES trades where Kronos is at high confidence (k_cal > 0.75) but the
         # market prices strongly against us (YES fill < 45¢). In this zone, the market's
@@ -181,13 +188,24 @@ class PreTradeChecklist:
         # Gate 8 — Kalshi consensus hard block (confidence-aware threshold)
         # High-conviction signals (k15_cal far from 0.5) tolerate more Kalshi
         # disagreement. Low-conviction signals must respect the market more.
-        signal_confidence = abs(signal.calibrated_prob - 0.5)
-        if signal_confidence >= 0.30:     # k15_cal ≥ 0.80 or ≤ 0.20
-            gate8_base = 0.25
-        elif signal_confidence >= 0.15:   # k15_cal ≥ 0.65 or ≤ 0.35
-            gate8_base = 0.15
-        else:                             # k15_cal between 0.35 and 0.65
-            gate8_base = 0.10
+        if signal.deepseek_regime == "high_uncertainty":
+            # Flat threshold: confidence tiers are meaningless here because calibrator
+            # compression collapses calibrated_prob toward 0.5 in this regime.
+            # Kalshi accuracy > Kronos accuracy in high_uncertainty (54.9% vs 18.4%
+            # in losing periods) — tighter threshold weights Kalshi's view more heavily.
+            # Gate 5 already requires 8% Kronos edge; Kalshi opposing by nearly as much
+            # cancels that edge. 5% threshold is approximately half Gate 5's floor.
+            # Revisit confidence tiers after regime v2 + calibrator give reliable
+            # signal_confidence values.
+            gate8_base = 0.05
+        else:
+            signal_confidence = abs(signal.calibrated_prob - 0.5)
+            if signal_confidence >= 0.30:     # k15_cal ≥ 0.80 or ≤ 0.20
+                gate8_base = 0.25
+            elif signal_confidence >= 0.15:   # k15_cal ≥ 0.65 or ≤ 0.35
+                gate8_base = 0.15
+            else:                             # k15_cal between 0.35 and 0.65
+                gate8_base = 0.10
         oi_delta = signal.regime_features.get("oi_delta_pct", 0.0) if signal.regime_features else 0.0
         oi_squeeze = (oi_delta > 0.001) and (signal.direction == 0)
         effective_threshold = gate8_base / 4.0 if oi_squeeze else gate8_base

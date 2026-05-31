@@ -1400,7 +1400,7 @@ class KronosV2:
                        WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw_15min IS NOT NULL
                        UNION ALL
                        SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM gate_rejections
-                       WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw_15min IS NOT NULL
+                       WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw_15min IS NOT NULL AND shadow = 0
                    ) ORDER BY timestamp DESC LIMIT 300"""
             ).fetchall()
             refit_regimes: np.ndarray | None = None
@@ -1412,7 +1412,7 @@ class KronosV2:
                            WHERE outcome IS NOT NULL AND features_stale=0 AND kronos_raw IS NOT NULL
                            UNION ALL
                            SELECT kronos_raw, direction, outcome, timestamp FROM gate_rejections
-                           WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw IS NOT NULL
+                           WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw IS NOT NULL AND shadow = 0
                        ) ORDER BY timestamp DESC LIMIT 300"""
                 ).fetchall()
                 if not rows:

@@ -4,11 +4,38 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 23 complete (post-session additions: high_uncertainty Kelly shrink removed, calibrator regime encoding differentiated, retrained with Brier 0.2467→0.2449). **Next:** monitor calibrator compression loosening as data accumulates; regime v2 retrain after 7+ days of `candle_features` (~June 7).
+**Current focus:** Session 24 complete. Fixed calibrator double-counting bug (shadow=0 filter). Tightened Gate 8 for high_uncertainty (flat 0.05 threshold). Added Gate 11 calibrator passthrough warning. 416 tests pass. **Next:** monitor calibrator compression loosening; regime v2 retrain after 7+ days of `candle_features` (~June 7).
 
 ---
 
 ## Current Progress
+
+**As of 2026-05-31 session 24: Calibrator shadow filter fix, Gate 8 high_uncertainty tightening, Gate 11 passthrough warning. 416 tests pass.**
+
+**Changes — session 24:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `main.py` | **Fix double-counting in `_refit_calibrator()`**: Both UNION legs (k15 primary and k5 fallback) against `gate_rejections` now include `AND shadow = 0`. Gate 7 shadow rows (`shadow=1`) are real trades that also exist in `trades.db` — including them counted those outcomes twice in calibrator training. The schema comment already said "Any training query against gate_rejections MUST filter WHERE shadow = 0" but the implementation was missing the filter. | ✅ |
+| `btc_kalshi_system/execution/pretrade_checklist.py` | **Gate 8 regime-aware**: `high_uncertainty` now uses flat `gate8_base = 0.05` regardless of signal_confidence. Calibrator compression collapses `calibrated_prob` toward 0.5 in this regime → signal_confidence ≈ 0 → all high_uncertainty trades fell into the lowest tier (0.10), making tiers a no-op. Flat 0.05 ≈ half of Gate 5's 8% floor, weighting Kalshi more heavily (54.9% accuracy vs Kronos 18.4% in losing periods). OI squeeze still applies (÷4 → 0.0125 effective). | ✅ |
+| `btc_kalshi_system/execution/pretrade_checklist.py` | **Gate 11 calibrator warning**: 7-line comment above Gate 11 explaining that `kronos_calibrated == kronos_raw` in passthrough mode, and that once the calibrator activates and compresses k15_raw=0.80 → k15_cal≈0.55, Gate 11 will silently deactivate. No logic change. | ✅ |
+| `tests/execution/test_pretrade_checklist.py` | **2 new Gate 8 high_uncertainty tests**: `test_gate8_high_uncertainty_uses_flat_005_threshold` (prob=0.89, opposing=0.06 > 0.05 → blocks, even though neutral would use threshold=0.25); `test_gate8_high_uncertainty_same_signal_passes_in_neutral` (control: same signal in neutral → threshold=0.25, opposing=0.06 < 0.25 → passes). 416 tests pass. | ✅ |
+
+**Why Gate 8 flat threshold for high_uncertainty:**
+- Calibrator compression forces `calibrated_prob` → ~0.5 in high_uncertainty → `signal_confidence ≈ 0` → always lowest tier (0.10) — tiers were a no-op
+- Kalshi accuracy in this regime (54.9%) > Kronos (18.4%) — tighter threshold forces higher Kalshi alignment
+- 0.05 ≈ half of Gate 5's 8% edge floor; together they require Kronos edge AND Kalshi near-agreement
+
+**Why the calibrator shadow=0 filter matters:**
+- Gate 7 shadow rows (`shadow=1`) are inserted when CVD opposes direction but the trade proceeds. The same trade is also in `trades.db` with a resolved outcome.
+- Without `AND shadow=0`, the UNION included both the shadow row and the trades row for the same outcome — double-counting in calibrator training.
+
+**Next milestones:**
+1. **Monitor calibrator compression loosening.** Run `python3 scripts/train_calibrator.py --dry-run`. Watch k15_raw=0.80 → k15_cal rising above ~0.65 (`← loosening!`). Currently 0.5859.
+2. **Monitor Gate 8 high_uncertainty blocks.** `SELECT COUNT(*), AVG(outcome) FROM gate_rejections WHERE failed_gate=8 AND deepseek_regime='high_uncertainty' AND outcome IS NOT NULL`.
+3. **Regime v2 retrain** after 7+ days of `candle_features` (~672 rows, ETA ~June 7).
+
+---
 
 **As of 2026-05-31 session 23 (post-session): Removed high_uncertainty Kelly shrink. Calibrator regime encoding differentiated (ranging=0.3, high_uncertainty=−0.3). Calibrator retrained: Brier 0.2467→0.2449. Compression map added to train_calibrator.py. 411 tests pass.**
 

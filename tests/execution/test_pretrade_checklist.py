@@ -674,3 +674,36 @@ def test_gate5_trending_up_passes_with_small_edge(checklist):
     kw["best_bid_cents"] = 50  # spread=$0, min_required=$0.005
     r = checklist.run(**kw)
     assert r.passed
+
+
+# ── Gate 8: high_uncertainty flat threshold ───────────────────────────────────
+
+def test_gate8_high_uncertainty_uses_flat_005_threshold(checklist):
+    """high_uncertainty uses flat 0.05 Gate 8 threshold regardless of signal_confidence.
+
+    prob=0.89 → signal_confidence=0.39 ≥ 0.30 → would be gate8_base=0.25 in neutral.
+    In high_uncertainty: gate8_base=0.05.
+    fresh_kalshi_mid=0.44 → opposing=0.06 > 0.05 → Gate 8 blocks.
+    In neutral at same opposing=0.06 < 0.25 → Gate 8 would pass.
+    """
+    signal = make_signal(direction=1, calibrated_prob=0.89, deepseek_regime="high_uncertainty")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 48
+    kw["available_contracts"] = 200
+    kw["fresh_kalshi_mid"] = 0.44  # opposing=0.06 > 0.05 flat threshold
+    r = checklist.run(**kw)
+    assert not r.passed
+    assert r.failed_gate == 8
+
+
+def test_gate8_high_uncertainty_same_signal_passes_in_neutral(checklist):
+    """Control: same signal in neutral regime uses threshold=0.25, passes Gate 8 at opposing=0.06."""
+    signal = make_signal(direction=1, calibrated_prob=0.89, deepseek_regime="neutral")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 50
+    kw["best_bid_cents"] = 48
+    kw["available_contracts"] = 200
+    kw["fresh_kalshi_mid"] = 0.44  # opposing=0.06 < 0.25 → passes in neutral
+    r = checklist.run(**kw)
+    assert r.failed_gate != 8
