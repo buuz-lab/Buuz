@@ -146,7 +146,12 @@ def _make_position_monitor(regime_direction=0, kronos_prob=0.3, clf_none=False, 
     tmp.close()
     conn = sqlite3.connect(tmp.name)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS trades (trade_id TEXT PRIMARY KEY, exit_reason TEXT)
+        CREATE TABLE IF NOT EXISTS trades (
+            trade_id TEXT PRIMARY KEY,
+            exit_reason TEXT,
+            outcome INTEGER,
+            pnl_dollars REAL
+        )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS trade_snapshots (
@@ -299,3 +304,78 @@ def test_schema_migration_idempotent():
     for col_name, _ in _TRADES_COLUMN_MIGRATIONS:
         assert col_name in cols, f"Column {col_name} missing after migration"
     conn.close()
+
+
+# ── _execute_exit: exit order failure recovery ────────────────────────────────
+
+def test_exit_failure_resolves_outcome_from_finalized_market():
+    """When place_order raises, outcome is written to DB from Kalshi market result."""
+    monitor, db_path = _make_position_monitor(regime_direction=0, kronos_prob=0.3)
+    position = _make_position(direction=1, trade_id="fail-exit-trade")
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO trades (trade_id, exit_reason, outcome) VALUES (?, NULL, NULL)",
+        (position.trade_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    monitor.router.place_order.side_effect = Exception("BOTH_FAILED")
+    monitor.router._raw = MagicMock()
+    monitor.router._raw._request.return_value = {
+        "market": {"status": "finalized", "result": "yes"}
+    }
+
+    asyncio.run(monitor._execute_exit(position, "t5", 53, 55))
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT outcome, exit_reason FROM trades WHERE trade_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == 1, f"Expected outcome=1 (YES settled, direction=1), got {row[0]}"
+    assert "market_resolved" in (row[1] or ""), f"exit_reason should indicate market resolution, got {row[1]}"
+
+
+def test_exit_failure_logs_error_when_market_not_finalized():
+    """When place_order raises and market isn't settled yet, logs error without crashing."""
+    import contextlib
+    import io
+    from loguru import logger as _loguru
+
+    monitor, db_path = _make_position_monitor(regime_direction=0, kronos_prob=0.3)
+    position = _make_position(direction=1, trade_id="unresolved-trade")
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO trades (trade_id, exit_reason, outcome) VALUES (?, NULL, NULL)",
+        (position.trade_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    monitor.router.place_order.side_effect = Exception("BOTH_FAILED")
+    monitor.router._raw = MagicMock()
+    monitor.router._raw._request.return_value = {
+        "market": {"status": "open", "result": ""}
+    }
+
+    records = []
+    sid = _loguru.add(lambda msg: records.append(str(msg)), level="ERROR", format="{level}:{message}")
+    try:
+        asyncio.run(monitor._execute_exit(position, "t5", 53, 55))
+    finally:
+        _loguru.remove(sid)
+
+    # Outcome must remain NULL — market not settled
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT outcome FROM trades WHERE trade_id = ?", (position.trade_id,)
+    ).fetchone()
+    conn.close()
+    assert row[0] is None, f"Outcome should remain NULL for open market, got {row[0]}"
+    assert any("manual" in r.lower() or "not yet" in r.lower() or "finalized" in r.lower() for r in records), \
+        f"Expected an error log about manual resolution, got: {records}"

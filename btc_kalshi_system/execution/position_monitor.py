@@ -232,7 +232,43 @@ class PositionMonitor:
         except Exception as exc:
             logger.warning(
                 f"PositionMonitor: exit order failed for {position.trade_id}: {exc}. "
-                f"Position already removed from tracker — investigate Kalshi state manually."
+                f"Attempting to resolve outcome from Kalshi market result."
+            )
+            self._resolve_outcome_from_market(position)
+
+    def _resolve_outcome_from_market(self, position: "OpenPosition") -> None:
+        """Query Kalshi for market result and write outcome to DB when exit order failed."""
+        try:
+            resp = self.router._raw._request("GET", f"/trade-api/v2/markets/{position.ticker}")
+            market = resp.get("market", {})
+            status = market.get("status", "")
+            result = market.get("result", "")
+            if status != "finalized" or result not in ("yes", "no"):
+                logger.error(
+                    f"PositionMonitor: market {position.ticker} not yet finalized "
+                    f"(status={status!r}, result={result!r}). "
+                    f"Trade {position.trade_id} outcome must be resolved manually."
+                )
+                return
+            outcome = 1 if (
+                (result == "yes" and position.direction == 1)
+                or (result == "no" and position.direction == 0)
+            ) else 0
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE trades SET outcome = ?, exit_reason = ? WHERE trade_id = ?",
+                (outcome, "exit_failed_market_resolved", position.trade_id),
+            )
+            conn.commit()
+            conn.close()
+            logger.info(
+                f"PositionMonitor: resolved outcome={outcome} for {position.trade_id} "
+                f"from market result={result!r} (direction={position.direction})"
+            )
+        except Exception as exc:
+            logger.error(
+                f"PositionMonitor: could not resolve outcome for {position.trade_id}: {exc}. "
+                f"Manual fix required."
             )
 
     def _write_snapshot(self, data: dict) -> None:
