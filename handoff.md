@@ -4,42 +4,42 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 23 complete. Gate 11 (overconfidence guard) live. Regime weight reduced 0.4→0.2. 403 tests pass (401 + 4 new Gate 11). Next: calibrator 883-row retrain (check `python3 scripts/train_calibrator.py --dry-run`), Gate 2 enforcement after ~50 shadow trades, regime v2 retrain after 7+ days of `candle_features`.
+**Current focus:** Session 23 complete. Gate 11 live. Regime weight 0.4→0.2. Disagreement neutralization live. **Next:** calibrator 883-row retrain, then regime v2 retrain after 7+ days of `candle_features`.
 
 ---
 
 ## Current Progress
 
-**As of 2026-05-30 session 23: Gate 11 (overconfidence guard) + regime weight 0.4→0.2. 403 tests pass (401 + 4 new).**
+**As of 2026-05-31 session 23: Gate 11 + regime weight 0.4→0.2 + disagreement neutralization. 407 tests pass (395 + 12 new).**
 
-**Session 23: Gate 11 + regime weight reduction**
+**Session 23: Gate 11, regime weight, disagreement neutralization**
 
 **Changes — session 23:**
 
 | File | Change |
 |------|--------|
 | `btc_kalshi_system/execution/pretrade_checklist.py` | **Gate 11** (new): blocks YES trades where `kronos_calibrated > 0.75` AND `trade_price_cents < 45`. Post-May-26 data shows 15% win rate on 13 trades in this zone. Placed after Gate 2a (price floor), before Kelly computation. Constants `_OVERCONFIDENCE_K_CAL_FLOOR=0.75` and `_OVERCONFIDENCE_MAX_FILL_CENTS=45` defined locally inside `run()`. Only applies to direction=1 (YES). |
-| `btc_kalshi_system/signal/fusion.py` | **Regime weight 0.4→0.2**: `_KRONOS_WEIGHT=0.8`, `_REGIME_WEIGHT=0.2`. Regime model v1 has circular label (`direction==outcome`; `kalshi_implied_prob` is #1 feature at 19%). On bullish days model fires bearish and contaminates fusion. Restore to 0.4 after regime v2 retrains with `btc_direction` label. Comment added to `_REGIME_WEIGHT`. |
-| `tests/execution/test_pretrade_checklist.py` | **4 new Gate 11 tests**: `test_gate11_fires_high_kcal_low_fill_yes`, `test_gate11_does_not_fire_high_fill`, `test_gate11_does_not_fire_low_kcal`, `test_gate11_does_not_fire_no_direction`. **3 existing tests updated**: `test_gate2_depth_capped_to_available` and 2 Gate 8 regression tests moved from 29¢ → 50¢ fills (Gate 11 now correctly blocks the 29¢ high-confidence scenario). |
-| `tests/signal/test_fusion.py` | **5 tests updated** for new weights: `test_combined_weighted_average`, `test_combined_varies_with_regime_weight` (docstring), `test_high_uncertainty_shrinks_combined_toward_half`, `test_trending_up_regime_no_shrinkage`, `test_gate2_shadow_mode_does_not_block`. All expected values updated from `0.6*X + 0.4*Y` → `0.8*X + 0.2*Y`. |
+| `btc_kalshi_system/signal/fusion.py` | **Regime weight 0.4→0.2**: `_KRONOS_WEIGHT=0.8`, `_REGIME_WEIGHT=0.2`. Regime model v1 has circular label (`direction==outcome`; `kalshi_implied_prob` is #1 feature at 19%). Restore to 0.4 after regime v2 retrains. **Disagreement neutralization**: when `kronos_cal` and `regime_prob` are on opposite sides of 0.5, `_regime_in_fusion=0.5` (neutral) is used in the fusion formula instead of raw `regime_prob`. On agreement days regime is fully preserved. Gate 2 warning still logs raw `regime_prob`; `TradingSignal.regime_prob` stores raw value. Remove neutralization after regime v2 validates. |
+| `tests/execution/test_pretrade_checklist.py` | **4 new Gate 11 tests**: `test_gate11_fires_high_kcal_low_fill_yes`, `test_gate11_does_not_fire_high_fill`, `test_gate11_does_not_fire_low_kcal`, `test_gate11_does_not_fire_no_direction`. **3 existing tests updated**: `test_gate2_depth_capped_to_available` and 2 Gate 8 regression tests moved from 29¢ → 50¢ fills (Gate 11 correctly blocks the 29¢ high-confidence scenario). |
+| `tests/signal/test_fusion.py` | **5 tests updated** for new weights (0.8/0.2). **1 test updated** for neutralization: `test_gate2_shadow_mode_does_not_block` expected changed from `0.62` → `0.66` (regime neutralized on disagreement). **4 new neutralization tests**: `test_disagreement_neutralization_bullish_kronos_bearish_regime`, `test_disagreement_neutralization_bearish_kronos_bullish_regime`, `test_disagreement_neutralization_does_not_fire_on_agreement_bullish`, `test_disagreement_neutralization_does_not_fire_on_agreement_bearish`. |
 
 **Gate 11 detail:**
 - Fires when: `direction == 1 AND kronos_calibrated > 0.75 AND trade_price_cents < 45`
-- Uses `signal.kronos_calibrated` (k15-calibrated). With passthrough calibrator = k15_raw; after calibrator activates = compressed value. Gate fires on whatever the current calibrated value is.
+- Uses `signal.kronos_calibrated` (k15-calibrated). With passthrough calibrator = k15_raw; after calibrator activates = compressed value.
 - Does NOT apply to direction=0 (NO). NO at 35¢ = YES at 65¢ — market agreeing with Kronos, different dynamics.
-- Gate 8 doesn't catch this: at YES=35¢, opposing margin = 0.15 < Gate 8 threshold (0.25). Calibrator doesn't fix it either: k15≥0.8 shows 54% y_up rate in combined training data (gate rejections dilute inversion).
 
-**Regime weight detail (0.4→0.2):**
+**Regime weight + neutralization detail:**
 - Gate 2 stays shadow mode (`REGIME_GATE2_ENFORCING=False`) — unchanged.
-- Gate 5 and Gate 3 thresholds unchanged — the weight reduction naturally helps clearance without further adjustment.
-- Example: k15_cal=0.75, regime_prob=0.18 (bearish, wrong). Old: combined=0.522, edge at 50¢=0.022 → Gate 5 blocks. New: combined=0.636, edge=0.136 → passes.
-- Restore to 0.4 after regime v2 retrains with `btc_direction = close > open` label. See Future Roadmap.
+- Neutralization lives inside the `try:` block only. Bootstrap path (`except NotTrainedError:`) unchanged.
+- Effect: k15_cal=0.70, regime_prob=0.18 → `_regime_in_fusion=0.5` → combined=0.8×0.70+0.2×0.50=0.66 (vs 0.596 Task 2 alone, vs 0.522 old 0.6/0.4).
+- Minimum k15 to clear Gate 5 at 50¢ fill: 0.6875 (vs 0.75 Task 2 only; vs 0.65 no regime).
+- Restore `_REGIME_WEIGHT=0.4` and remove neutralization after regime v2 validates. See Future Roadmap — Phase 1b.
 
 **Next milestones:**
-0. **Calibrator 883-row retrain** (~1 day away). Run `python3 scripts/train_calibrator.py --dry-run` before allowing save. See memory `project-calibrator-883-retrain`.
-1. **Monitor Gate 11 rejections.** Query: `SELECT COUNT(*), AVG(trade_price_cents), AVG(k15_calibrated_prob) FROM gate_rejections WHERE failed_gate=11 AND outcome IS NOT NULL`. Confirm win rate validates the 15% historical figure.
-2. **Gate 2 enforcement decision.** Run `python3 scripts/regime_confidence_tracker.py` after ~50 shadow trades.
-3. **Regime v2 retrain** after 7+ days of `candle_features` (~672 rows). New label: `btc_direction = close > open`. Drop `kalshi_spread_normalized` (circular). Restore `_REGIME_WEIGHT=0.4` after retrain.
+1. **Calibrator 883-row retrain** (~today). Run `python3 scripts/train_calibrator.py --dry-run` before allowing save. See memory `project-calibrator-883-retrain`.
+2. **Monitor Gate 11 rejections.** Query: `SELECT COUNT(*), AVG(trade_price_cents), AVG(k15_calibrated_prob) FROM gate_rejections WHERE failed_gate=11 AND outcome IS NOT NULL`. Confirm win rate validates the 15% historical figure.
+3. **Gate 2 enforcement decision.** Run `python3 scripts/regime_confidence_tracker.py` after ~50 shadow trades.
+4. **Regime v2 retrain** after 7+ days of `candle_features` (~672 rows, ETA ~June 7). New label: `btc_direction = close > open`. Drop `kalshi_spread_normalized` (circular). Restore `_REGIME_WEIGHT=0.4` after retrain. Remove disagreement neutralization after regime v2 validates. See Future Roadmap — Phase 1b.
 
 ---
 
@@ -1223,6 +1223,8 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 - **Feed health check:** `redis-cli ttl regime:features` should return 400–600. If -2, feed is down. `redis-cli get regime:features:lkg` shows LKG age via `_lkg_written_at` field.
 
+- **Disagreement neutralization is a temporary patch for regime v1's circular label.** When `kronos_cal` and `regime_prob` are on opposite sides of 0.5, `_regime_in_fusion = 0.5` (neutral) is used instead of `regime_prob` in the fusion formula. This prevents bearish regime noise from dragging combined below Gate 5 threshold on bullish days. The raw `regime_prob` is still logged to `TradingSignal.regime_prob` and in the Gate 2 disagreement warning — only the fusion computation uses the neutralized value. **Remove this block after regime v2 deploys** (new label makes disagreements genuinely informative). The exact code to remove is the `_kronos_bullish != _regime_bullish` block in `fusion.py`'s `try:` branch.
+
 - **`candle_features` table is data-collection only.** It does NOT feed into any existing training pipeline. It logs regime features + `btc_direction` at every 15-min candle close to enable the future regime label change. The `btc_direction` column there is `1 if close > open` on the BRTI 15-min candle — independent of any Kronos signal. Do not use it for calibrator training (calibrator uses `kronos_raw_15min` + outcome, not `btc_direction`).
 
 - **`candle_features.candle_ts` is the open timestamp of the just-closed candle** (second-to-last row in 15-min OHLCV at log time), not the current time. The `UNIQUE` constraint on `candle_ts` makes writes idempotent — `INSERT OR IGNORE` is required.
@@ -1263,25 +1265,37 @@ Ordered by data requirements. Each item has a clear trigger condition before imp
 
 **Before next retrain:** manually compare fitted Brier vs passthrough Brier. See memory `project-calibrator-883-retrain`. Do NOT rely on `_prev_brier` auto-revert guard (stale from 129-row fit).
 
-### Phase 1b — Regime model v2 with clean label (~1–2 weeks, after candle_features has 7+ days)
+### Phase 1b — Regime model v2 with clean label (~1–2 weeks)
 
-**Context:** The current regime model (v1, session 21) was trained with label `direction == outcome` — "did Kronos get it right?" That label has two problems:
-1. **Circular:** `kalshi_implied_prob` is the #1 feature at 19% importance. The model is largely learning "when does Kalshi agree with Kronos?" — which is already captured by Gate 8. Kronos's job is to find edge *against* the market price, so using market price as a primary training signal is self-defeating.
-2. **Noisy:** Current label is coin-flip at the dataset level (320/657 trades right, 498/984 gate rejections right). The model can't learn much from a 50/50 label on 1099 rows.
+**Timeline:**
+- **ETA June 6–7:** `candle_features` hits 672 rows (7 days × 96/day). Logger started 2026-05-30.
+- **Day of training:** run updated `train_regime.py`, evaluate holdout (target Brier < 0.25, accuracy > 60%).
+- **Days 1–4 shadow:** keep Gate 2 shadow mode, watch whether new model's disagreements actually predict BTC direction.
+- **Day 5+ if clean:** restore `_REGIME_WEIGHT = 0.4`, remove disagreement neutralization from `fusion.py`, consider Gate 2 enforcement.
 
-**New label:** `btc_direction = 1 if 15-min candle close > open else 0`. Clean ground truth. The regime model becomes a BTC direction predictor, not a "Kronos success" predictor.
+**Why `candle_features` first:** Without the session 22 logger, retraining uses only ~1099 trade/rejection rows — same data, different label, marginal improvement. With 7 days of `candle_features`, you get ~672 independent rows (one per 15-min candle close), regardless of trade frequency. That's the 10× multiplier.
 
-**Why this requires `candle_features` first:** The "10× data multiplier" only materializes if features are logged at every 15-min candle boundary. Without the logger (session 22), you're retraining on the same 1099 trade/rejection rows with a different label — no data gain. With 7 days of `candle_features`, you have ~672 rows of clean labeled data independent of trade frequency.
+**Context:** Regime model v1 was trained with `direction == outcome` — "did Kronos get it right?" Two problems:
+1. **Circular:** `kalshi_implied_prob` at 19% importance → model learned "when does Kalshi agree with Kronos?" Gate 8 already captures this. The regime model's disagreements are largely noise — confirmed by Gate 2 shadow data (39 disagreements at 76% win rate on 2026-05-30).
+2. **Noisy label:** 50/50 at dataset level. The model can't learn much from a coin-flip label on 1099 rows.
 
-**Retrain spec (do both changes in one retrain):**
-1. **New training source:** `SELECT * FROM candle_features WHERE btc_direction IS NOT NULL` (plus optionally gate_rejections/trades with `btc_direction` derived from their outcome). Query trigger: `SELECT COUNT(*) FROM candle_features` ≥ 672.
-2. **Drop `kalshi_spread_normalized`:** Zero importance in v1 (near-zero variance range 0.00–0.02¢). Remove from `_FEATURE_ORDER` in 3 files (`regime_model.py`, `train_regime.py`, `fusion._regime_features()`). Model shrinks from 27 → 26 features. The 3-file feature order contract test will catch any missed file. **Note:** the feature column still exists in `candle_features` and `gate_rejections` tables — just stop including it in the feature vector.
-3. **Run `python3 scripts/train_regime.py --dry-run` first.** Expect: Brier < 0.25, accuracy > 60%, `kalshi_implied_prob` importance should drop significantly (no longer circular — it's now input to a BTC direction model, not a Kronos-success predictor).
-4. Deploy in shadow mode. The Gate 2 disagreement rate may increase because the model is now genuinely independent of Kronos. That's fine — collect data before enforcing.
+**New label:** `btc_direction = 1 if 15-min candle close > open else 0`. Clean ground truth from `candle_features.btc_direction`. The regime model becomes a genuine BTC direction predictor.
+
+**Retrain spec (both changes in one retrain):**
+1. **New training source:** `SELECT * FROM candle_features WHERE btc_direction IS NOT NULL`. Trigger: `SELECT COUNT(*) FROM candle_features` ≥ 672.
+2. **Drop `kalshi_spread_normalized`:** Zero importance in v1 (near-zero variance, 0.00–0.02¢). Remove from `_FEATURE_ORDER` in all 3 files (`regime_model.py`, `train_regime.py`, `fusion._regime_features()`). Model shrinks 27→26 features. `test_feature_order` will catch any missed file. Column stays in DB schemas.
+3. **Run `python3 scripts/train_regime.py --dry-run` first.** Expect: `kalshi_implied_prob` feature importance drops significantly (no longer circular).
+4. Deploy shadow mode. Gate 2 disagreement rate may increase — the model is now genuinely independent of Kronos. That's expected and fine.
+
+**After regime v2 deploys and validates:**
+- Remove disagreement neutralization from `fusion.py` (the `_kronos_bullish != _regime_bullish` block)
+- Restore `_REGIME_WEIGHT = 0.4` (and update `_KRONOS_WEIGHT = 0.6`)
+- Update test `test_gate2_shadow_mode_does_not_block` back to `expected = 0.6 * 0.70 + 0.4 * 0.30`
+- Consider Gate 2 enforcement after 50+ shadow validation trades
 
 **What NOT to do yet:**
-- Do NOT add `kronos_raw_15min`/`kronos_raw` as regime features. Not enough k15 rows per regime to be meaningful.
-- Do NOT implement dynamic weighting or hybrid Kelly until confidence-stratified accuracy data exists (~50+ Gate 2 shadow trades).
+- Do NOT add `kronos_raw_15min`/`kronos_raw` as regime features. Not enough k15 rows per regime.
+- Do NOT implement dynamic weighting or hybrid Kelly until confidence-stratified accuracy data exists (~50+ Gate 2 shadow trades with regime v2).
 
 ### Phase 2 — Dynamic weighting + hybrid Kelly (after 50+ Gate 2 shadow trades)
 

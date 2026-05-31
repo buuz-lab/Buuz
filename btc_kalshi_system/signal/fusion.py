@@ -171,7 +171,18 @@ class SignalFusionEngine:
                 if config.REGIME_GATE2_ENFORCING:
                     return None
 
-            combined = _KRONOS_WEIGHT * kronos_cal + _REGIME_WEIGHT * regime_prob
+            # Disagreement neutralization (session 23): when regime opposes Kronos direction,
+            # treat regime as neutral (0.5) to prevent downward drag on the combined signal.
+            # Regime v1 has circular label — disagreements are noise, not information. On
+            # agreement days regime contribution is fully preserved. Remove after regime v2
+            # deploys with btc_direction label. See handoff.md — Phase 1b.
+            _kronos_bullish = kronos_cal > 0.5
+            _regime_bullish = regime_prob > 0.5
+            if _kronos_bullish != _regime_bullish:
+                _regime_in_fusion = 0.5
+            else:
+                _regime_in_fusion = regime_prob
+            combined = _KRONOS_WEIGHT * kronos_cal + _REGIME_WEIGHT * _regime_in_fusion
             if deepseek_regime == "high_uncertainty":
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
             elif deepseek_regime == "ranging":

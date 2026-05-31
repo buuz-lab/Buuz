@@ -94,6 +94,7 @@ def test_consecutive_failures_reset_on_success():
 def test_both_failed_raises_runtime_error():
     router, raw, primary = make_router(primary_available=False)
     router._state = ClientState.BOTH_FAILED
+    router._last_recovery_attempt = time.time()  # suppress recovery so state stays BOTH_FAILED
 
     with pytest.raises(RuntimeError, match="Both Kalshi clients failed"):
         router.get_balance()
@@ -102,6 +103,7 @@ def test_both_failed_raises_runtime_error():
 def test_both_failed_does_not_call_raw():
     router, raw, _ = make_router(primary_available=False)
     router._state = ClientState.BOTH_FAILED
+    router._last_recovery_attempt = time.time()  # suppress recovery so state stays BOTH_FAILED
 
     with pytest.raises(RuntimeError):
         router.get_balance()
