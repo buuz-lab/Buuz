@@ -141,7 +141,9 @@ class PreTradeChecklist:
 
         # Gate 8b — Kalshi Kelly multiplier (continuous gradient reduction before hard block)
         # Sub-20c NO: Kalshi's extreme-bull price IS the mispricing being faded — skip multiplier.
-        is_sub20_no = signal.direction == 0 and trade_price_cents < 20
+        # same_timeframe_open=True means Kalshi's extreme price may reflect BTC genuinely
+        # moving against an open position — not a fresh mispricing. Apply Gate 8 normally.
+        is_sub20_no = signal.direction == 0 and trade_price_cents < 20 and not same_timeframe_open
         if not is_sub20_no:
             opposing_margin = max(0.0, (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid))
             _pre_mult_kelly_dollars = kelly_dollars

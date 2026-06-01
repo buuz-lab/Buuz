@@ -754,6 +754,27 @@ def test_gate8_sub20_no_exempt_from_consensus(checklist):
     assert r.failed_gate != 8
 
 
+def test_gate8_sub20_no_chasing_guard(checklist):
+    """sub-20c NO with same_timeframe_open=True does NOT get Gate 8 exemption.
+
+    Kalshi becoming extreme as BTC trends against an open position is categorically
+    different from a fresh entry into already-mispriced market. Gate 8 applies normally,
+    blocking the averaging-down trade that caused the historical $80 chasing loss.
+    """
+    signal = make_signal(direction=0, calibrated_prob=0.2, deepseek_regime="neutral")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 87
+    kw["best_bid_cents"] = 85   # NO fill = 15¢ < 20¢
+    kw["available_contracts"] = 500
+    kw["fresh_kalshi_mid"] = 0.87  # extreme opposing
+    kw["same_timeframe_open"] = True  # already in a trade — chasing guard activates
+    r = checklist.run(**kw)
+    assert not r.passed
+    # Gate 8b's Kalshi Kelly multiplier zeros kelly_dollars before Gate 8 is reached,
+    # so failure lands at Gate 2 — but the trade is correctly blocked either way.
+    assert r.failed_gate in (2, 8)
+
+
 def test_gate8b_sub20_no_kelly_not_multiplied(checklist):
     """NO fill < 20¢ bypasses Gate 8b — Kalshi Kelly multiplier not applied.
 
