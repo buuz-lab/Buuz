@@ -47,7 +47,7 @@ def get_stats(conn):
         SELECT
             COUNT(*),
             COUNT(*) FILTER (WHERE outcome IS NOT NULL),
-            SUM(CASE WHEN (direction=1 AND outcome=1) OR (direction=0 AND outcome=0) THEN 1 ELSE 0 END) FILTER (WHERE outcome IS NOT NULL),
+            SUM(CASE WHEN outcome=1 THEN 1 ELSE 0 END) FILTER (WHERE outcome IS NOT NULL),
             COALESCE(SUM(pnl_dollars) FILTER (WHERE outcome IS NOT NULL), 0),
             COUNT(*) FILTER (WHERE {ALL_21_FEATURES} AND outcome IS NOT NULL)
         FROM trades
@@ -64,18 +64,16 @@ def get_stats(conn):
 
 def get_streak(conn):
     rows = conn.execute("""
-        SELECT direction, outcome FROM trades
+        SELECT outcome FROM trades
         WHERE outcome IS NOT NULL
         ORDER BY timestamp DESC LIMIT 50
     """).fetchall()
     if not rows:
         return 0, None
-    first_dir, first_out = rows[0]
-    first_win = (first_dir == 1 and first_out == 1) or (first_dir == 0 and first_out == 0)
+    first_win = rows[0][0] == 1
     count = 0
-    for direction, outcome in rows:
-        is_win = (direction == 1 and outcome == 1) or (direction == 0 and outcome == 0)
-        if is_win == first_win:
+    for (outcome,) in rows:
+        if (outcome == 1) == first_win:
             count += 1
         else:
             break
@@ -119,7 +117,7 @@ def print_last5(conn):
         dir_str = "YES→UP" if direction == 1 else "NO→DOWN"
         if outcome is None:
             result = "OPEN"
-        elif (direction == 1 and outcome == 1) or (direction == 0 and outcome == 0):
+        elif outcome == 1:
             result = f"WIN  ${pnl:.2f}"
         else:
             result = f"LOSS ${pnl:.2f}"
@@ -176,7 +174,7 @@ while True:
             """).fetchall()
             for ts, ticker, direction, outcome, pnl in reversed(new):
                 arrow = "YES→UP" if direction == 1 else "NO→DOWN"
-                result = "WIN" if (direction == 1 and outcome == 1) or (direction == 0 and outcome == 0) else "LOSS"
+                result = "WIN" if outcome == 1 else "LOSS"
                 print(f"*** RESOLVED [placed {fmt_ts(ts)}] {ticker} {arrow} => {result}  pnl=${pnl:.2f}", flush=True)
             print(stat_line(wins, losses, pct, open_pos, net_pnl, tr, bar, tr_pct, streak_n, streak_type), flush=True)
             print_open_trades(conn)
