@@ -140,23 +140,18 @@ class PreTradeChecklist:
             kelly_dollars = kelly_contracts * (trade_price_cents / 100)
 
         # Gate 8b — Kalshi Kelly multiplier (continuous gradient reduction before hard block)
-        # Sub-20c NO: Kalshi's extreme-bull price IS the mispricing being faded — skip multiplier.
-        # same_timeframe_open=True means Kalshi's extreme price may reflect BTC genuinely
-        # moving against an open position — not a fresh mispricing. Apply Gate 8 normally.
-        is_sub20_no = signal.direction == 0 and trade_price_cents < 20 and not same_timeframe_open
-        if not is_sub20_no:
-            opposing_margin = max(0.0, (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid))
-            _pre_mult_kelly_dollars = kelly_dollars
-            kalshi_kelly_mult = max(0.0, 1.0 - opposing_margin / 0.30)
-            kelly_dollars *= kalshi_kelly_mult
-            kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
-            if kelly_contracts == 0:
-                if is_bootstrap and _pre_mult_kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
-                    kelly_contracts = 1
-                elif kelly_dollars >= (trade_price_cents / 100) * 0.5:
-                    kelly_contracts = 1
-                else:
-                    return fail(2, "Kelly size rounds to 0 contracts after Kalshi Kelly multiplier")
+        opposing_margin = max(0.0, (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid))
+        _pre_mult_kelly_dollars = kelly_dollars
+        kalshi_kelly_mult = max(0.0, 1.0 - opposing_margin / 0.30)
+        kelly_dollars *= kalshi_kelly_mult
+        kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
+        if kelly_contracts == 0:
+            if is_bootstrap and _pre_mult_kelly_dollars > 0 and 25 <= trade_price_cents <= 75:
+                kelly_contracts = 1
+            elif kelly_dollars >= (trade_price_cents / 100) * 0.5:
+                kelly_contracts = 1
+            else:
+                return fail(2, "Kelly size rounds to 0 contracts after Kalshi Kelly multiplier")
 
         # Drift Kelly shrink — 50% additional shrink when calibration drift detected
         if is_drifting:
@@ -206,34 +201,31 @@ class PreTradeChecklist:
         # Gate 8 — Kalshi consensus hard block (confidence-aware threshold)
         # High-conviction signals (k15_cal far from 0.5) tolerate more Kalshi
         # disagreement. Low-conviction signals must respect the market more.
-        # Sub-20c NO exempt: Kalshi pricing YES at 80-98% IS the mispricing being faded —
-        # 32W/0L historically. Gate 8b multiplier also skipped. See is_sub20_no above.
-        if not is_sub20_no:
-            if signal.deepseek_regime == "high_uncertainty":
-                # Flat threshold: confidence tiers are meaningless here because calibrator
-                # compression collapses calibrated_prob toward 0.5 in this regime.
-                # Kalshi accuracy > Kronos accuracy in high_uncertainty (54.9% vs 18.4%
-                # in losing periods) — tighter threshold weights Kalshi's view more heavily.
-                # Gate 5 already requires 8% Kronos edge; Kalshi opposing by nearly as much
-                # cancels that edge. 5% threshold is approximately half Gate 5's floor.
-                # Revisit confidence tiers after regime v2 + calibrator give reliable
-                # signal_confidence values.
-                gate8_base = 0.05
-            else:
-                signal_confidence = abs(signal.calibrated_prob - 0.5)
-                if signal_confidence >= 0.30:     # k15_cal ≥ 0.80 or ≤ 0.20
-                    gate8_base = 0.25
-                elif signal_confidence >= 0.15:   # k15_cal ≥ 0.65 or ≤ 0.35
-                    gate8_base = 0.15
-                else:                             # k15_cal between 0.35 and 0.65
-                    gate8_base = 0.10
-            oi_delta = signal.regime_features.get("oi_delta_pct", 0.0) if signal.regime_features else 0.0
-            oi_squeeze = (oi_delta > 0.001) and (signal.direction == 0)
-            effective_threshold = gate8_base / 4.0 if oi_squeeze else gate8_base
-            opposing = (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid)
-            if opposing > effective_threshold:
-                side = "NO→DOWN" if signal.direction == 0 else "YES→UP"
-                return fail(8, f"Kalshi consensus {fresh_kalshi_mid:.3f} opposes {side} (threshold {effective_threshold:.3f})", kalshi_mid=fresh_kalshi_mid)
+        if signal.deepseek_regime == "high_uncertainty":
+            # Flat threshold: confidence tiers are meaningless here because calibrator
+            # compression collapses calibrated_prob toward 0.5 in this regime.
+            # Kalshi accuracy > Kronos accuracy in high_uncertainty (54.9% vs 18.4%
+            # in losing periods) — tighter threshold weights Kalshi's view more heavily.
+            # Gate 5 already requires 8% Kronos edge; Kalshi opposing by nearly as much
+            # cancels that edge. 5% threshold is approximately half Gate 5's floor.
+            # Revisit confidence tiers after regime v2 + calibrator give reliable
+            # signal_confidence values.
+            gate8_base = 0.05
+        else:
+            signal_confidence = abs(signal.calibrated_prob - 0.5)
+            if signal_confidence >= 0.30:     # k15_cal ≥ 0.80 or ≤ 0.20
+                gate8_base = 0.25
+            elif signal_confidence >= 0.15:   # k15_cal ≥ 0.65 or ≤ 0.35
+                gate8_base = 0.15
+            else:                             # k15_cal between 0.35 and 0.65
+                gate8_base = 0.10
+        oi_delta = signal.regime_features.get("oi_delta_pct", 0.0) if signal.regime_features else 0.0
+        oi_squeeze = (oi_delta > 0.001) and (signal.direction == 0)
+        effective_threshold = gate8_base / 4.0 if oi_squeeze else gate8_base
+        opposing = (fresh_kalshi_mid - 0.5) if signal.direction == 0 else (0.5 - fresh_kalshi_mid)
+        if opposing > effective_threshold:
+            side = "NO→DOWN" if signal.direction == 0 else "YES→UP"
+            return fail(8, f"Kalshi consensus {fresh_kalshi_mid:.3f} opposes {side} (threshold {effective_threshold:.3f})", kalshi_mid=fresh_kalshi_mid)
 
         return ChecklistResult(
             passed=True,
