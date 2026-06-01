@@ -10,15 +10,14 @@ from btc_kalshi_system.signal.fusion import SignalFusionEngine
 
 
 _ALL_27_KEYS = [
+    # kalshi_implied_prob and kalshi_spread_normalized excluded — see regime_model.py
     "funding_rate", "funding_rate_trend", "oi_delta_pct", "cvd_normalized",
     "basis_spread_pct", "brti_volatility_1h", "cvd_velocity", "cvd_acceleration",
     "brti_momentum_5min", "brti_momentum_15min", "candle_progress",
-    "hour_sin", "hour_cos", "kalshi_implied_prob", "funding_window_proximity",
+    "hour_sin", "hour_cos", "funding_window_proximity",
     "trend_slope_1h", "trend_r2_1h", "hourly_sr_proximity", "range_breakout_flag",
     "tape_speed_tpm", "large_print_direction",
     "atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope", "skew_25d",
-    "kalshi_spread_normalized",
-    # Feature 28 (session 11)
     "btc_24h_return",
 ]
 
@@ -87,7 +86,7 @@ def test_regime_features_includes_all_27_keys():
     assert keys == _ALL_27_KEYS, (
         f"Key mismatch.\nExpected: {_ALL_27_KEYS}\nGot:      {keys}"
     )
-    assert len(keys) == 28
+    assert len(keys) == 26  # 28 minus kalshi_implied_prob and kalshi_spread_normalized
 
 
 # ── test_deribit_stale flags ──────────────────────────────────────────────────
@@ -141,18 +140,18 @@ def test_iv_rv_spread_defaults_to_zero_when_absent():
 # ── test_kalshi_spread_in_regime_features ─────────────────────────────────────
 
 def test_kalshi_spread_in_regime_features():
-    """update_kalshi_spread(0.05) → kalshi_spread_normalized == 0.05 in features."""
+    """kalshi_spread_normalized excluded from features dict to break Kalshi circularity."""
     engine = _make_engine(_base_ctx())
     engine.update_kalshi_spread(0.05)
     features, _, _, _ = engine._regime_features()
-    assert features["kalshi_spread_normalized"] == pytest.approx(0.05)
+    assert "kalshi_spread_normalized" not in features
 
 
 def test_kalshi_spread_defaults_to_zero():
-    """No update_kalshi_spread call → kalshi_spread_normalized == 0.0."""
+    """kalshi_spread_normalized excluded from features dict to break Kalshi circularity."""
     engine = _make_engine(_base_ctx())
     features, _, _, _ = engine._regime_features()
-    assert features["kalshi_spread_normalized"] == pytest.approx(0.0)
+    assert "kalshi_spread_normalized" not in features
 
 
 # ── test_pcr_oi_default_is_one ────────────────────────────────────────────────
@@ -184,8 +183,7 @@ def test_numeric_fallbacks_are_floats():
     """All 6 new features must be floats (not None) even when ctx provides nothing."""
     engine = _make_engine(_base_ctx())  # no deribit data at all
     features, _, _, _ = engine._regime_features()
-    for key in ("atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope",
-                "skew_25d", "kalshi_spread_normalized"):
+    for key in ("atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope", "skew_25d"):
         v = features[key]
         assert isinstance(v, float), f"{key} should be float, got {type(v)}"
         assert not math.isnan(v), f"{key} should not be NaN"

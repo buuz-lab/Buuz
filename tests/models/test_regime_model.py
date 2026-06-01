@@ -9,7 +9,7 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 def _synthetic_features(n: int = 200, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
-    X = rng.standard_normal((n, 28))
+    X = rng.standard_normal((n, 26))  # 26 features: kalshi_implied_prob + kalshi_spread_normalized removed
     y = (X[:, 0] > 0).astype(int)  # label = sign of first feature
     return X, y
 
@@ -30,7 +30,6 @@ def _feature_dict(seed: int = 0) -> dict:
         "candle_progress":         float(rng.uniform(0, 1)),
         "hour_sin":                float(rng.uniform(-1, 1)),
         "hour_cos":                float(rng.uniform(-1, 1)),
-        "kalshi_implied_prob":     float(rng.uniform(0.1, 0.9)),
         "funding_window_proximity": float(rng.uniform(0, 1)),
         "trend_slope_1h":          float(rng.uniform(-0.001, 0.001)),
         "trend_r2_1h":             float(rng.uniform(0, 1)),
@@ -38,14 +37,11 @@ def _feature_dict(seed: int = 0) -> dict:
         "range_breakout_flag":     float(rng.uniform(-1, 1)),
         "tape_speed_tpm":          float(rng.uniform(0, 5)),
         "large_print_direction":   float(rng.uniform(-1, 1)),
-        # Features 22-27: Deribit options + Kalshi spread
         "atm_iv":                  float(rng.uniform(20, 100)),
         "iv_rv_spread":            float(rng.uniform(-20, 30)),
         "pcr_oi":                  float(rng.uniform(0.5, 2.0)),
         "term_structure_slope":    float(rng.uniform(-0.3, 0.3)),
         "skew_25d":                float(rng.uniform(-10, 5)),
-        "kalshi_spread_normalized": float(rng.uniform(0, 0.2)),
-        # Feature 28
         "btc_24h_return":          float(rng.uniform(-0.3, 0.3)),
     }
 

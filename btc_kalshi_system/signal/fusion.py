@@ -410,6 +410,8 @@ class SignalFusionEngine:
         # OR (b) OKX funding/OI fetch failed with no Coinglass key (_okx_partial).
         okx_stale = (not ctx) or ctx.get("_lkg", False) or ctx.get("_okx_partial", False)
 
+        # kalshi_implied_prob and kalshi_spread_normalized intentionally excluded —
+        # regime model must be independent of Kalshi to avoid circularity with Gates 5/8.
         features = {
             "funding_rate":             funding_rate,
             "funding_rate_trend":       funding_rate_trend,
@@ -424,7 +426,6 @@ class SignalFusionEngine:
             "candle_progress":          candle_progress,
             "hour_sin":                 hour_sin,
             "hour_cos":                 hour_cos,
-            "kalshi_implied_prob":      kalshi_implied_prob,
             "funding_window_proximity": funding_window_proximity,
             "trend_slope_1h":           trend_slope_1h,
             "trend_r2_1h":              trend_r2_1h,
@@ -437,7 +438,6 @@ class SignalFusionEngine:
             "pcr_oi":                   pcr_oi,
             "term_structure_slope":     term_structure_slope,
             "skew_25d":                 skew_25d,
-            "kalshi_spread_normalized": kalshi_spread_normalized,
             "btc_24h_return":           btc_24h_return,
         }
         return features, stale, deribit_stale, okx_stale

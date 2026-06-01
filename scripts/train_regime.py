@@ -84,6 +84,8 @@ from btc_kalshi_system.models.regime_model import RegimeModel
 # Must match _FEATURE_ORDER in regime_model.py and the keys returned by
 # fusion._regime_features() — a mismatch silently corrupts the trained model.
 _FEATURE_COLS = [
+    # kalshi_implied_prob and kalshi_spread_normalized excluded — regime model must be
+    # independent of Kalshi to avoid circularity with Gates 5/8. See regime_model.py.
     "funding_rate",
     "funding_rate_trend",
     "oi_delta_pct",
@@ -97,7 +99,6 @@ _FEATURE_COLS = [
     "candle_progress",
     "hour_sin",
     "hour_cos",
-    "kalshi_implied_prob",
     "funding_window_proximity",
     "trend_slope_1h",
     "trend_r2_1h",
@@ -105,14 +106,13 @@ _FEATURE_COLS = [
     "range_breakout_flag",
     "tape_speed_tpm",
     "large_print_direction",
-    # Features 22-27: Deribit options + Kalshi spread (session 6)
+    # Deribit options (session 6) — independent of Kalshi
     "atm_iv",
     "iv_rv_spread",
     "pcr_oi",
     "term_structure_slope",
     "skew_25d",
-    "kalshi_spread_normalized",
-    # Feature 28: 24h BTC price return context (session 11)
+    # 24h BTC price return context (session 11)
     "btc_24h_return",
 ]
 
@@ -138,7 +138,6 @@ ORDER BY timestamp ASC
 
 _EXTRA_FILTERS_20 = """AND cvd_velocity IS NOT NULL
   AND brti_momentum_5min IS NOT NULL
-  AND kalshi_implied_prob IS NOT NULL
   AND funding_window_proximity IS NOT NULL
   AND large_print_direction IS NOT NULL
   AND COALESCE(okx_stale, 0) = 0"""

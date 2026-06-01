@@ -5,6 +5,9 @@ import numpy as np
 import xgboost as xgb
 
 _FEATURE_ORDER = [
+    # Market microstructure — no Kalshi features so regime model is independent
+    # of the same Kalshi signal used in Gates 5 and 8. Circularity was: Kalshi →
+    # regime_prob → combined signal → edge vs Kalshi price → Kalshi consensus block.
     "funding_rate",
     "funding_rate_trend",
     "oi_delta_pct",
@@ -18,7 +21,6 @@ _FEATURE_ORDER = [
     "candle_progress",
     "hour_sin",
     "hour_cos",
-    "kalshi_implied_prob",
     "funding_window_proximity",
     "trend_slope_1h",
     "trend_r2_1h",
@@ -26,14 +28,13 @@ _FEATURE_ORDER = [
     "range_breakout_flag",
     "tape_speed_tpm",
     "large_print_direction",
-    # Features 22-27: Deribit options + Kalshi spread (session 6)
+    # Deribit options (session 6) — independent of Kalshi
     "atm_iv",
     "iv_rv_spread",
     "pcr_oi",
     "term_structure_slope",
     "skew_25d",
-    "kalshi_spread_normalized",
-    # Feature 28: 24h BTC price return context (session 11)
+    # 24h BTC price return context (session 11) — XGBoost handles NaN rows
     "btc_24h_return",
 ]
 

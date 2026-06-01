@@ -40,7 +40,6 @@ _FRESH_FILTER = (
     _LEGACY_FILTER
     + " AND cvd_velocity IS NOT NULL"
     + " AND brti_momentum_5min IS NOT NULL"
-    + " AND kalshi_implied_prob IS NOT NULL"
     + " AND funding_window_proximity IS NOT NULL"
     + " AND large_print_direction IS NOT NULL"
 )

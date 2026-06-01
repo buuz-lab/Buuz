@@ -289,20 +289,11 @@ def test_funding_window_proximity_at_midpoint_is_zero():
 # ── kalshi_implied_prob stale ─────────────────────────────────────────────────
 
 def test_kalshi_implied_prob_missing_sets_stale():
-    """kalshi_mid_cents absent → implied_prob = 0.5 and stale = True."""
+    """kalshi_mid_cents absent → stale = True (kalshi_implied_prob excluded from features dict)."""
     engine = _make_engine(ctx={"funding_rate": 0.0001, "cvd_normalized": 0.3})
     features, stale, _, _ = engine._regime_features()
-    assert features["kalshi_implied_prob"] == pytest.approx(0.5)
+    assert "kalshi_implied_prob" not in features  # removed to break Kalshi circularity
     assert stale is True
-
-
-def test_kalshi_implied_prob_correct_conversion():
-    """mid_cents = 65.0 → kalshi_implied_prob = 0.65."""
-    engine = _make_engine(ctx={
-        "funding_rate": 0.0001, "cvd_normalized": 0.3, "kalshi_mid_cents": 65.0
-    })
-    features, _, _, _ = engine._regime_features()
-    assert features["kalshi_implied_prob"] == pytest.approx(0.65)
 
 
 # ── CVD buffer stale-timestamp detection ──────────────────────────────────────
