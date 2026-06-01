@@ -415,15 +415,17 @@ def test_min_price_blocks_yes_at_low_cents(checklist):
     assert not r.passed and r.failed_gate == 2
     assert "below minimum" in r.failed_reason
 
-def test_min_price_blocks_no_at_low_cents(checklist):
-    """NO trade where 100-bid=15¢ is also rejected (direction=0, bid=85)."""
-    signal = make_signal(direction=0, calibrated_prob=0.52)
+def test_min_price_allows_no_at_low_cents(checklist):
+    """NO at sub-20¢ fill (Kalshi prices YES at 85-98¢) is NOT blocked — 32W/0L historically."""
+    signal = make_signal(direction=0, calibrated_prob=0.2, deepseek_regime="ranging")
     kw = base_kwargs(signal)
     kw["best_ask_cents"] = 87
-    kw["best_bid_cents"] = 85   # NO price = 100-85 = 15¢
+    kw["best_bid_cents"] = 85   # NO fill = 100-85 = 15¢
+    kw["available_contracts"] = 500
+    kw["fresh_kalshi_mid"] = 0.15  # Kalshi prices YES at 85¢, agrees with our NO
     r = checklist.run(**kw)
-    assert not r.passed and r.failed_gate == 2
-    assert "below minimum" in r.failed_reason
+    # Gate 2a must not block this — NO direction is exempt from minimum price filter
+    assert r.failed_gate != 2
 
 def test_min_price_allows_trade_at_boundary(checklist):
     """Trade at exactly 20¢ is allowed through the price filter."""

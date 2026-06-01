@@ -65,12 +65,15 @@ class PreTradeChecklist:
             trade_price_cents = 100 - best_bid_cents
         market_price = trade_price_cents / 100
 
-        # Gate 2a — Minimum price filter: reject extreme-priced markets.
-        # Sub-20¢ contracts require 100-400+ contracts for any meaningful dollar
-        # size, exhausting orderbook depth every time. Historically 0W/10L at ≤18¢.
+        # Gate 2a — Minimum price filter (YES direction only).
+        # YES at sub-20¢: 0W/10L historically — market pricing UP >80¢ is too
+        # expensive for meaningful Kronos edge. NOT applied to NO direction:
+        # NO at sub-20¢ fill means Kalshi prices YES at 80-98¢ (extreme bull).
+        # When k15 disagrees in these setups, NO has gone 32W/0L historically —
+        # Kalshi extreme-bull mispricing that k15 correctly fades.
         _MIN_TRADE_PRICE_CENTS = 20
-        if trade_price_cents < _MIN_TRADE_PRICE_CENTS:
-            return fail(2, f"Trade price {trade_price_cents}¢ below minimum {_MIN_TRADE_PRICE_CENTS}¢ (extreme/illiquid market)")
+        if signal.direction == 1 and trade_price_cents < _MIN_TRADE_PRICE_CENTS:
+            return fail(2, f"Trade price {trade_price_cents}¢ below minimum {_MIN_TRADE_PRICE_CENTS}¢ (YES at extreme price, 0W/10L historically)")
 
         # NOTE: Gate 11 uses signal.kronos_calibrated which equals kronos_raw while the
         # calibrator is in passthrough mode. Once the calibrator activates and compresses
