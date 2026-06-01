@@ -488,7 +488,7 @@ class KronosV2:
             try:
                 if (
                     self._cached_kronos is not None
-                    and time.time() - self._cached_kronos["computed_at"] > 360
+                    and time.time() - self._cached_kronos["computed_at"] > 480
                 ):
                     logger.error(
                         "WATCHDOG: Kronos cache stale — background loop may be stuck"
