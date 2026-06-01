@@ -4,11 +4,56 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 24 complete (two parts). Part 1: calibrator shadow=0 filter, Gate 8 high_uncertainty tightening, Gate 11 warning. Part 2: removed spurious `features_stale=0` filter from calibrator training — stale flags are for regime model only, not calibrator. Row count: 883→998. 416 tests pass. **Next:** monitor calibrator compression; regime v2 retrain ~June 7.
+**Current focus:** Session 25 complete. P&L convention restored (outcome=1=WIN all directions). Sub-20c NO setup confirmed 0W/10L — Gate 8/8b exemption reverted. Kalshi features removed from regime model to break circularity. `train_regime.py` rewritten to use `candle_features` with true `btc_direction` label (close>open). `regime.pkl` deleted — system in bootstrap mode. **Next:** regime v2 retrain when `candle_features` hits 672 rows (~June 6–7). After retrain: remove disagreement neutralization, restore `_REGIME_WEIGHT=0.4`.
 
 ---
 
 ## Current Progress
+
+**As of 2026-06-01 session 25: P&L fix, Kalshi decoupling, train_regime.py rewrite. System in bootstrap mode. 417 tests pass.**
+
+**Changes — session 25:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `btc_kalshi_system/portfolio/monitor.py` | **P&L convention restored**: NO branch uses `outcome==1` for WIN (was incorrectly changed to `outcome==0` in a prior session). WIN formula: `+contracts * (100 - fill_price_cents) / 100`. LOSS formula: `-contracts * fill_price_cents / 100`. | ✅ |
+| `scripts/monitor_trades.py` | Reverted 4 places (get_stats, get_streak, print_last5, resolution alert) from direction-aware WIN counting back to simple `outcome==1`. | ✅ |
+| `trades.db` | All 351 NO trades recalculated with correct `pnl_dollars` via SQL UPDATE. True all-time P&L: **-$192.55** (the previous +$2,000 figure was fabricated by inverted P&L formula). | ✅ |
+| `btc_kalshi_system/execution/pretrade_checklist.py` | **Reverted sub-20c NO exemption**: Gate 8/8b now apply unconditionally to all trades. Sub-20c NO setup was 0W/10L (−$146.30) — the prior 32W/0L was based on the inverted win-counting formula. | ✅ |
+| `btc_kalshi_system/models/regime_model.py` | **Removed `kalshi_implied_prob` and `kalshi_spread_normalized`** from `_FEATURE_ORDER`. Now 26 features. Kalshi was feature #1 at 19% importance — creating circularity: Kalshi → regime_prob (20% of combined signal) → Gate 5 edge vs Kalshi price → Gate 8 Kalshi consensus block. | ✅ |
+| `btc_kalshi_system/signal/fusion.py` | Both Kalshi features still computed (for other uses) but excluded from the returned `_regime_features()` dict. Comment added: `# kalshi_implied_prob and kalshi_spread_normalized intentionally excluded`. | ✅ |
+| `scripts/train_regime.py` | **Complete rewrite**: training source changed from `trades` table to `candle_features` table. Label changed from circular `(direction == outcome)` to true `btc_direction` (close > open) computed at every 15-min candle close regardless of whether a trade was placed. `_FEATURE_COLS = list(_FEATURE_ORDER)` auto-syncs. Min rows: 672 (7 days). Removed gate_rejections inclusion and Kronos agreement metric. | ✅ |
+| `scripts/regime_health_check.py` | Removed `AND kalshi_implied_prob IS NOT NULL` from `_FRESH_FILTER`. | ✅ |
+| `models/regime.pkl` | **Deleted**. System now in bootstrap mode: `combined = 0.5 + (kronos_cal - 0.5) * 0.8`. | ✅ |
+| `tests/` (multiple) | Updated count assertions (28→26), removed kalshi entries from feature fixtures, fixed `test_kalshi_spread_*` to assert key absent not value zero. 417 tests pass. | ✅ |
+
+**Why these changes matter:**
+
+*P&L fix:* A prior session inverted the NO branch — `outcome==0` treated as WIN for NO trades. This made 10 losing sub-20c NO trades appear as 10 wins, and reported all-time P&L as +$2,000. True P&L is -$192.55.
+
+*Circularity break:* `kalshi_implied_prob` was the #1 regime feature at 19% importance. This meant Kalshi price already influenced `combined_prob` (via regime at 20% weight), then `combined_prob` determined the edge vs Kalshi price (Gate 5), then Kalshi price blocked trades (Gate 8). The same input appeared at every stage. Removing it makes the regime model a truly independent signal.
+
+*Label fix:* Training on `direction==outcome` ("did Kronos get it right?") only on Kalshi-gate-filtered trade samples is doubly circular — the label depends on gate decisions and the features being predicted. `btc_direction = close > open` is clean ground truth on every 15-min candle.
+
+**Real P&L summary (as of session 25):**
+- All-time: **-$192.55** (346W / 321L, 51.9% WR)
+- Avg win: $7.02 | Avg loss: $8.17 — negative edge ratio
+- Biggest drag: ranging regime (277 trades, 44-47% WR, -$437 total)
+- W21 (-$166.84): destroyed by May 25 sub-20c NO losses (-$108) and May 28 high_uncertainty YES collapse (-$78)
+
+**Current system state:**
+- Bootstrap mode: `combined = 0.5 + (kronos_cal - 0.5) * 0.8` (Kronos-only signal, 0.8× shrink)
+- `candle_features` table: ~172 rows (started May 31), ~143 clean (features_stale=0)
+- ETA for 672 rows: ~June 6–7 → then run `python3 scripts/train_regime.py`
+- After retrain: remove disagreement neutralization from fusion.py, restore `_REGIME_WEIGHT=0.4`
+
+**Next milestones:**
+1. **Regime v2 retrain** (~June 6–7): `python3 scripts/train_regime.py --dry-run` first, then save + restart.
+2. **After retrain**: remove disagreement neutralization block in `fusion.py` (comment says "Remove after regime v2 deploys"). Restore `_REGIME_WEIGHT=0.4`.
+3. **Gate 4 (rolling edge circuit breaker)**: currently hardcoded `True` in paper mode (`main.py` line 709). Consider enabling with a loose threshold to get signal about edge quality.
+4. **Ranging regime gate**: -$437 drag from 277 trades at 44-47% WR. Consider tightening Gate 3 or adding a new gate to reduce sizing in ranging.
+
+---
 
 **As of 2026-05-31 session 24 (part 2): Remove spurious features_stale=0 from calibrator training. Training-ready rows: 883→998. 416 tests pass.**
 
@@ -897,15 +942,15 @@ Historical real blocks (before shadow mode) remain in the table with `shadow=0`.
 
 ## Architecture
 
-**27-feature `_FEATURE_ORDER`** (identical in `regime_model.py`, `train_regime.py`, and `fusion._regime_features()` dict keys — mismatch silently corrupts training). Features 1–21 are live; features 22–27 added in session 6:
+**26-feature `_FEATURE_ORDER`** (identical in `regime_model.py`, `train_regime.py`, and `fusion._regime_features()` dict keys — mismatch silently corrupts training). `kalshi_implied_prob` and `kalshi_spread_normalized` removed in session 25 to break Kalshi circularity.
 ```
 funding_rate, funding_rate_trend, oi_delta_pct, cvd_normalized, basis_spread_pct,
 brti_volatility_1h, cvd_velocity, cvd_acceleration, brti_momentum_5min,
-brti_momentum_15min, candle_progress, hour_sin, hour_cos, kalshi_implied_prob,
+brti_momentum_15min, candle_progress, hour_sin, hour_cos,
 funding_window_proximity, trend_slope_1h, trend_r2_1h, hourly_sr_proximity,
 range_breakout_flag, tape_speed_tpm, large_print_direction,
 atm_iv, iv_rv_spread, pcr_oi, term_structure_slope, skew_25d,
-kalshi_spread_normalized
+btc_24h_return
 ```
 
 **Feature sources:**
@@ -916,11 +961,11 @@ kalshi_spread_normalized
 | `brti_momentum_*`, `candle_progress`, `hour_*`, `trend_*`, `hourly_sr_proximity`, `range_breakout_flag` | `fusion._regime_features()` from OHLCV |
 | `tape_speed_tpm` | `store.get_raw_ticks(60)` |
 | `large_print_direction` | `derivatives_feed.py` fetch_trades (net dir from prints > 2× avg size) |
-| `kalshi_implied_prob` | `market_context["kalshi_mid_cents"]` / 100 |
 | `funding_window_proximity` | UTC time proximity to 00/08/16h funding |
 | `atm_iv`, `pcr_oi`, `term_structure_slope`, `skew_25d` | `deribit_options_feed.py` → Redis `options:features` |
 | `iv_rv_spread` | Derived in `_get_market_context()`: `atm_iv − brti_volatility_1h` |
-| `kalshi_spread_normalized` | Inline in `_process_market()` via `update_kalshi_spread()` |
+| `btc_24h_return` | `fusion._regime_features()` from 1h OHLCV (26 candles); defaults 0.0 when < 25 candles |
+| `kalshi_implied_prob`, `kalshi_spread_normalized` | **Excluded from model** (session 25) — computed but not in feature dict. Removes Kalshi circularity. |
 
 **Dynamic Kelly shrinks** (multiplicative, applied after existing cap):
 | Condition | Shrink |
