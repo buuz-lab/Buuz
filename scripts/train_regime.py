@@ -1,294 +1,133 @@
 """
-Train the RegimeModel from instrumented trades + gate_rejections in trades.db.
+Train the RegimeModel from candle_features in trades.db.
 
-Run this script once you have ≥500 qualifying rows combined (trades + gate
-rejections).  Gate rejections are included by default to reduce selection bias —
-placed trades cleared all gates and skew toward higher-confidence signals.
+Training source
+---------------
+candle_features — logged at every 15-min BTC candle close, regardless of whether
+a trade was placed.  This eliminates the selection bias of training on placed
+trades (which cleared all Kalshi-based gates and skew the sample).
+
+Run once candle_features has ≥672 rows (7 days × 96 candles/day).
 
 Usage:
     python3 scripts/train_regime.py [--db trades.db] [--out models/regime.pkl]
-                                    [--test-size 100] [--min-rows 500] [--dry-run]
-                                    [--trades-only]
+                                    [--test-size 100] [--min-rows 672] [--dry-run]
 
 Filtering rules
 ---------------
-A trade row qualifies for training iff:
-    features_stale  = 0          (Redis regime:features was fresh at trade time)
-    funding_rate    IS NOT NULL  (excludes pre-instrumentation rows from before
-                                  the schema migration that added these columns)
-    outcome         IS NOT NULL  (trade has been resolved by Kalshi)
-
-A gate_rejection row qualifies iff:
-    shadow          = 0          (real block, not CVD shadow logging)
-    aged_out        = 0          (resolved with a real outcome, not timed out)
-    outcome         IS NOT NULL
-    features        IS NOT NULL  (has captured feature JSON blob)
-    The JSON blob must contain funding_rate (same era gate as trades filter).
-
-Gate rejections store 21/28 features in a JSON blob; the 7 Deribit+btc_24h_return
-features (added session 6+) are absent and filled with NaN.  XGBoost handles NaN
-natively by learning a default split direction for missing values.
+A candle_features row qualifies iff:
+    features_stale  = 0            (Redis regime:features was fresh at candle close)
+    btc_direction   IS NOT NULL    (candle resolved — close > open recorded)
+    funding_rate    IS NOT NULL    (post-instrumentation rows only)
+    cvd_velocity    IS NOT NULL    (21-feature era)
+    large_print_direction IS NOT NULL
 
 Label semantics
 ---------------
-We're training to predict "did the 15-min BTC market close UP" — NOT "did this
-particular trade win." Those are different on short trades:
+btc_direction = 1 if 15-min candle close > open, else 0.
 
-    up_label = 1 if (direction == outcome) else 0
-
-  • direction=1 (we bet up), outcome=1 (won)  → market went up  → label 1
-  • direction=1 (we bet up), outcome=0 (lost) → market went down → label 0
-  • direction=0 (we bet down), outcome=1 (won)  → market went down → label 0
-  • direction=0 (we bet down), outcome=0 (lost) → market went up  → label 1
+This is clean ground truth — not "did Kronos win" (which conflates signal quality
+with gate decisions) and not "direction == outcome" (which is circular because
+the gates that produced those outcomes depend on Kalshi).
 
 Train/test split
 ----------------
-Time-ordered. The last `--test-size` rows are held out for evaluation; everything
-older is used for training. Random splits would leak regime structure (crypto
-regimes persist across consecutive trades).
+Time-ordered. The last --test-size rows are held out; everything older trains.
+Random splits would leak regime structure (crypto regimes persist across candles).
 
 Class balance
 -------------
-We pass `scale_pos_weight = neg / pos` to XGBoost only when the train label ratio
-drifts outside the 35/65 band. Inside that band, the default weighting is fine
-and adding a weight just adds noise.
-
-Metrics reported
-----------------
-    Brier score       — calibration quality (0.25 = coin flip; lower is better)
-    Accuracy          — fraction of test rows correctly classified
-    Kronos agreement  — fraction of test rows where the regime model's direction
-                        equals the Kronos direction. Informational: a very high
-                        number means Gate 2 will rarely block anything; very low
-                        means the model is fighting Kronos and you should NOT
-                        flip REGIME_GATE2_ENFORCING to True until you understand
-                        why.
+scale_pos_weight applied only when the up/down ratio drifts outside [35%, 65%].
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sqlite3
 import sys
 from pathlib import Path
 
 import numpy as np
 
-# Make the project root importable when run as `python3 scripts/train_regime.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
-from btc_kalshi_system.models.regime_model import RegimeModel
+from btc_kalshi_system.models.regime_model import RegimeModel, _FEATURE_ORDER
 
-# Must match _FEATURE_ORDER in regime_model.py and the keys returned by
-# fusion._regime_features() — a mismatch silently corrupts the trained model.
-_FEATURE_COLS = [
-    # kalshi_implied_prob and kalshi_spread_normalized excluded — regime model must be
-    # independent of Kalshi to avoid circularity with Gates 5/8. See regime_model.py.
-    "funding_rate",
-    "funding_rate_trend",
-    "oi_delta_pct",
-    "cvd_normalized",
-    "basis_spread_pct",
-    "brti_volatility_1h",
-    "cvd_velocity",
-    "cvd_acceleration",
-    "brti_momentum_5min",
-    "brti_momentum_15min",
-    "candle_progress",
-    "hour_sin",
-    "hour_cos",
-    "funding_window_proximity",
-    "trend_slope_1h",
-    "trend_r2_1h",
-    "hourly_sr_proximity",
-    "range_breakout_flag",
-    "tape_speed_tpm",
-    "large_print_direction",
-    # Deribit options (session 6) — independent of Kalshi
-    "atm_iv",
-    "iv_rv_spread",
-    "pcr_oi",
-    "term_structure_slope",
-    "skew_25d",
-    # 24h BTC price return context (session 11)
-    "btc_24h_return",
-]
+# Must match _FEATURE_ORDER in regime_model.py and keys from fusion._regime_features().
+_FEATURE_COLS = list(_FEATURE_ORDER)
 
-_FEATURE_COLS_LEGACY = [
-    "funding_rate",
-    "funding_rate_trend",
-    "oi_delta_pct",
-    "cvd_normalized",
-    "basis_spread_pct",
-    "brti_volatility_1h",
-]
-
-_QUERY_TEMPLATE = """
-SELECT {cols},
-       direction, outcome, kronos_calibrated, timestamp
-FROM trades
+_CANDLE_QUERY = """
+SELECT {cols}, btc_direction, candle_ts
+FROM candle_features
 WHERE features_stale = 0
+  AND btc_direction IS NOT NULL
   AND funding_rate IS NOT NULL
-  {extra_filters}
-  AND outcome IS NOT NULL
-ORDER BY timestamp ASC
-"""
-
-_EXTRA_FILTERS_20 = """AND cvd_velocity IS NOT NULL
+  AND cvd_velocity IS NOT NULL
   AND brti_momentum_5min IS NOT NULL
   AND funding_window_proximity IS NOT NULL
   AND large_print_direction IS NOT NULL
-  AND COALESCE(okx_stale, 0) = 0"""
-
-_EXTRA_FILTERS_27 = _EXTRA_FILTERS_20 + "\n  AND deribit_stale = 0\n  AND atm_iv IS NOT NULL"
-_EXTRA_FILTERS_28 = _EXTRA_FILTERS_27 + "\n  AND btc_24h_return IS NOT NULL"
-
-def _build_query(legacy: bool = False, use_27: bool = False, use_28: bool = False) -> str:
-    if legacy:
-        cols = ", ".join(_FEATURE_COLS_LEGACY)
-        return _QUERY_TEMPLATE.format(cols=cols, extra_filters="")
-    cols = ", ".join(_FEATURE_COLS)
-    if use_28:
-        extra = _EXTRA_FILTERS_28
-    elif use_27:
-        extra = _EXTRA_FILTERS_27
-    else:
-        extra = _EXTRA_FILTERS_20
-    return _QUERY_TEMPLATE.format(cols=cols, extra_filters=extra)
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--db", default="trades.db", help="Path to trades.db (default: trades.db)")
-    p.add_argument("--out", default=config.REGIME_MODEL_PATH,
-                   help=f"Output path for the trained model (default: {config.REGIME_MODEL_PATH})")
-    p.add_argument("--test-size", type=int, default=100,
-                   help="Number of most-recent trades to hold out for evaluation (default: 100)")
-    p.add_argument("--min-rows", type=int, default=500,
-                   help="Minimum qualifying rows required to train (default: 500)")
-    p.add_argument("--max-rows", type=int, default=None,
-                   help="If set, use only the most recent N qualifying rows for training.")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Compute and report metrics but do NOT write the model file.")
-    p.add_argument("--force", action="store_true",
-                   help="Skip the low-variance feature gate and train anyway.")
-    p.add_argument("--legacy", action="store_true",
-                   help="Use only the original 6 features. Allows training on rows collected "
-                        "before Phase 1 (no new IS NOT NULL filters). Pair with --force --min-rows 100.")
-    p.add_argument("--trades-only", action="store_true",
-                   help="Exclude gate_rejections from training data (uses placed trades only).")
-    return p.parse_args()
-
-
-# Features present in gate_rejection JSON blobs (21 of 28).
-# The 7 Deribit+btc_24h_return features are absent and will be filled with NaN.
-_GR_JSON_FEATURES = {
-    "funding_rate", "funding_rate_trend", "oi_delta_pct", "cvd_normalized",
-    "basis_spread_pct", "brti_volatility_1h", "cvd_velocity", "cvd_acceleration",
-    "brti_momentum_5min", "brti_momentum_15min", "candle_progress", "hour_sin",
-    "hour_cos", "kalshi_implied_prob", "funding_window_proximity", "trend_slope_1h",
-    "trend_r2_1h", "hourly_sr_proximity", "range_breakout_flag", "tape_speed_tpm",
-    "large_print_direction",
-}
-
-_GR_QUERY = """
-SELECT features, direction, outcome, kronos_raw_15min, timestamp
-FROM gate_rejections
-WHERE shadow = 0
-  AND aged_out = 0
-  AND outcome IS NOT NULL
-  AND features IS NOT NULL
-ORDER BY timestamp ASC
+ORDER BY candle_ts ASC
 """
 
 
-def load_gate_rejections(conn: sqlite3.Connection, feature_cols: list[str]) -> list[tuple]:
-    """Parse gate_rejection JSON blobs into the same row format as trades."""
-    rows_out = []
-    for features_json, direction, outcome, kronos_raw, ts in conn.execute(_GR_QUERY):
-        try:
-            f = json.loads(features_json)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if f.get("funding_rate") is None:
-            continue
-        feat_vals = [f.get(col, float("nan")) if col in _GR_JSON_FEATURES else float("nan")
-                     for col in feature_cols]
-        # kronos_raw_15min stands in for kronos_calibrated (only used for agreement metric)
-        rows_out.append(tuple(feat_vals) + (direction, outcome, kronos_raw or 0.5, ts))
-    return rows_out
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--db", default="trades.db")
+    p.add_argument("--out", default=config.REGIME_MODEL_PATH,
+                   help=f"Output path (default: {config.REGIME_MODEL_PATH})")
+    p.add_argument("--test-size", type=int, default=100,
+                   help="Most-recent candles held out for evaluation (default: 100)")
+    p.add_argument("--min-rows", type=int, default=672,
+                   help="Minimum qualifying candles required to train (default: 672 = 7 days)")
+    p.add_argument("--max-rows", type=int, default=None,
+                   help="If set, use only the most recent N qualifying rows.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Report metrics but do NOT write the model file.")
+    p.add_argument("--force", action="store_true",
+                   help="Skip the low-variance feature gate and train anyway.")
+    return p.parse_args()
 
 
-def load_dataset(
-    db_path: str,
-    max_rows: int | None = None,
-    legacy: bool = False,
-    include_rejections: bool = True,
-) -> list[tuple]:
+def load_dataset(db_path: str, max_rows: int | None = None) -> list[tuple]:
     if not Path(db_path).exists():
         sys.exit(f"Database not found: {db_path}")
-    query = _build_query(legacy=legacy, use_28=not legacy)
+    cols = ", ".join(_FEATURE_COLS)
+    query = _CANDLE_QUERY.format(cols=cols)
     conn = sqlite3.connect(db_path)
     try:
-        trade_rows = conn.execute(query).fetchall()
-        if include_rejections and not legacy:
-            active_cols = _FEATURE_COLS
-            gr_rows = load_gate_rejections(conn, active_cols)
-        else:
-            gr_rows = []
+        rows = conn.execute(query).fetchall()
     finally:
         conn.close()
 
-    # Timestamp is the last element — trades use ISO strings, gate_rejections use
-    # Unix floats. Normalize to string for a consistent sort key.
-    def _ts_key(r):
-        ts = r[-1]
-        if isinstance(ts, (int, float)):
-            import datetime
-            return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()
-        return str(ts)
+    print(f"  candle_features qualifying rows: {len(rows)}")
 
-    all_rows = trade_rows + gr_rows
-    all_rows.sort(key=_ts_key)
+    # Strip trailing candle_ts (sort key, not a feature).
+    rows = [r[:-1] for r in rows]
 
-    if include_rejections and not legacy:
-        print(f"  trades: {len(trade_rows)}  gate_rejections: {len(gr_rows)}  combined: {len(all_rows)}")
-
-    # Strip the trailing timestamp before returning (build_xy expects n_features + 3 cols).
-    all_rows = [r[:-1] for r in all_rows]
-
-    if max_rows is not None and len(all_rows) > max_rows:
-        all_rows = all_rows[-max_rows:]
-    return all_rows
+    if max_rows is not None and len(rows) > max_rows:
+        rows = rows[-max_rows:]
+    return rows
 
 
-def build_xy(rows: list[tuple], n_features: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Returns (X, y_up, kronos_cal) where y_up=1 iff the underlying market closed
-    UP (regardless of which side we bet).
-    """
+def build_xy(rows: list[tuple]) -> tuple[np.ndarray, np.ndarray]:
+    """Returns (X, y) where y = btc_direction (1=up, 0=down)."""
     arr = np.array(rows, dtype=object)
+    n_features = len(_FEATURE_COLS)
     X = arr[:, :n_features].astype(np.float64)
-    direction = arr[:, n_features].astype(int)
-    outcome = arr[:, n_features + 1].astype(int)
-    kronos_cal = arr[:, n_features + 2].astype(np.float64)
-    y_up = (direction == outcome).astype(int)
-    return X, y_up, kronos_cal
+    y = arr[:, n_features].astype(int)
+    return X, y
 
 
 def maybe_scale_pos_weight(y: np.ndarray) -> dict:
-    """
-    Return a kwargs dict containing scale_pos_weight when the class ratio is
-    outside [35/65, 65/35], otherwise empty so we don't override XGBoost defaults.
-    """
     pos = int(y.sum())
     neg = int(len(y) - pos)
     if pos == 0 or neg == 0:
         sys.exit(f"Degenerate label distribution: pos={pos} neg={neg}. Refusing to train.")
     pos_frac = pos / (pos + neg)
-    # Outside [0.35, 0.65] → impose the weight
     if pos_frac < 0.35 or pos_frac > 0.65:
         return {"scale_pos_weight": neg / pos}
     return {}
@@ -301,64 +140,51 @@ def brier_score(y_true: np.ndarray, proba: np.ndarray) -> float:
 def main() -> None:
     args = parse_args()
 
-    active_cols = _FEATURE_COLS_LEGACY if args.legacy else _FEATURE_COLS
-    if args.legacy:
-        print("--legacy mode: using original 6 features (no new IS NOT NULL filters)")
-
-    rows = load_dataset(
-        args.db,
-        max_rows=args.max_rows,
-        legacy=args.legacy,
-        include_rejections=not args.trades_only,
-    )
+    rows = load_dataset(args.db, max_rows=args.max_rows)
     n_total = len(rows)
-    print(f"Qualifying rows in {args.db}: {n_total}")
+    print(f"Qualifying candle rows in {args.db}: {n_total}")
+
     if args.max_rows is not None:
-        print(f"--max-rows {args.max_rows}: using most recent {n_total} qualifying rows")
+        print(f"--max-rows {args.max_rows}: using most recent {n_total} rows")
 
     if n_total < args.min_rows:
         sys.exit(
-            f"Need ≥{args.min_rows} qualifying rows to train; have {n_total}. "
-            f"Continue running paper trading and re-run this script later."
+            f"Need ≥{args.min_rows} qualifying candle rows to train; have {n_total}.\n"
+            f"At ~96 candles/day, that's ~{max(0, args.min_rows - n_total) // 96 + 1} more day(s)."
         )
     if n_total <= args.test_size + 50:
         sys.exit(
-            f"Not enough rows to leave both a train set (>50) and a "
-            f"test set ({args.test_size}). Increase --min-rows or wait for more data."
+            f"Not enough rows for both train (>50) and test ({args.test_size}). "
+            "Increase --min-rows or wait for more data."
         )
 
-    X, y_up, kronos_cal = build_xy(rows, n_features=len(active_cols))
+    X, y = build_xy(rows)
 
-    # Time-based split — the data is already ORDER BY timestamp ASC.
     X_train, X_test = X[: -args.test_size], X[-args.test_size :]
-    y_train, y_test = y_up[: -args.test_size], y_up[-args.test_size :]
-    kronos_test = kronos_cal[-args.test_size :]
+    y_train, y_test = y[: -args.test_size], y[-args.test_size :]
 
-    pos_tr, neg_tr = int(y_train.sum()), int(len(y_train) - y_train.sum())
-    pos_te, neg_te = int(y_test.sum()), int(len(y_test) - y_test.sum())
-    print(f"Train: {len(y_train)} rows  (up={pos_tr}, down={neg_tr})")
-    print(f"Test : {len(y_test)} rows  (up={pos_te}, down={neg_te})")
+    pos_tr = int(y_train.sum())
+    pos_te = int(y_test.sum())
+    print(f"Train: {len(y_train)} rows  (up={pos_tr}, down={len(y_train)-pos_tr})")
+    print(f"Test : {len(y_test)} rows  (up={pos_te}, down={len(y_test)-pos_te})")
 
     extra_kwargs = maybe_scale_pos_weight(y_train)
     if extra_kwargs:
         print(f"Applying scale_pos_weight={extra_kwargs['scale_pos_weight']:.3f} "
-              f"(train class balance is outside [35%, 65%])")
+              f"(train class balance outside [35%, 65%])")
     else:
-        print("Train class balance is within [35%, 65%] — no scale_pos_weight applied.")
+        print("Train class balance within [35%, 65%] — no scale_pos_weight applied.")
 
     # ── Feature variance gate ─────────────────────────────────────────────────
-    low_variance_features: list[tuple[str, float]] = []
-    for i, feat in enumerate(active_cols):
+    low_variance: list[tuple[str, float]] = []
+    for i, feat in enumerate(_FEATURE_COLS):
         std = float(X_train[:, i].std())
         if std < 1e-6:
-            print(f"WARNING: feature '{feat}' has near-zero std in X_train: {std:.2e}")
-            low_variance_features.append((feat, std))
-    # tolerate up to 2 near-zero-std features; more than 2 suggests a pipeline failure
-    if len(low_variance_features) > 2:
-        print(
-            f"\nWARNING: {len(low_variance_features)} features have near-zero variance. "
-            "The model would be trained on effectively constant inputs — do NOT deploy it."
-        )
+            print(f"WARNING: feature '{feat}' has near-zero std: {std:.2e}")
+            low_variance.append((feat, std))
+    if len(low_variance) > 2:
+        print(f"\nWARNING: {len(low_variance)} features have near-zero variance. "
+              "Do NOT deploy this model.")
         if not args.force:
             sys.exit(1)
         print("--force passed — proceeding despite low-variance features.")
@@ -366,99 +192,74 @@ def main() -> None:
     model = RegimeModel()
     model.train(X_train, y_train, **extra_kwargs)
 
-    # ── Walk-forward cross-validation (evaluation only) ──────────────────────
-    # 3-fold expanding walk-forward on the non-held-out rows only.  The final
-    # model (trained on X_train above) is unaffected — this CV is for
-    # confidence reporting only.  Using n_cv (= n_total - test_size) keeps the
-    # held-out test set completely outside every CV fold.
-    n_cv = n_total - args.test_size   # keep hold-out completely out of CV
+    # ── Walk-forward CV (evaluation only) ────────────────────────────────────
+    n_cv = n_total - args.test_size
     fold_cuts = [
-        (0, int(0.4 * n_cv), int(0.4 * n_cv), int(0.6 * n_cv)),  # fold 1
-        (0, int(0.6 * n_cv), int(0.6 * n_cv), int(0.8 * n_cv)),  # fold 2
-        (0, int(0.8 * n_cv), int(0.8 * n_cv), n_cv),             # fold 3
+        (0, int(0.4 * n_cv), int(0.4 * n_cv), int(0.6 * n_cv)),
+        (0, int(0.6 * n_cv), int(0.6 * n_cv), int(0.8 * n_cv)),
+        (0, int(0.8 * n_cv), int(0.8 * n_cv), n_cv),
     ]
-
     cv_briers: list[float] = []
     cv_accuracies: list[float] = []
-    cv_kronos_agreements: list[float] = []
 
     print()
     print("── Walk-forward CV (3 folds) ─────────────────────────────────────────")
     for fold_idx, (tr_start, tr_end, te_start, te_end) in enumerate(fold_cuts, start=1):
         X_cv_train = X[tr_start:tr_end]
-        y_cv_train = y_up[tr_start:tr_end]
+        y_cv_train = y[tr_start:tr_end]
         X_cv_test  = X[te_start:te_end]
-        y_cv_test  = y_up[te_start:te_end]
-        k_cv_test  = kronos_cal[te_start:te_end]
-
+        y_cv_test  = y[te_start:te_end]
         try:
             cv_kwargs = maybe_scale_pos_weight(y_cv_train)
         except SystemExit:
-            print(f"  Fold {fold_idx}: skipped — degenerate label distribution in train slice")
+            print(f"  Fold {fold_idx}: skipped — degenerate label distribution")
             continue
         cv_model = RegimeModel()
         cv_model.train(X_cv_train, y_cv_train, **cv_kwargs)
-
         proba_cv   = cv_model._clf.predict_proba(X_cv_test)[:, 1]
         pred_cv    = (proba_cv >= 0.5).astype(int)
         f_brier    = brier_score(y_cv_test, proba_cv)
         f_accuracy = float((pred_cv == y_cv_test).mean())
-        k_dir_cv   = (k_cv_test >= 0.5).astype(int)
-        f_kag      = float((pred_cv == k_dir_cv).mean())
-
         cv_briers.append(f_brier)
         cv_accuracies.append(f_accuracy)
-        cv_kronos_agreements.append(f_kag)
-
-        print(
-            f"  Fold {fold_idx}  train=[{tr_start}:{tr_end}]  test=[{te_start}:{te_end}]  "
-            f"Brier={f_brier:.4f}  Acc={f_accuracy:.4f}  KronosAgreement={f_kag:.4f}"
-        )
+        print(f"  Fold {fold_idx}  train=[{tr_start}:{tr_end}]  test=[{te_start}:{te_end}]  "
+              f"Brier={f_brier:.4f}  Acc={f_accuracy:.4f}")
 
     mean_brier = float(np.mean(cv_briers))
     std_brier  = float(np.std(cv_briers, ddof=1))
     mean_acc   = float(np.mean(cv_accuracies))
     std_acc    = float(np.std(cv_accuracies, ddof=1))
-    mean_kag   = float(np.mean(cv_kronos_agreements))
-    std_kag    = float(np.std(cv_kronos_agreements, ddof=1))
-
     print()
     print(f"  CV mean  Brier={mean_brier:.4f} ± {std_brier:.4f}   "
-          f"Acc={mean_acc:.4f} ± {std_acc:.4f}   "
-          f"KronosAgreement={mean_kag:.4f} ± {std_kag:.4f}")
+          f"Acc={mean_acc:.4f} ± {std_acc:.4f}")
     print("──────────────────────────────────────────────────────────────────────")
 
     if std_brier > 0.05:
-        print(
-            "\nWARNING: Brier std across folds is {:.4f} (> 0.05). Performance is highly "
-            "variable across time windows — the model may be fitting regime-specific "
-            "noise. Consider gathering more data or reviewing feature engineering before "
-            "deploying.".format(std_brier)
-        )
-    if mean_kag < 0.55:
-        print("WARNING: Kronos agreement < 55% (CV mean). The regime model is contradicting")
-        print("         Kronos on nearly half of trades. Investigate before enabling Gate 2")
-        print("         enforcement — flipping REGIME_GATE2_ENFORCING=True now would")
-        print("         block roughly that fraction of trades.")
+        print(f"\nWARNING: Brier std {std_brier:.4f} > 0.05 — high variance across folds. "
+              "Consider waiting for more data before deploying.")
     if mean_brier > 0.25:
-        print("WARNING: Brier > 0.25 (CV mean, worse than a coin flip). Do NOT deploy this model.")
-    print()
+        print("WARNING: Brier > 0.25 (CV mean, worse than coin flip). Do NOT deploy.")
 
-    # ── Feature importances (shown in dry-run too) ───────────────────────────
+    # ── Final test-set evaluation ─────────────────────────────────────────────
+    proba_test = model._clf.predict_proba(X_test)[:, 1]
+    pred_test  = (proba_test >= 0.5).astype(int)
+    test_brier = brier_score(y_test, proba_test)
+    test_acc   = float((pred_test == y_test).mean())
+    print(f"\nFinal held-out test  Brier={test_brier:.4f}  Acc={test_acc:.4f}")
+
+    # ── Feature importances ───────────────────────────────────────────────────
     importances = model._clf.feature_importances_
-    total_importance = float(importances.sum())
-    ranked = sorted(zip(active_cols, importances), key=lambda x: x[1], reverse=True)
-    print("Feature importances (descending):")
+    total_imp = float(importances.sum())
+    ranked = sorted(zip(_FEATURE_COLS, importances), key=lambda x: x[1], reverse=True)
+    print("\nFeature importances (descending):")
     for feat, imp in ranked:
-        print(f"  {feat:<25s}  {imp:.4f}")
-    top_feat, top_imp = ranked[0]
-    if total_importance == 0:
-        print("WARNING: all feature importances are zero — model may not have learned anything.")
-    elif (top_imp / total_importance) > 0.60:
-        print(
-            f"\nWARNING: '{top_feat}' accounts for {top_imp / total_importance:.1%} of total "
-            "importance. The model is essentially a single-feature classifier."
-        )
+        pct = imp / total_imp * 100 if total_imp > 0 else 0
+        print(f"  {feat:<25s}  {imp:.4f}  ({pct:.1f}%)")
+    if total_imp > 0:
+        top_feat, top_imp = ranked[0]
+        if (top_imp / total_imp) > 0.60:
+            print(f"\nWARNING: '{top_feat}' accounts for {top_imp/total_imp:.1%} of total "
+                  "importance — essentially a single-feature classifier.")
 
     if args.dry_run:
         print("\n--dry-run set — model NOT saved.")
@@ -467,10 +268,10 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     model.save(str(out_path))
-    print(f"\nSaved regime model to: {out_path}")
-    print("Restart KronosV2 to pick it up. Gate 2 will run in SHADOW mode by default")
-    print("(config.REGIME_GATE2_ENFORCING=False) — observe disagreement logs for ~50")
-    print("trades, then flip to True to enable enforcement.")
+    print(f"\nSaved regime model → {out_path}")
+    print("Restart KronosV2 to pick it up.")
+    print("Gate 2 runs in SHADOW mode (config.REGIME_GATE2_ENFORCING=False) by default.")
+    print("Observe disagreement logs for ~50 trades before flipping to True.")
 
 
 if __name__ == "__main__":
