@@ -438,6 +438,30 @@ def test_min_price_allows_trade_at_boundary(checklist):
     assert r.passed
 
 
+# ── Gate 2b: NO maximum price filter ─────────────────────────────────────────
+
+def test_gate2b_blocks_no_above_55c(checklist):
+    """NO fill > 55¢ (YES bid < 45¢ — market already bearish) is blocked. 25% WR historically."""
+    signal = make_signal(direction=0, calibrated_prob=0.3, deepseek_regime="ranging")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 46
+    kw["best_bid_cents"] = 43   # NO fill = 100-43 = 57¢ > 55¢ threshold
+    r = checklist.run(**kw)
+    assert not r.passed and r.failed_gate == 2
+    assert "NO fill" in r.failed_reason
+
+def test_gate2b_allows_no_at_55c_boundary(checklist):
+    """NO fill at exactly 55¢ is allowed (boundary is exclusive above 55)."""
+    signal = make_signal(direction=0, calibrated_prob=0.35, deepseek_regime="ranging")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 47
+    kw["best_bid_cents"] = 45   # NO fill = 100-45 = 55¢ — at boundary, should pass Gate 2b
+    kw["available_contracts"] = 200
+    kw["fresh_kalshi_mid"] = 0.45
+    r = checklist.run(**kw)
+    assert r.failed_gate != 2
+
+
 # ── Gate 8: confidence-aware threshold ───────────────────────────────────────
 
 def test_gate8_low_confidence_signal_blocked_at_mild_kalshi_disagreement(checklist):

@@ -75,6 +75,16 @@ class PreTradeChecklist:
         if signal.direction == 1 and trade_price_cents < _MIN_TRADE_PRICE_CENTS:
             return fail(2, f"Trade price {trade_price_cents}¢ below minimum {_MIN_TRADE_PRICE_CENTS}¢ (YES at extreme price, 0W/10L historically)")
 
+        # Gate 2b — NO maximum price filter.
+        # NO fill > 55¢ means YES bid < 45¢ — the market is already pricing DOWN >55%.
+        # In this zone NO has gone 30W/120L (25% WR), losing $740 historically.
+        # When the market is already strongly bearish, k15's NO signal adds no edge —
+        # BTC bounces or doesn't fall further within the 15-min window 75% of the time.
+        # Sub-20¢ NO (the mispricing edge) is exempt — handled above.
+        _MAX_NO_TRADE_PRICE_CENTS = 55
+        if signal.direction == 0 and trade_price_cents > _MAX_NO_TRADE_PRICE_CENTS:
+            return fail(2, f"NO fill {trade_price_cents}¢ exceeds {_MAX_NO_TRADE_PRICE_CENTS}¢ max (market already bearish, 25% WR historically)")
+
         # NOTE: Gate 11 uses signal.kronos_calibrated which equals kronos_raw while the
         # calibrator is in passthrough mode. Once the calibrator activates and compresses
         # strong signals (e.g. k15_raw=0.80 → k15_cal≈0.55), this gate will silently

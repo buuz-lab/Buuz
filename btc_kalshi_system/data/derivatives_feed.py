@@ -11,7 +11,8 @@ from config import COINGLASS_API_KEY, HYPERLIQUID_BASE_URL, KRAKEN_FUTURES_BASE_
 from btc_kalshi_system.data.fear_greed import fetch_fear_greed
 
 _REFRESH_INTERVAL = 300   # 5 minutes
-_FEATURES_TTL = 600       # 2x refresh interval — tolerates one missed cycle without expiring
+_FEATURES_TTL = 900       # 3x refresh interval — tolerates slow ccxt fetches without expiring
+_CCXT_TIMEOUT_MS = 10_000  # 10 s — fail fast on DNS timeouts rather than hanging
 _LKG_TTL = 86_400         # 24 hours — last-known-good survives multi-hour exchange outages
 _FUNDING_LOOKBACK_MS = 4 * 3600_000  # 4 hours in milliseconds
 _SYMBOL = "BTC/USDT:USDT"
@@ -49,7 +50,7 @@ class DerivativesFeed:
         """Try each exchange in preference order; set self._exchange to the first that works."""
         for name in self._EXCHANGE_PREFERENCE:
             try:
-                ex = getattr(self._ccxt_async, name)({"enableRateLimit": True})
+                ex = getattr(self._ccxt_async, name)({"enableRateLimit": True, "timeout": _CCXT_TIMEOUT_MS})
                 # Lightweight probe — instruments-info or markets call
                 await ex.load_markets()
                 self._exchange = ex
@@ -316,7 +317,7 @@ class DerivativesFeed:
     async def _get_kraken_exchange(self):
         """Lazy-initialize and return the Kraken ccxt exchange instance."""
         if self._kraken_exchange is None:
-            self._kraken_exchange = self._ccxt_async.kraken({"enableRateLimit": True})
+            self._kraken_exchange = self._ccxt_async.kraken({"enableRateLimit": True, "timeout": _CCXT_TIMEOUT_MS})
         return self._kraken_exchange
 
     async def _kraken_trades_data(self) -> tuple[float, float, float]:

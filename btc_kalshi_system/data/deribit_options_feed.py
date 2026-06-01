@@ -62,7 +62,8 @@ class DeribitOptionsFeed:
     # ── Fetch ──────────────────────────────────────────────────────────────────
 
     async def _fetch_features(self) -> dict:
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(_DERIBIT_URL) as resp:
                 resp.raise_for_status()
                 data = await resp.json()

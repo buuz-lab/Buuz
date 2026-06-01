@@ -142,7 +142,7 @@ def test_features_written_to_redis_key_with_ttl():
     raw = feed._redis.get("regime:features")
     assert raw is not None
     ttl = feed._redis.ttl("regime:features")
-    assert 590 <= ttl <= 600
+    assert 890 <= ttl <= 900
 
 
 def test_features_contain_all_six_keys():
