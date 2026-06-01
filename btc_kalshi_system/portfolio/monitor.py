@@ -127,7 +127,8 @@ class PortfolioMonitor:
                 pnl = -position.contracts * position.entry_price_cents / 100
         else:
             # NO contract: paid fill_price_cents (= 100 - YES_bid), collects 100¢ on win
-            if outcome == 1:
+            # NO wins when outcome == 0 (market went DOWN), not outcome == 1
+            if outcome == 0:
                 pnl = position.contracts * (100 - position.entry_price_cents) / 100
             else:
                 pnl = -position.contracts * position.entry_price_cents / 100

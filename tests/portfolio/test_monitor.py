@@ -131,7 +131,7 @@ def test_resolve_trade_loss_pnl():
 
 def test_resolve_trade_no_bet_win():
     mon = make_monitor()
-    # NO bet with direction=0: 10 contracts at 30 cents → win pays (100 - 30) / 100 * 10 = $7.00
+    # NO bet wins when market goes DOWN (outcome=0): 10 contracts at 30¢ → profit = (1-0.30)*10 = $7.00
     pos = OpenPosition(
         trade_id="trade-no-win",
         ticker="KXBTC-25JUN-T95000",
@@ -144,16 +144,16 @@ def test_resolve_trade_no_bet_win():
         timestamp=time.time(),
     )
     mon.add_position(pos)
-    trade = mon.resolve_trade("trade-no-win", outcome=1)
+    trade = mon.resolve_trade("trade-no-win", outcome=0)
     assert trade is not None
     assert trade.pnl_dollars == pytest.approx(7.00)
-    assert trade.outcome == 1
+    assert trade.outcome == 0
     assert trade.direction == 0
 
 
 def test_resolve_trade_no_bet_loss():
     mon = make_monitor()
-    # NO bet with direction=0: 10 contracts at 30 cents → loss costs 0.30 * 10 = $3.00
+    # NO bet loses when market goes UP (outcome=1): 10 contracts at 30¢ → loss = -0.30*10 = -$3.00
     pos = OpenPosition(
         trade_id="trade-no-loss",
         ticker="KXBTC-25JUN-T95000",
@@ -166,10 +166,10 @@ def test_resolve_trade_no_bet_loss():
         timestamp=time.time(),
     )
     mon.add_position(pos)
-    trade = mon.resolve_trade("trade-no-loss", outcome=0)
+    trade = mon.resolve_trade("trade-no-loss", outcome=1)
     assert trade is not None
     assert trade.pnl_dollars == pytest.approx(-3.00)
-    assert trade.outcome == 0
+    assert trade.outcome == 1
     assert trade.direction == 0
 
 
