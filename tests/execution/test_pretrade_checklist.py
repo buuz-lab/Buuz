@@ -733,3 +733,36 @@ def test_gate8_high_uncertainty_same_signal_passes_in_neutral(checklist):
     kw["fresh_kalshi_mid"] = 0.44  # opposing=0.06 < 0.25 → passes in neutral
     r = checklist.run(**kw)
     assert r.failed_gate != 8
+
+
+# ── Gate 8 / 8b: sub-20c NO exemption ────────────────────────────────────────
+
+def test_gate8_sub20_no_exempt_from_consensus(checklist):
+    """NO fill < 20¢ bypasses Gate 8 even when Kalshi is maximally opposing.
+
+    NO fill=15¢ → kalshi_mid=0.87 → opposing=0.37 >> gate8_base=0.25 → would normally block.
+    Sub-20c NO: Kalshi pricing YES at 87% IS the mispricing being faded — 32W/0L historically.
+    Gate 8 must not fire; trade should be decided by Gates 3-6 instead.
+    """
+    signal = make_signal(direction=0, calibrated_prob=0.2, deepseek_regime="neutral")
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 87
+    kw["best_bid_cents"] = 85   # NO fill = 100-85 = 15¢ < 20¢
+    kw["available_contracts"] = 500
+    kw["fresh_kalshi_mid"] = 0.87  # extreme opposing — would block Gate 8 normally
+    r = checklist.run(**kw)
+    assert r.failed_gate != 8
+
+
+def test_gate8b_sub20_no_kelly_not_multiplied(checklist):
+    """NO fill < 20¢ bypasses Gate 8b — Kalshi Kelly multiplier not applied.
+
+    kalshi_mid=0.87 → opposing_margin=0.37 → mult = max(0, 1-0.37/0.30) = 0 → would zero Kelly.
+    Sub-20c NO exempt: kelly_dollars must equal the base (no multiplier applied).
+    """
+    signal = make_signal(direction=0, calibrated_prob=0.2, deepseek_regime="neutral")
+    shared = dict(best_ask_cents=87, best_bid_cents=85, available_contracts=500)
+    r_base = checklist.run(**{**base_kwargs(signal), **shared, "fresh_kalshi_mid": 0.50})
+    r_extreme = checklist.run(**{**base_kwargs(signal), **shared, "fresh_kalshi_mid": 0.87})
+    assert r_extreme.passed
+    assert r_extreme.kelly_dollars == pytest.approx(r_base.kelly_dollars, rel=0.01)
