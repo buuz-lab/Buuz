@@ -1,5 +1,5 @@
-# Crontab entry (Sunday 3am):
-# 0 3 * * 0 cd "/Users/ezrakornberg/Kronos V2" && source .env && python3 scripts/auto_retrain_regime.py >> logs/auto_retrain_regime.log 2>&1
+# Crontab entry (Monday 2am — model fresh for Monday volume pickup):
+# 0 2 * * 1 cd "/Users/ezrakornberg/Kronos V2" && source .env && python3 scripts/auto_retrain_regime.py >> logs/auto_retrain_regime.log 2>&1
 #
 # Retraining triggers (in priority order):
 #   1. Row-based: +200 new candle_features rows since last train (~2 days at 96/day)
