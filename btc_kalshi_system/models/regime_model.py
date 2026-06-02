@@ -36,6 +36,10 @@ _FEATURE_ORDER = [
     "skew_25d",
     # 24h BTC price return context (session 11) — XGBoost handles NaN rows
     "btc_24h_return",
+    # Kronos momentum meta-features (session 26) — logged from _cached_kronos at candle close;
+    # NULL (→ NaN) when bootstrap loop hasn't fired yet; XGBoost treats NaN as missing.
+    "kronos_raw_15min",
+    "kronos_raw_5min",
 ]
 
 
@@ -60,7 +64,9 @@ class RegimeModel:
             raise NotTrainedError(
                 "RegimeModel has not been trained. Call train() or load() first."
             )
-        X = np.array([[features[k] for k in _FEATURE_ORDER]])
+        # None entries (e.g. kronos_raw_15min before bootstrap loop fires) → NaN;
+        # XGBoost treats NaN as missing values natively.
+        X = np.array([[features[k] if features[k] is not None else float("nan") for k in _FEATURE_ORDER]])
         prob_up = float(self._clf.predict_proba(X)[0, 1])
         direction = int(prob_up >= 0.5)
         confidence = float(abs(prob_up - 0.5) * 2)  # 0 at boundary, 1 at extremes

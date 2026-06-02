@@ -204,3 +204,61 @@ class TestCandleLoggerLoop:
             "SELECT COUNT(*) FROM candle_features"
         ).fetchone()[0]
         assert count == 1
+
+
+# ── Phase 2: Kronos meta-feature columns ─────────────────────────────────────
+
+class TestKronosColumnsInCandleLogger:
+
+    def test_kronos_columns_exist_in_table(self):
+        """candle_features table has kronos_raw_15min and kronos_raw_5min columns."""
+        system = _make_system()
+        cols = {row[1] for row in system._db.execute("PRAGMA table_info(candle_features)").fetchall()}
+        assert "kronos_raw_15min" in cols
+        assert "kronos_raw_5min" in cols
+
+    def test_candle_logger_writes_kronos_values_from_fusion(self):
+        """Kronos values passed in the features snapshot are persisted to candle_features."""
+        system = _make_system()
+        df15 = _make_df15(n=4)
+        system._store.get_ohlcv.return_value = df15
+        features = _make_features()
+        features["kronos_raw_15min"] = 0.72
+        features["kronos_raw_5min"] = 0.68
+        system._fusion.get_features_snapshot.return_value = (features, False, False)
+
+        async def mock_sleep(_):
+            system._running = False
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            asyncio.run(system._candle_logger_loop())
+
+        row = system._db.execute(
+            "SELECT kronos_raw_15min, kronos_raw_5min FROM candle_features"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == pytest.approx(0.72)
+        assert row[1] == pytest.approx(0.68)
+
+    def test_candle_logger_writes_null_when_kronos_not_cached(self):
+        """None values for kronos features are stored as SQL NULL in candle_features."""
+        system = _make_system()
+        df15 = _make_df15(n=4)
+        system._store.get_ohlcv.return_value = df15
+        features = _make_features()
+        features["kronos_raw_15min"] = None
+        features["kronos_raw_5min"] = None
+        system._fusion.get_features_snapshot.return_value = (features, False, False)
+
+        async def mock_sleep(_):
+            system._running = False
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            asyncio.run(system._candle_logger_loop())
+
+        row = system._db.execute(
+            "SELECT kronos_raw_15min, kronos_raw_5min FROM candle_features"
+        ).fetchone()
+        assert row is not None
+        assert row[0] is None
+        assert row[1] is None

@@ -388,11 +388,13 @@ def test_signal_carries_regime_features_dict():
     })
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    # All 20 keys must be present
+    # All keys must be present; kronos_raw_* may be None until first cycle fires
     from btc_kalshi_system.models.regime_model import _FEATURE_ORDER
+    _KRONOS_KEYS = {"kronos_raw_15min", "kronos_raw_5min"}
     for key in _FEATURE_ORDER:
         assert key in result.regime_features, f"Missing key: {key}"
-        assert isinstance(result.regime_features[key], float)
+        if key not in _KRONOS_KEYS:
+            assert isinstance(result.regime_features[key], float), key
     assert result.regime_features["funding_rate"] == pytest.approx(0.0001)
     assert result.regime_features["cvd_normalized"] == pytest.approx(0.3)
 

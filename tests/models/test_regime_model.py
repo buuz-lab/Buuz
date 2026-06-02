@@ -9,7 +9,7 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 def _synthetic_features(n: int = 200, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
-    X = rng.standard_normal((n, 26))  # 26 features: kalshi_implied_prob + kalshi_spread_normalized removed
+    X = rng.standard_normal((n, 28))  # 28 features: 26 market + kronos_raw_15min + kronos_raw_5min
     y = (X[:, 0] > 0).astype(int)  # label = sign of first feature
     return X, y
 
@@ -43,6 +43,8 @@ def _feature_dict(seed: int = 0) -> dict:
         "term_structure_slope":    float(rng.uniform(-0.3, 0.3)),
         "skew_25d":                float(rng.uniform(-10, 5)),
         "btc_24h_return":          float(rng.uniform(-0.3, 0.3)),
+        "kronos_raw_15min":        float(rng.uniform(0.2, 0.8)),
+        "kronos_raw_5min":         float(rng.uniform(0.2, 0.8)),
     }
 
 
@@ -145,3 +147,24 @@ def test_loaded_model_raises_not_trained_error_when_file_missing():
     model = RegimeModel()
     with pytest.raises(NotTrainedError):
         model.get_regime(_feature_dict())
+
+
+# ── Phase 2: Kronos meta-features ─────────────────────────────────────────────
+
+def test_feature_order_includes_kronos_features():
+    """_FEATURE_ORDER must include kronos_raw_15min and kronos_raw_5min as regime meta-features."""
+    from btc_kalshi_system.models.regime_model import _FEATURE_ORDER
+    assert "kronos_raw_15min" in _FEATURE_ORDER
+    assert "kronos_raw_5min" in _FEATURE_ORDER
+
+
+def test_get_regime_handles_none_kronos_features():
+    """get_regime() must not crash when kronos_raw_15min / kronos_raw_5min are None (bootstrap)."""
+    model = RegimeModel()
+    X, y = _synthetic_features()
+    model.train(X, y)
+    fd = _feature_dict()
+    fd["kronos_raw_15min"] = None
+    fd["kronos_raw_5min"] = None
+    result = model.get_regime(fd)
+    assert isinstance(result["prob_up"], float)

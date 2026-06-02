@@ -244,7 +244,10 @@ _CREATE_CANDLE_FEATURES_TABLE = (
     + "\n)"
 )
 
-_CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = []
+_CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
+    ("kronos_raw_15min", "REAL DEFAULT NULL"),
+    ("kronos_raw_5min",  "REAL DEFAULT NULL"),
+]
 
 
 class KronosV2:

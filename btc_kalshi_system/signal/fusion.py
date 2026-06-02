@@ -106,6 +106,10 @@ class SignalFusionEngine:
         self._deepseek = deepseek_parser
         self._market_context: dict = market_context or {}
         self._drift_monitor = drift_monitor
+        # Cached from the most recent fuse() call — None until first cycle runs.
+        # Exposed via _regime_features() so the candle logger can log them.
+        self._last_kronos_raw_15min: float | None = None
+        self._last_kronos_raw_5min: float | None = None
 
     def update_market_context(self, ctx: dict) -> None:
         self._market_context = ctx
@@ -144,6 +148,8 @@ class SignalFusionEngine:
         if kronos_raw is None:
             # only used in tests — production always provides kronos_raw from _cached_kronos
             kronos_raw = self._kronos.run_monte_carlo(self._store, threshold=strike)
+        self._last_kronos_raw_5min = kronos_raw
+        self._last_kronos_raw_15min = kronos_raw_15min
         # Calibrate using k15 when available — k15 predicts the 15-min close direction,
         # which is exactly what KXBTC15M markets resolve against.  k5 predicts the next
         # 5-min close (misaligned horizon), so using it produces a near-flat calibration.
@@ -443,5 +449,9 @@ class SignalFusionEngine:
             "term_structure_slope":     term_structure_slope,
             "skew_25d":                 skew_25d,
             "btc_24h_return":           btc_24h_return,
+            # Kronos meta-features — None until first trading cycle fires (bootstrap).
+            # XGBoost treats None→NaN as missing; candle logger stores None as SQL NULL.
+            "kronos_raw_15min":         self._last_kronos_raw_15min,
+            "kronos_raw_5min":          self._last_kronos_raw_5min,
         }
         return features, stale, deribit_stale, okx_stale
