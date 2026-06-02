@@ -261,6 +261,87 @@ def main() -> None:
             print(f"\nWARNING: '{top_feat}' accounts for {top_imp/total_imp:.1%} of total "
                   "importance — essentially a single-feature classifier.")
 
+    # ── Kronos contextuality check ────────────────────────────────────────────
+    # Verify whether the model learned the ranging anti-correlation CONTEXTUALLY
+    # (high Kronos + ranging features → DOWN) vs UNIVERSALLY (high Kronos → DOWN
+    # regardless of regime). Universal learning is the same failure mode as the
+    # calibrator inversion — deploying it would damage trending trades.
+    #
+    # Uses median feature values from training data as the "neutral" baseline,
+    # then overrides Kronos and regime-indicator features to simulate two scenarios.
+    print("\n── Kronos contextuality check ────────────────────────────────────────")
+    try:
+        k15_idx = _FEATURE_COLS.index("kronos_raw_15min")
+        k5_idx  = _FEATURE_COLS.index("kronos_raw_5min")
+        # Regime-indicator proxies: brti_momentum_15min and cvd_normalized distinguish
+        # ranging (flat momentum, near-zero CVD) from trending (strong momentum, large CVD).
+        mom_idx = _FEATURE_COLS.index("brti_momentum_15min")
+        cvd_idx = _FEATURE_COLS.index("cvd_normalized")
+
+        median_row = np.nanmedian(X_train, axis=0).copy()
+
+        # Scenario A: high Kronos conviction in a RANGING market
+        # (flat momentum, near-zero CVD — same microstructure as a ranging bounce)
+        row_ranging = median_row.copy()
+        row_ranging[k15_idx] = 0.85
+        row_ranging[k5_idx]  = 0.80
+        row_ranging[mom_idx] = 0.0005      # flat momentum
+        row_ranging[cvd_idx] = 0.05        # near-zero CVD
+
+        # Scenario B: high Kronos conviction in a TRENDING market
+        # (strong momentum, clearly positive CVD)
+        row_trending = median_row.copy()
+        row_trending[k15_idx] = 0.85
+        row_trending[k5_idx]  = 0.80
+        row_trending[mom_idx] = 0.006      # strong upward momentum
+        row_trending[cvd_idx] = 0.65       # clear buying pressure
+
+        p_ranging  = float(model._clf.predict_proba(row_ranging.reshape(1, -1))[0, 1])
+        p_trending = float(model._clf.predict_proba(row_trending.reshape(1, -1))[0, 1])
+
+        print(f"  k15=0.85 in RANGING  microstructure → prob_up={p_ranging:.3f}  "
+              f"({'DOWN ✓ anti-correlation learned' if p_ranging < 0.5 else 'UP  ✗ universal trust — caution'})")
+        print(f"  k15=0.85 in TRENDING microstructure → prob_up={p_trending:.3f}  "
+              f"({'UP  ✓ contextual trust' if p_trending >= 0.5 else 'DOWN ✗ over-fading — caution'})")
+
+        gap = p_trending - p_ranging
+        print(f"  Regime gap (trending - ranging): {gap:+.3f}", end="")
+        if gap >= 0.10:
+            print("  ✓ contextual (gap ≥ 0.10)")
+        elif gap >= 0.0:
+            print("  ⚠ weak contextuality (gap < 0.10) — regime barely differentiates")
+        else:
+            print("  ✗ trending scored LOWER than ranging — model is confused")
+
+        k15_imp = importances[k15_idx] / total_imp * 100 if total_imp > 0 else 0
+        k5_imp  = importances[k5_idx]  / total_imp * 100 if total_imp > 0 else 0
+        print(f"  Kronos importance: k15={k15_imp:.1f}%  k5={k5_imp:.1f}%  combined={k15_imp+k5_imp:.1f}%")
+        if k15_imp + k5_imp > 30:
+            print("  WARNING: Kronos combined importance > 30% — model may be re-learning")
+            print("           Kronos rather than adding independent microstructure context.")
+        elif k15_imp + k5_imp == 0:
+            print("  WARNING: Kronos importance = 0% — model ignored Kronos entirely.")
+
+        # Hard deploy gate: if the model would flip direction on a strong Kronos trending
+        # signal at the 0.4/0.6 fusion weight, the regime model destroys trending edge.
+        # Simulate: combined = 0.4 * k15_cal + 0.6 * regime_prob (with k15_cal = k15_raw
+        # in passthrough). If combined < 0.5 for a strong bullish Kronos in trending, block.
+        fused_trending = 0.4 * 0.85 + 0.6 * p_trending
+        if fused_trending < 0.5 and not args.dry_run:
+            print(f"\n  DEPLOY BLOCKED: fused signal at k15=0.85 trending = {fused_trending:.3f} < 0.5")
+            print("  The regime model would flip a strong Kronos UP to a DOWN trade.")
+            print("  Wait for more trending candles, or review weight split before deploying.")
+            if not args.force:
+                sys.exit(1)
+            print("  --force passed — continuing despite contextuality failure.")
+        elif not args.dry_run:
+            print(f"  Fused signal check (0.4×k15 + 0.6×regime): {fused_trending:.3f}  "
+                  f"{'✓ UP preserved' if fused_trending >= 0.5 else '✗ direction flipped'}")
+
+    except (ValueError, Exception) as exc:
+        print(f"  Could not run contextuality check: {exc}")
+    print("──────────────────────────────────────────────────────────────────────")
+
     if args.dry_run:
         print("\n--dry-run set — model NOT saved.")
         return
