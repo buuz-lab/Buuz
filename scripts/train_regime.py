@@ -323,10 +323,11 @@ def main() -> None:
             print("  WARNING: Kronos importance = 0% — model ignored Kronos entirely.")
 
         # Hard deploy gate: if the model would flip direction on a strong Kronos trending
-        # signal at the 0.4/0.6 fusion weight, the regime model destroys trending edge.
-        # Simulate: combined = 0.4 * k15_cal + 0.6 * regime_prob (with k15_cal = k15_raw
-        # in passthrough). If combined < 0.5 for a strong bullish Kronos in trending, block.
-        fused_trending = 0.4 * 0.85 + 0.6 * p_trending
+        # signal at the 0.2/0.8 fusion weight (regime v2 target), the regime model
+        # destroys trending edge. Simulate: combined = 0.2 * k15_cal + 0.8 * regime_prob
+        # (with k15_cal = k15_raw in passthrough). If combined < 0.5 for a strong bullish
+        # Kronos in trending, block.
+        fused_trending = 0.2 * 0.85 + 0.8 * p_trending
         if fused_trending < 0.5 and not args.dry_run:
             print(f"\n  DEPLOY BLOCKED: fused signal at k15=0.85 trending = {fused_trending:.3f} < 0.5")
             print("  The regime model would flip a strong Kronos UP to a DOWN trade.")
@@ -335,7 +336,7 @@ def main() -> None:
                 sys.exit(1)
             print("  --force passed — continuing despite contextuality failure.")
         elif not args.dry_run:
-            print(f"  Fused signal check (0.4×k15 + 0.6×regime): {fused_trending:.3f}  "
+            print(f"  Fused signal check (0.2×k15 + 0.8×regime): {fused_trending:.3f}  "
                   f"{'✓ UP preserved' if fused_trending >= 0.5 else '✗ direction flipped'}")
 
     except (ValueError, Exception) as exc:
