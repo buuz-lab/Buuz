@@ -4,11 +4,72 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 25 complete. P&L convention restored (outcome=1=WIN all directions). Sub-20c NO setup confirmed 0W/10L — Gate 8/8b exemption reverted. Kalshi features removed from regime model to break circularity. `train_regime.py` rewritten to use `candle_features` with true `btc_direction` label (close>open). `regime.pkl` deleted — system in bootstrap mode. **Next:** regime v2 retrain when `candle_features` hits 672 rows (~June 6–7). After retrain: remove disagreement neutralization, restore `_REGIME_WEIGHT=0.4`.
+**Current focus:** Session 26 plan established. Calibrator auto-retrain deployed with inverted signal (k15_raw=0.80 → k15_cal=0.34 in neutral) — forced passthrough. Root cause: Kronos is a momentum signal; 85%+ of data is ranging where momentum anti-correlates. Three-phase plan: (1) near-term ranging shrink + CVD enforcement + calibrator direction guard, (2) regime v2 with Kronos as a feature + 0.4/0.6 weight flip making regime primary, (3) post-deploy monitoring. **Next:** implement Phase 1, then regime v2 retrain ~June 6–7 with k15_raw/k5_raw backfilled into candle_features.
 
 ---
 
 ## Current Progress
+
+**As of 2026-06-02 session 26: Calibrator inversion detected + forced passthrough. Three-phase plan to get into positive EV. 417 tests pass.**
+
+**Calibrator inversion (immediate fix):**
+
+The auto-retrain at 1,302 rows deployed a fully inverted calibration map (neutral regime):
+```
+k15_raw=0.60 → k15_cal=0.3554
+k15_raw=0.80 → k15_cal=0.3443   ← k15_raw=0.80 maps BELOW 0.5
+k15_raw=1.00 → k15_cal=0.3327
+```
+Brier improved (0.2461 → 0.2443) because Kronos is genuinely anti-correlated in ranging: k15_raw > 0.80 has a 38% historical win rate. The calibrator learned a real relationship but applied it universally, inverting every YES signal into a NO trade with no safeguard for the rare trending cases. Forced passthrough immediately via direct `.pkl` edit + service restart.
+
+**Root cause of being underwater:**
+
+Kronos is a momentum signal. The system has operated mostly in ranging market conditions (277/668 trades ranging, 44-47% WR, -$437 drag). In ranging, strong momentum readings precede mean reversion — making high-confidence Kronos calls the worst bets. The calibrator correctly learned this but cannot apply it conditionally without regime context. The regime model is the fix; the calibrator is a symptom.
+
+**Three-phase recovery plan:**
+
+---
+
+**Phase 1 — Near-term (June 2–5): Reduce damage while accumulating data**
+
+| Change | Detail |
+|--------|--------|
+| **Ranging shrink in `fusion.py` (bootstrap path)** | Replace flat `0.8` bootstrap shrink with regime-aware lookup: `ranging=0.35`, `high_uncertainty=0.50`, `trending_up/down=0.80`. Formula: `combined = 0.5 + (kronos_cal - 0.5) * shrink`. Reduces Kelly on bad-regime signals without inverting direction. Bootstrap path disappears when regime v2 deploys — no cleanup needed. |
+| **CVD Gate 7 — enforce as hard gate** | First query shadow rows: `SELECT COUNT(*), AVG(outcome) FROM gate_rejections WHERE shadow=1 AND outcome IS NOT NULL`. If ≥ 20 resolved rows and accuracy ≥ 70% when CVD opposes, flip from shadow to hard gate. |
+| **Calibrator direction guard** | Add to `fit()` before any save: `if self.transform(0.75, regime="trending_up") < 0.5: force passthrough, return`. The calibrator may compress; it cannot invert. Prevents recurrence of this session's inversion. |
+
+---
+
+**Phase 2 — Regime v2 as meta-learner (~June 6–7): Regime becomes primary signal**
+
+**Why regime as primary:** The regime model trained on `candle_features` with `btc_direction = close > open` learns to predict BTC direction from Deribit options flow, CVD, funding, fear/greed — and now Kronos itself. With k15_raw as a feature, it answers: *"given Kronos says X and market microstructure says Y, what's the actual direction?"* That's the calibration problem solved with far more context. No circularity: `candle_features` logs every 15-min candle regardless of trading.
+
+| Change | Detail |
+|--------|--------|
+| **Add `kronos_raw_15min`, `kronos_raw_5min` to `candle_features`** | Schema migration + `candle_logger_loop` update to write both from MC cache at each candle close. |
+| **Backfill 176/180 existing rows** | `gate_rejections` has 97.8% coverage via nearest timestamp within 15-min window. One-time SQL UPDATE. Rows without a match stay NULL; XGBoost handles natively. |
+| **Add both to `_FEATURE_ORDER` in `regime_model.py`** | `train_regime.py` auto-syncs via `_FEATURE_COLS = list(_FEATURE_ORDER)`. Training filter: `AND kronos_raw_15min IS NOT NULL`. |
+| **Fusion weight flip** | `_KRONOS_WEIGHT = 0.4` (was 0.8), `_REGIME_WEIGHT = 0.6` (was 0.2). Regime is now primary. |
+| **Remove disagreement neutralization** | Regime model is the authority. The neutralization block in `fusion.py` (marked "Remove after regime v2 deploys") is deleted. |
+| **Retrain gates before deploying** | CV Brier < 0.25 · Accuracy > 55% on holdout · `kronos_raw_15min` importance > 0% (model uses Kronos) · `kronos_raw_15min` importance < 30% (not just re-learning Kronos, actually using microstructure) |
+
+**candle_features timeline:** 180 rows as of June 2, accumulating ~95/day, need 672 with `kronos_raw_15min` populated → ETA June 7–8.
+
+---
+
+**Phase 3 — Post-deploy monitoring (2 weeks after regime v2)**
+
+- **WR > 53%**: regime model working — consider shifting weights to 0.3/0.7 k15/regime
+- **WR flat**: investigate feature importances — ranging shrink may be doing the work, not regime model
+- **Calibrator retrain**: once 300+ rows accumulate under new 0.4/0.6 signal, run `python3 scripts/train_calibrator.py --dry-run`. Check compression map: `transform(0.80, regime="trending_up")` must be > 0.5 before allowing save.
+
+**Current system state (June 2):**
+- Calibrator: passthrough (forced 2026-06-02T23:xx UTC)
+- `candle_features`: 180 rows (176 backfillable for k15/k5)
+- All-time P&L: **-$196.75** (668 trades, 51.8% WR)
+- Bootstrap mode: `combined = 0.5 + (kronos_cal - 0.5) * 0.8` (flat, no regime shrink yet)
+
+---
 
 **As of 2026-06-01 session 25: P&L fix, Kalshi decoupling, train_regime.py rewrite. System in bootstrap mode. 417 tests pass.**
 
