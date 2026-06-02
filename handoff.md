@@ -4,7 +4,7 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 27 complete. Phase 1 (ranging shrink + calibrator direction guard) and Phase 2 infrastructure (kronos_raw_15min/kronos_raw_5min added to regime feature set, backfill done) both shipped. 428 tests pass. **Next:** accumulate ~670 candle_features rows with Kronos populated (~June 6–7), then retrain regime model and flip weights to 0.4/0.6 (regime primary).
+**Current focus:** Session 27 complete. Phase 1 (ranging shrink + calibrator direction guard) and Phase 2 infrastructure (kronos_raw_15min/kronos_raw_5min added to regime feature set, backfill done) both shipped. 428 tests pass. **Next:** accumulate ~670 candle_features rows with Kronos populated (~June 6–7), then retrain regime model and flip weights to **0.2/0.8** (Kronos/regime). Kronos has proven unreliable in ranging short-term markets — regime becomes primary signal at deploy, Kronos kept as weak sanity check. If regime v2 performs well in production, evaluate going 0.0/1.0 after 2 weeks of data.
 
 ---
 
@@ -46,7 +46,7 @@ Deploy if ALL pass:
 - [ ] `kronos_raw_15min` importance < 30% (not just re-learning Kronos)
 
 After deploy:
-- [ ] `_KRONOS_WEIGHT = 0.4`, `_REGIME_WEIGHT = 0.6` in `fusion.py`
+- [ ] `_KRONOS_WEIGHT = 0.2`, `_REGIME_WEIGHT = 0.8` in `fusion.py`
 - [ ] Remove disagreement neutralization block in `fusion.py` (marked "Remove after regime v2 deploys")
 - [ ] Restart service
 
@@ -91,7 +91,7 @@ Kronos is a momentum signal. The system has operated mostly in ranging market co
 | **Add `kronos_raw_15min`, `kronos_raw_5min` to `candle_features`** | Schema migration applied; fusion engine caches and exposes Kronos raw values via `_regime_features()` so candle logger writes them automatically. | ✅ Done (session 27) |
 | **Backfill 192/193 existing rows** | One-time SQL UPDATE using nearest gate_rejection timestamp within ±15 min window. | ✅ Done (session 27) |
 | **Add both to `_FEATURE_ORDER` in `regime_model.py`** | `train_regime.py` auto-syncs via `_FEATURE_COLS = list(_FEATURE_ORDER)`. XGBoost treats NULL→NaN as missing natively. | ✅ Done (session 27) |
-| **Fusion weight flip** | `_KRONOS_WEIGHT = 0.4` (was 0.8), `_REGIME_WEIGHT = 0.6` (was 0.2). Regime becomes primary. | ⏳ After retrain |
+| **Fusion weight flip** | `_KRONOS_WEIGHT = 0.2` (was 0.8), `_REGIME_WEIGHT = 0.8` (was 0.2). Regime becomes primary signal; Kronos kept as weak sanity check. If regime v2 performs well after 2 weeks, evaluate going 0.0/1.0. | ⏳ After retrain |
 | **Remove disagreement neutralization** | Neutralization block in `fusion.py` (marked "Remove after regime v2 deploys"). | ⏳ After retrain |
 | **Retrain gates before deploying** | CV Brier < 0.25 · Accuracy > 55% · `kronos_raw_15min` importance > 0% and < 30% | ⏳ ~June 6–7 |
 
@@ -103,7 +103,8 @@ Kronos is a momentum signal. The system has operated mostly in ranging market co
 
 - **WR > 53%**: regime model working — consider shifting weights to 0.3/0.7 k15/regime
 - **WR flat**: investigate feature importances — ranging shrink may be doing the work, not regime model
-- **Calibrator retrain**: once 300+ rows accumulate under new 0.4/0.6 signal, run `python3 scripts/train_calibrator.py --dry-run`. Check compression map: `transform(0.80, regime="trending_up")` must be > 0.5 before allowing save.
+- **Calibrator retrain**: once 300+ rows accumulate under new 0.2/0.8 signal, run `python3 scripts/train_calibrator.py --dry-run`. Check compression map: `transform(0.80, regime="trending_up")` must be > 0.5 before allowing save.
+- **Evaluate going 0.0/1.0**: after 2 weeks of production data under 0.2/0.8, query whether Kronos's 0.2 weight is adding or subtracting. If regime is more confident AND more accurate than Kronos on resolved trades, drop Kronos entirely (`_KRONOS_WEIGHT = 0.0`).
 
 **Current system state (June 2, updated session 27):**
 - Calibrator: passthrough (direction guard prevents redeployment of inverted model)
@@ -1520,7 +1521,7 @@ Ordered by data requirements. Each item has a clear trigger condition before imp
 
 **After regime v2 deploys and validates:**
 - Remove disagreement neutralization from `fusion.py` (the `_kronos_bullish != _regime_bullish` block)
-- Restore `_REGIME_WEIGHT = 0.4` (and update `_KRONOS_WEIGHT = 0.6`)
+- Set `_KRONOS_WEIGHT = 0.2`, `_REGIME_WEIGHT = 0.8` (regime primary; see session 27 decision)
 - Update test `test_gate2_shadow_mode_does_not_block` back to `expected = 0.6 * 0.70 + 0.4 * 0.30`
 - Consider Gate 2 enforcement after 50+ shadow validation trades
 

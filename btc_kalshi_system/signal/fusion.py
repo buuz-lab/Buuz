@@ -7,7 +7,8 @@ Gate 2 (direction): Kronos ≠ regime       → log warning, and return None ONL
     config.REGIME_GATE2_ENFORCING=True. Skipped entirely if regime not trained.
 
 Combined probability formula (when both models available):
-    combined = 0.8 * kronos_calibrated + 0.2 * regime_prob
+    combined = 0.8 * kronos_calibrated + 0.2 * regime_prob   ← current (bootstrap)
+    # At regime v2 deploy: flip to 0.2 * kronos_calibrated + 0.8 * regime_prob
     if deepseek_regime == "high_uncertainty":
         combined = 0.5 + (combined - 0.5) * 0.5   # 50% shrink
     elif deepseek_regime == "ranging":
