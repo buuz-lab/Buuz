@@ -4,11 +4,53 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 26 plan established. Calibrator auto-retrain deployed with inverted signal (k15_raw=0.80 → k15_cal=0.34 in neutral) — forced passthrough. Root cause: Kronos is a momentum signal; 85%+ of data is ranging where momentum anti-correlates. Three-phase plan: (1) near-term ranging shrink + CVD enforcement + calibrator direction guard, (2) regime v2 with Kronos as a feature + 0.4/0.6 weight flip making regime primary, (3) post-deploy monitoring. **Next:** implement Phase 1, then regime v2 retrain ~June 6–7 with k15_raw/k5_raw backfilled into candle_features.
+**Current focus:** Session 27 complete. Phase 1 (ranging shrink + calibrator direction guard) and Phase 2 infrastructure (kronos_raw_15min/kronos_raw_5min added to regime feature set, backfill done) both shipped. 428 tests pass. **Next:** accumulate ~670 candle_features rows with Kronos populated (~June 6–7), then retrain regime model and flip weights to 0.4/0.6 (regime primary).
 
 ---
 
 ## Current Progress
+
+**As of 2026-06-02 session 27: Phase 1 + Phase 2 infrastructure shipped. 428 tests pass.**
+
+**Changes — session 27:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `btc_kalshi_system/signal/fusion.py` | **Bootstrap regime-aware shrink**: replaced flat `_BOOTSTRAP_SHRINK=0.8` with regime-aware lookup (`ranging=0.35`, `high_uncertainty=0.50`, `trending_up/down=0.80`). Formula unchanged: `combined = 0.5 + (kronos_cal - 0.5) * shrink`. Reduces Kelly damage in ranging without inverting direction. | ✅ |
+| `btc_kalshi_system/models/calibrator.py` | **Direction sanity guard in `fit()`**: before deploying any new model, checks `transform(0.75, regime="trending_up") >= 0.5`. If the calibrator learned to invert momentum signals (as happened with the inverted auto-retrain), it reverts to passthrough instead of deploying. Guards both regime-aware and non-regime-aware fits. | ✅ |
+| `btc_kalshi_system/models/regime_model.py` | **`_FEATURE_ORDER` expanded to 28 features**: added `"kronos_raw_15min"` and `"kronos_raw_5min"` at the end. `get_regime()` converts `None` → `float('nan')` for bootstrap rows where Kronos hasn't fired yet (XGBoost treats NaN as missing natively). | ✅ |
+| `btc_kalshi_system/signal/fusion.py` | **Fusion engine caches Kronos raw values**: `self._last_kronos_raw_15min` and `self._last_kronos_raw_5min` set on every `get_signal()` call; exposed via `_regime_features()` so the candle logger gets them automatically through `get_features_snapshot()`. | ✅ |
+| `main.py` | **`_CANDLE_FEATURES_COLUMN_MIGRATIONS`**: added `("kronos_raw_15min", "REAL DEFAULT NULL")` and `("kronos_raw_5min", "REAL DEFAULT NULL")`. Migrations applied manually to production DB before restart. | ✅ |
+| `trades.db` | **Backfill**: 192/193 existing `candle_features` rows updated with Kronos values from `gate_rejections` nearest-timestamp join (±15 min window). 1 row unmatchable (no gate rejection within window). | ✅ |
+| Tests | 8 new tests across `test_regime_model.py`, `test_feature_order.py`, `test_main_candle_logger.py`, `test_fusion.py`, `test_fusion_deribit_features.py`. 428 total pass. | ✅ |
+
+**Why fusion caches Kronos (not candle_logger patching):**
+The `_regime_features()` method must return exactly the features in `_FEATURE_ORDER` for the `test_feature_order_all_three_match` consistency check to pass. Having the fusion engine cache and expose Kronos values keeps the 3-file contract clean (fusion → regime_model → train_regime all stay in sync). The candle logger requires zero changes.
+
+**System state after session 27:**
+- Calibrator: passthrough (forced session 26, direction guard prevents recurrence)
+- Bootstrap shrink: `ranging=0.35×`, `high_uncertainty=0.50×`, `trending_up/down=0.80×`
+- `candle_features`: 193 rows, 192 with `kronos_raw_15min` populated; ~96/day accumulating
+- ETA for 670 rows with Kronos: ~June 6–7 (4–5 days from session 27)
+- Service restarted at 2026-06-02 21:35 UTC with new code; first live-logged Kronos row next candle close (~04:30 UTC)
+- All-time P&L: -$196.75 (as of session 26)
+
+**Next: regime v2 retrain checklist (~June 6–7)**
+```
+python3 scripts/train_regime.py --dry-run
+```
+Deploy if ALL pass:
+- [ ] CV Brier < 0.25
+- [ ] Accuracy > 55% on holdout
+- [ ] `kronos_raw_15min` importance > 0% (model uses Kronos)
+- [ ] `kronos_raw_15min` importance < 30% (not just re-learning Kronos)
+
+After deploy:
+- [ ] `_KRONOS_WEIGHT = 0.4`, `_REGIME_WEIGHT = 0.6` in `fusion.py`
+- [ ] Remove disagreement neutralization block in `fusion.py` (marked "Remove after regime v2 deploys")
+- [ ] Restart service
+
+---
 
 **As of 2026-06-02 session 26: Calibrator inversion detected + forced passthrough. Three-phase plan to get into positive EV. 417 tests pass.**
 
@@ -44,16 +86,16 @@ Kronos is a momentum signal. The system has operated mostly in ranging market co
 
 **Why regime as primary:** The regime model trained on `candle_features` with `btc_direction = close > open` learns to predict BTC direction from Deribit options flow, CVD, funding, fear/greed — and now Kronos itself. With k15_raw as a feature, it answers: *"given Kronos says X and market microstructure says Y, what's the actual direction?"* That's the calibration problem solved with far more context. No circularity: `candle_features` logs every 15-min candle regardless of trading.
 
-| Change | Detail |
-|--------|--------|
-| **Add `kronos_raw_15min`, `kronos_raw_5min` to `candle_features`** | Schema migration + `candle_logger_loop` update to write both from MC cache at each candle close. |
-| **Backfill 176/180 existing rows** | `gate_rejections` has 97.8% coverage via nearest timestamp within 15-min window. One-time SQL UPDATE. Rows without a match stay NULL; XGBoost handles natively. |
-| **Add both to `_FEATURE_ORDER` in `regime_model.py`** | `train_regime.py` auto-syncs via `_FEATURE_COLS = list(_FEATURE_ORDER)`. Training filter: `AND kronos_raw_15min IS NOT NULL`. |
-| **Fusion weight flip** | `_KRONOS_WEIGHT = 0.4` (was 0.8), `_REGIME_WEIGHT = 0.6` (was 0.2). Regime is now primary. |
-| **Remove disagreement neutralization** | Regime model is the authority. The neutralization block in `fusion.py` (marked "Remove after regime v2 deploys") is deleted. |
-| **Retrain gates before deploying** | CV Brier < 0.25 · Accuracy > 55% on holdout · `kronos_raw_15min` importance > 0% (model uses Kronos) · `kronos_raw_15min` importance < 30% (not just re-learning Kronos, actually using microstructure) |
+| Change | Detail | Status |
+|--------|--------|--------|
+| **Add `kronos_raw_15min`, `kronos_raw_5min` to `candle_features`** | Schema migration applied; fusion engine caches and exposes Kronos raw values via `_regime_features()` so candle logger writes them automatically. | ✅ Done (session 27) |
+| **Backfill 192/193 existing rows** | One-time SQL UPDATE using nearest gate_rejection timestamp within ±15 min window. | ✅ Done (session 27) |
+| **Add both to `_FEATURE_ORDER` in `regime_model.py`** | `train_regime.py` auto-syncs via `_FEATURE_COLS = list(_FEATURE_ORDER)`. XGBoost treats NULL→NaN as missing natively. | ✅ Done (session 27) |
+| **Fusion weight flip** | `_KRONOS_WEIGHT = 0.4` (was 0.8), `_REGIME_WEIGHT = 0.6` (was 0.2). Regime becomes primary. | ⏳ After retrain |
+| **Remove disagreement neutralization** | Neutralization block in `fusion.py` (marked "Remove after regime v2 deploys"). | ⏳ After retrain |
+| **Retrain gates before deploying** | CV Brier < 0.25 · Accuracy > 55% · `kronos_raw_15min` importance > 0% and < 30% | ⏳ ~June 6–7 |
 
-**candle_features timeline:** 180 rows as of June 2, accumulating ~95/day, need 672 with `kronos_raw_15min` populated → ETA June 7–8.
+**candle_features timeline:** 193 rows as of June 2 session 27, 192 with Kronos populated, accumulating ~96/day, need ~670 with `kronos_raw_15min` → ETA June 6–7.
 
 ---
 
@@ -63,11 +105,12 @@ Kronos is a momentum signal. The system has operated mostly in ranging market co
 - **WR flat**: investigate feature importances — ranging shrink may be doing the work, not regime model
 - **Calibrator retrain**: once 300+ rows accumulate under new 0.4/0.6 signal, run `python3 scripts/train_calibrator.py --dry-run`. Check compression map: `transform(0.80, regime="trending_up")` must be > 0.5 before allowing save.
 
-**Current system state (June 2):**
-- Calibrator: passthrough (forced 2026-06-02T23:xx UTC)
-- `candle_features`: 180 rows (176 backfillable for k15/k5)
+**Current system state (June 2, updated session 27):**
+- Calibrator: passthrough (direction guard prevents redeployment of inverted model)
+- Bootstrap shrink: regime-aware (`ranging=0.35×`, `high_uncertainty=0.50×`, `trending=0.80×`)
+- `candle_features`: 193 rows, 192 with kronos_raw_15min populated (backfill complete)
 - All-time P&L: **-$196.75** (668 trades, 51.8% WR)
-- Bootstrap mode: `combined = 0.5 + (kronos_cal - 0.5) * 0.8` (flat, no regime shrink yet)
+- Service restarted session 27 with all Phase 1 + Phase 2 infrastructure changes live
 
 ---
 
