@@ -4,13 +4,26 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 27 complete. Phase 1 (ranging shrink + calibrator direction guard) and Phase 2 infrastructure (kronos_raw_15min/kronos_raw_5min added to regime feature set, backfill done) both shipped. 428 tests pass. **Next:** accumulate ~670 candle_features rows with Kronos populated (~June 6–7), then retrain regime model and flip weights to **0.2/0.8** (Kronos/regime). Kronos has proven unreliable in ranging short-term markets — regime becomes primary signal at deploy, Kronos kept as weak sanity check. If regime v2 performs well in production, evaluate going 0.0/1.0 after 2 weeks of data.
+**Current focus:** Session 28 complete. Phase 1 + Phase 2 infrastructure shipped. `auto_retrain_regime.py` built (TDD, 25 tests). Deploy gate weights fixed to 0.2/0.8 in `train_regime.py`. 453 tests pass. **Next:** accumulate ~670 candle_features rows with Kronos populated (~June 6–7), then retrain regime model and flip weights to **0.2/0.8** (Kronos/regime). Kronos has proven unreliable in ranging short-term markets — regime becomes primary signal at deploy, Kronos kept as weak sanity check. If regime v2 performs well in production, evaluate going 0.0/1.0 after 2 weeks of data.
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-02 session 27: Phase 1 + Phase 2 infrastructure shipped. 428 tests pass.**
+**As of 2026-06-01 session 28: auto_retrain_regime.py built (TDD). Deploy gate weights corrected. 453 tests pass.**
+
+**Changes — session 28:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `scripts/auto_retrain_regime.py` | **New**: weekly cron (Sun 3am) that trains a candidate RegimeModel in-process, evaluates holdout Brier against deployed model, and saves only when candidate strictly improves. Triggers: +200 rows or 14 days elapsed. Min rows: 672. Rolling window: 2000. Holdout guard: candidate_brier < deployed_brier. Key functions: `get_qualifying_count`, `load/save_marker`, `brier_score`, `evaluate_deployed_model`, `should_retrain`, `should_deploy`. | ✅ |
+| `scripts/train_regime.py` | **Fix deploy gate weights**: was using `0.4 × k15 + 0.6 × regime` (old session 26 weights); corrected to `0.2 × k15 + 0.8 × regime` to match target weight split. | ✅ |
+| `tests/test_auto_retrain_regime.py` | 25 new tests written TDD (red before green). All pass. | ✅ |
+| crontab | Added weekly entry: `0 3 * * 0 python3 scripts/auto_retrain_regime.py >> logs/auto_retrain_regime.log` | ✅ |
+
+---
+
+**As of 2026-06-01 session 27: Phase 1 + Phase 2 infrastructure shipped. 428 tests pass.**
 
 **Changes — session 27:**
 
@@ -106,12 +119,13 @@ Kronos is a momentum signal. The system has operated mostly in ranging market co
 - **Calibrator retrain**: once 300+ rows accumulate under new 0.2/0.8 signal, run `python3 scripts/train_calibrator.py --dry-run`. Check compression map: `transform(0.80, regime="trending_up")` must be > 0.5 before allowing save.
 - **Evaluate going 0.0/1.0**: after 2 weeks of production data under 0.2/0.8, query whether Kronos's 0.2 weight is adding or subtracting. If regime is more confident AND more accurate than Kronos on resolved trades, drop Kronos entirely (`_KRONOS_WEIGHT = 0.0`).
 
-**Current system state (June 2, updated session 27):**
+**Current system state (June 1, updated session 28):**
 - Calibrator: passthrough (direction guard prevents redeployment of inverted model)
 - Bootstrap shrink: regime-aware (`ranging=0.35×`, `high_uncertainty=0.50×`, `trending=0.80×`)
 - `candle_features`: 193 rows, 192 with kronos_raw_15min populated (backfill complete)
 - All-time P&L: **-$196.75** (668 trades, 51.8% WR)
-- Service restarted session 27 with all Phase 1 + Phase 2 infrastructure changes live
+- Service running with Phase 1 + Phase 2 infrastructure live; 453 tests pass
+- `auto_retrain_regime.py` cron active: Sunday 3am weekly retrain with holdout guard
 
 ---
 
