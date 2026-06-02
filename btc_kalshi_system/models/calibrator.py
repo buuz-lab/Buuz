@@ -90,10 +90,31 @@ class Calibrator:
         beats_prev = self._prev_brier is None or holdout_brier < self._prev_brier
 
         if beats_passthrough and beats_prev:
-            self._model = new_model
-            self._passthrough = False
-            self._prev_brier = holdout_brier
-            self._regime_aware = use_regime
+            # Direction sanity guard: calibrated output must not invert direction in the
+            # most trusted regime (trending_up). If transform(0.75, trending_up) < 0.5 the
+            # model learned the ranging anti-correlation but cannot apply it conditionally —
+            # deploying would invert every trending signal.
+            if use_regime:
+                guard_X = np.array([[0.75, 0.75 ** 2, _encode_regime("trending_up")]])
+            else:
+                guard_X = np.array([[0.75, 0.75 ** 2]])
+            guard_val = float(np.clip(new_model.predict_proba(guard_X)[:, 1], 0.0, 1.0)[0])
+            direction_ok = guard_val >= 0.5
+            if not direction_ok:
+                logger.warning(
+                    f"Calibrator direction guard: transform(0.75, trending_up)={guard_val:.4f} < 0.5"
+                    " — inverted signal detected. Forcing passthrough."
+                )
+            if direction_ok:
+                self._model = new_model
+                self._passthrough = False
+                self._prev_brier = holdout_brier
+                self._regime_aware = use_regime
+            else:
+                self._model = prev_model
+                self._passthrough = prev_passthrough
+                if prev_passthrough:
+                    self._prev_brier = passthrough_holdout_brier
         else:
             logger.warning(
                 f"Calibrator: holdout Brier {holdout_brier:.4f} vs passthrough "

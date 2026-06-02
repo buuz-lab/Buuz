@@ -49,6 +49,13 @@ _REGIME_WEIGHT = 0.2
 _UNCERTAINTY_SHRINK = 0.5   # applied when DeepSeek signals high_uncertainty
 _RANGING_SHRINK = 0.7       # applied when DeepSeek signals ranging (noisy, not untradeable)
 _BOOTSTRAP_SHRINK = 0.8     # applied when RegimeModel is untrained (bootstrap phase)
+# In bootstrap, DeepSeek regime still informs Kronos compression. Ranging/high_uncertainty
+# have shown anti-correlated Kronos signals — shrink more aggressively to reduce Kelly
+# damage without inverting direction. trending_up/down fall back to _BOOTSTRAP_SHRINK.
+_BOOTSTRAP_REGIME_SHRINK: dict[str, float] = {
+    "ranging":          0.35,
+    "high_uncertainty": 0.50,
+}
 
 
 @dataclass
@@ -197,12 +204,9 @@ class SignalFusionEngine:
             # no paper trades were placed and the calibrator could never train.
             regime_prob = math.nan
             regime_direction = -1
-            base_shrink = _BOOTSTRAP_SHRINK
+            base_shrink = _BOOTSTRAP_REGIME_SHRINK.get(deepseek_regime, _BOOTSTRAP_SHRINK)
             if self._drift_monitor is not None and self._drift_monitor.is_drifting():
                 base_shrink = min(base_shrink, 0.4)
-            # In bootstrap mode the calibrator is passthrough (k15_raw = k15_cal),
-            # so DeepSeek regime should not override _BOOTSTRAP_SHRINK — that would
-            # double-penalise an already well-calibrated signal.
             combined = 0.5 + (kronos_cal - 0.5) * base_shrink
 
         direction = 1 if combined >= 0.5 else 0

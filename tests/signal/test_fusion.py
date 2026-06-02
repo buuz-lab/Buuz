@@ -266,6 +266,50 @@ def test_not_trained_sentinel_fields():
     assert result.regime_direction == -1
 
 
+def test_bootstrap_ranging_applies_035_shrink():
+    """In bootstrap + ranging, Kronos signal compressed to 0.35× toward 0.5."""
+    engine = make_engine(
+        kronos_cal=0.80,
+        raise_not_trained=True,
+        deepseek_result=_ds_result(regime="ranging"),
+    )
+    result = engine.get_signal("5min", 76000.0)
+    assert result.calibrated_prob == pytest.approx(0.5 + (0.80 - 0.5) * 0.35)
+
+
+def test_bootstrap_high_uncertainty_applies_050_shrink():
+    """In bootstrap + high_uncertainty, Kronos signal compressed to 0.50× toward 0.5."""
+    engine = make_engine(
+        kronos_cal=0.80,
+        raise_not_trained=True,
+        deepseek_result=_ds_result(regime="high_uncertainty"),
+    )
+    result = engine.get_signal("5min", 76000.0)
+    assert result.calibrated_prob == pytest.approx(0.5 + (0.80 - 0.5) * 0.50)
+
+
+def test_bootstrap_trending_up_keeps_080_shrink():
+    """In bootstrap + trending_up, full _BOOTSTRAP_SHRINK (0.80) is preserved."""
+    engine = make_engine(
+        kronos_cal=0.80,
+        raise_not_trained=True,
+        deepseek_result=_ds_result(regime="trending_up"),
+    )
+    result = engine.get_signal("5min", 76000.0)
+    assert result.calibrated_prob == pytest.approx(0.5 + (0.80 - 0.5) * _BOOTSTRAP_SHRINK)
+
+
+def test_bootstrap_unknown_regime_falls_back_to_080():
+    """In bootstrap + unknown regime string, falls back to _BOOTSTRAP_SHRINK (0.80)."""
+    engine = make_engine(
+        kronos_cal=0.80,
+        raise_not_trained=True,
+        deepseek_result=_ds_result(regime="unknown_regime"),
+    )
+    result = engine.get_signal("5min", 76000.0)
+    assert result.calibrated_prob == pytest.approx(0.5 + (0.80 - 0.5) * _BOOTSTRAP_SHRINK)
+
+
 # ── TradingSignal field correctness ───────────────────────────────────────────
 
 def test_signal_carries_raw_and_calibrated_kronos():

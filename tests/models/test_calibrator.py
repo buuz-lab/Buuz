@@ -15,6 +15,19 @@ def _synthetic_data(n: int = 1000, seed: int = 42):
     return raw, outcomes
 
 
+def _compressed_data(n: int = 300, seed: int = 7):
+    """Data with positive raw-outcome correlation where the true probability is
+    heavily compressed toward 0.5 (raw=0.90→true_prob=0.60, raw=0.10→true_prob=0.40).
+    Passthrough (which uses raw=0.90 directly) has much higher Brier than the model,
+    so deployment is reliable. transform(0.75) stays > 0.5 — passes direction guard."""
+    rng = np.random.default_rng(seed)
+    n_high, n_low = n // 2, n - n // 2
+    raw = np.concatenate([np.full(n_high, 0.90), np.full(n_low, 0.10)])
+    true_prob = np.where(raw > 0.5, 0.60, 0.40)
+    outcomes = (rng.uniform(0, 1, n) < true_prob).astype(float)
+    return raw, outcomes
+
+
 # ── fit / transform ────────────────────────────────────────────────────────────
 
 def test_transform_returns_float_after_fit():
@@ -35,13 +48,9 @@ def test_transform_output_in_unit_interval():
 
 def test_calibrated_output_differs_from_raw_after_fit():
     cal = Calibrator()
-    # Inverted signal: raw > 0.6 → mostly outcome=0. Logistic learns the inversion
-    # and beats passthrough on holdout, so calibrator deploys.
-    rng = np.random.default_rng(7)
-    n = 2000
-    raw = rng.uniform(0, 1, n)
-    p_outcome = np.where(raw > 0.6, 0.15, 0.85)
-    outcomes = (rng.uniform(0, 1, n) < p_outcome).astype(float)
+    # Compressed signal: true_prob = 0.25 + 0.5*raw. Model beats passthrough (which
+    # uses raw directly) because raw over/underestimates the true probability.
+    raw, outcomes = _compressed_data(n=2000)
     cal.fit(raw, outcomes)
     diffs = [abs(cal.transform(float(p)) - float(p)) for p in np.linspace(0.1, 0.9, 9)]
     assert max(diffs) > 1e-6
@@ -132,17 +141,15 @@ def test_fit_uses_y_up_labels():
 def test_minimum_training_rows_is_100():
     """_MIN_SAMPLES=100 applies to the training split, not total rows.
     With 20% holdout: n=123 → n_train=99 → passthrough; n=124 → n_train=100 → fits."""
-    # n=123: n_holdout=24, n_train=99 < 100 → passthrough
+    # n=123: n_holdout=24, n_train=99 < 100 → passthrough (n_train guard fires first)
     cal_under = Calibrator()
-    raw_under = np.array([0.1] * 62 + [0.9] * 61)
-    y_under = np.array([1.0] * 62 + [0.0] * 61)
+    raw_under, y_under = _compressed_data(n=123, seed=7)
     cal_under.fit(raw_under, y_under)
     assert cal_under._passthrough is True
 
-    # n=124: n_holdout=24, n_train=100 = _MIN_SAMPLES → fits (clear inversion beats passthrough)
+    # n=124: n_holdout=24, n_train=100 = _MIN_SAMPLES → fitting proceeds and deploys
     cal_at = Calibrator()
-    raw_at = np.array([0.1] * 62 + [0.9] * 62)
-    y_at = np.array([1.0] * 62 + [0.0] * 62)
+    raw_at, y_at = _compressed_data(n=124, seed=7)
     cal_at.fit(raw_at, y_at)
     assert cal_at._passthrough is False
 
@@ -150,9 +157,8 @@ def test_minimum_training_rows_is_100():
 def test_holdout_guard_reverts_when_fit_does_not_beat_passthrough():
     """After a good fit, a second fit where holdout Brier ≥ passthrough reverts to first model."""
     cal = Calibrator()
-    # First fit: clear inversion — beats passthrough on holdout, deploys
-    raw_good = np.array([0.1] * 200 + [0.9] * 200)
-    y_good = np.array([1.0] * 200 + [0.0] * 200)
+    # First fit: compressed signal — beats passthrough on holdout, deploys, passes direction guard
+    raw_good, y_good = _compressed_data(n=400)
     cal.fit(raw_good, y_good)
     assert not cal._passthrough
     model_after_first = cal._model
@@ -186,25 +192,26 @@ def test_save_load_with_correct_labels():
 def test_calibrator_uses_logistic_regression():
     """Calibrator should use LogisticRegression, not IsotonicRegression."""
     from sklearn.linear_model import LogisticRegression
-    # Clear inversion so calibrator deploys (needed to assert _model is set)
+    # Compressed signal so calibrator deploys (needed to assert _model is set)
     cal = Calibrator()
-    raw = np.array([0.1] * 250 + [0.9] * 250)
-    outcomes = np.array([1.0] * 250 + [0.0] * 250)
+    raw, outcomes = _compressed_data(n=500)
     cal.fit(raw, outcomes)
     assert isinstance(cal._model, LogisticRegression)
 
 
-def test_inverted_signal_calibrated_below_half():
-    """High raw→low outcome (k15_raw>0.8 = P(up)=0.38) should calibrate below 0.5."""
+def test_inverted_signal_stays_passthrough_via_direction_guard():
+    """High raw→low outcome (k15_raw>0.8 = P(up)=0.38) triggers direction guard — stays passthrough.
+    Previously this inverted signal was deployed; the guard now blocks it to prevent
+    live signal inversion (session 26 fix)."""
     rng = np.random.default_rng(7)
     n = 600
     raw = rng.uniform(0.0, 1.0, n)
-    # Inverted-U: high raw (>0.7) → mostly outcome=0; mid range → mostly outcome=1
     p_outcome = np.where(raw > 0.7, 0.15, np.where(raw < 0.3, 0.25, 0.75))
     outcomes = (rng.uniform(0, 1, n) < p_outcome).astype(float)
     cal = Calibrator()
     cal.fit(raw, outcomes)
-    assert cal.transform(0.9) < 0.5
+    assert cal._passthrough is True
+    assert cal.transform(0.9) == pytest.approx(0.9)
 
 
 def test_passthrough_still_works_below_min_samples_logistic():
@@ -288,6 +295,20 @@ def test_ranging_and_high_uncertainty_encoded_differently():
     assert _encode_regime("high_uncertainty") == pytest.approx(-0.3)
     assert _encode_regime("ranging") != pytest.approx(_encode_regime("high_uncertainty"))
     assert _encode_regime("unknown_junk") == pytest.approx(0.0)  # fallback unchanged
+
+
+def test_direction_guard_blocks_inverted_model():
+    """When fit() produces a model where transform(0.75, trending_up) < 0.5, guard forces passthrough."""
+    rng = np.random.default_rng(7)
+    n = 600
+    raw = rng.uniform(0.0, 1.0, n)
+    # High raw → mostly outcome=0 (inverted signal — as seen in live ranging market data)
+    p_outcome = np.where(raw > 0.7, 0.15, np.where(raw < 0.3, 0.25, 0.75))
+    outcomes = (rng.uniform(0, 1, n) < p_outcome).astype(float)
+    cal = Calibrator()
+    cal.fit(raw, outcomes)
+    assert cal._passthrough is True
+    assert cal.transform(0.9) == pytest.approx(0.9)
 
 
 def test_regime_save_load_preserves_aware_flag():
