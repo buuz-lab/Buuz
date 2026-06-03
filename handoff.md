@@ -4,11 +4,45 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 29 complete. WebSocket orderbook cache shipped — `KalshiOrderbookFeed` eliminates ~300ms REST round-trip on every `get_orderbook()` call. 480 tests pass. **Next:** monitor WS hit rate in production logs, then continue accumulating candle_features rows for regime v2 retrain (~June 6–7).
+**Current focus:** Session 30 complete. WS orderbook feed now live and serving cache hits. Root cause of 401s was a stale API key — old key had no WS access, new key works. **Next:** monitor WS hit rate and REST fallback frequency, then regime v2 retrain (~June 6–7).
 
 ---
 
 ## Current Progress
+
+**As of 2026-06-03 session 30: WS orderbook feed live. API key rotated. Cache hits confirmed.**
+
+**Goal:** Debug WS 401 errors from session 29 and get `KalshiOrderbookFeed` actually serving from cache.
+
+**Root cause:** The old API key (`9c53fcaf-13aa-46d6-ae4b-0a8f1363ede2`) did not have WebSocket access. This was invisible because the system only calls *public* Kalshi endpoints in paper trading mode (market list, orderbook, market status) — none of which require auth. The key was silently broken for authenticated endpoints the entire time.
+
+**Changes — session 30:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `.env` | `KALSHI_API_KEY_ID` updated to `0a02bace-b8db-467c-9c8a-10ac155e6344` (new key with WS access) | ✅ |
+| `keys/kalshi_private.key` | Replaced with new RSA private key (`regimev2.txt` from Kalshi dashboard) | ✅ |
+| `btc_kalshi_system/execution/kalshi_orderbook_feed.py` | `run()` now probe-connects once on startup; bails out cleanly on 401 instead of retrying every 30s forever | ✅ |
+
+**Verification:**
+- `GET /trade-api/v2/portfolio/balance` → `200 OK, $11.89` (authenticated REST now works)
+- `wss://api.elections.kalshi.com/trade-api/ws/v2` → connected, subscribed, `{"type":"subscribed",...}` received
+- Service logs: `WS orderbook: connected`, snapshot received within 30s of first cycle, drain loop subscribing/unsubscribing correctly on market roll
+
+**What we learned:**
+- The Kalshi elections API WS uses the same RSA-PSS header auth as REST — no ticket-based flow, no separate toggle. It was purely a key permission issue.
+- In paper trading mode, the system NEVER makes authenticated REST calls (orders simulated, portfolio in-memory). A broken auth key is completely invisible until you try WS or live trading.
+- The old key had been silently broken the whole time. Any move to live trading would have failed at `place_order`.
+- On market roll (every 15 min), the first cycle after the new ticker appears falls back to REST once, then the drain loop subscribes the new ticker and subsequent cycles hit WS cache.
+- `NOT_FOUND` in Kalshi's 401 body = API key not recognized for WS, not a signing bug.
+
+**Next Steps:**
+1. Monitor WS hit rate: `grep "WS orderbook cache hit\|falling back to REST" logs/kronos_*.log`. Target: only one REST fallback per 15-min market roll, all others WS.
+2. **Regime v2 retrain** (~June 6–7): `python3 scripts/train_regime.py --dry-run`. Needs ~670 `candle_features` rows with `kronos_raw_15min`.
+3. After regime retrain: flip `_KRONOS_WEIGHT=0.2` / `_REGIME_WEIGHT=0.8`, remove disagreement neutralization in `fusion.py`.
+4. Before any live trading: verify `POST /trade-api/v2/portfolio/orders` works with new key (paper mode never tested order placement).
+
+---
 
 **As of 2026-06-03 session 29: WebSocket orderbook cache. 480 tests pass.**
 
