@@ -1608,6 +1608,65 @@ With the background loop, the 23s per run stops being on the critical path entir
 
 ---
 
+## Gate & Profitability Improvements (Backtest-Validated, Session 31)
+
+Derived from session 31 analysis of 335+ resolved trades. The system has a profitable signal buried under bad timing, regime selection, and Kelly oversizing. Three gates are ready to implement now; two require new data.
+
+**Backtest baseline:** -$0.51/trade on all trades.
+**With all three "now" gates:** +$0.33/trade on 58 trades (57.1% WR) using current signal.
+**Best combo (current signal):** +$0.60/trade on 35 trades (57.1% WR).
+
+---
+
+### Gate A — Candle Progress Cap (implement now)
+**Change:** Reject trades where `candle_progress > 0.15` (first ~135 seconds only).
+**Location:** `btc_kalshi_system/execution/pretrade_checklist.py` — new gate.
+**Why:** 216 of 335 trades were placed after 15% progress. Those 216 trades lost **-$174.81** combined. The 119 trades in the first 2 minutes were nearly flat (+$2.64). The 10–67% window is -$0.61 to -$2.20/trade regardless of signal quality.
+**Signal reasoning:** Regime v2's features are all pre-candle (funding, CVD, momentum) — they're fully valid at T=0 and don't improve as the candle progresses. Kalshi's price, however, drifts toward the outcome within minutes. Entering late means paying for information the market already has.
+**Does regime v2 fix this?** No. Regime v2 improves direction prediction but doesn't know it's entering late. This gate is independent and needed regardless.
+
+---
+
+### Gate B — Kelly Hard Cap at $8 (implement now)
+**Change:** Reject trades (or hard-scale to $8) where `kelly_dollars > 8`.
+**Location:** `btc_kalshi_system/execution/pretrade_checklist.py` — new gate, or in `kelly.py` as a hard ceiling.
+**Why:** kelly ≥ $10 trades have **35.1% win rate and -$3.30/trade** average. Kelly < $5 trades have 51.7% win rate and -$0.05/trade. Large Kelly sizes land on the high-confidence signals (k15 > 0.80) that are empirically inverted. The calibrator is in passthrough mode and can't compress those — so a hard gate is needed until calibration is fixed.
+**Does regime v2 fix this?** Partially — regime v2 at 80% weight produces different probability estimates that won't necessarily chase k15=0.90 signals. But until we have live data confirming regime v2's Kelly sizing is better, cap it explicitly.
+**Remove when:** Calibrator exits passthrough and Brier is trending below 0.22 on recent trades.
+
+---
+
+### Gate C — Edge Upper Bound at 20¢ (implement now)
+**Change:** Gate 5 currently only has a floor (`edge > threshold`). Add ceiling: also reject when `edge > 0.20`.
+**Location:** `btc_kalshi_system/execution/pretrade_checklist.py` Gate 5.
+**Why:** The >20¢ edge bucket (221 trades historically) wins at only **46.2%** — worse than a coin flip. High edge = the model is very confident = the calibrator is in passthrough outputting uncalibrated extreme probabilities. Those extreme probs lead to large calculated edges that don't reflect real alpha.
+**Does regime v2 fix this?** Partially — with regime v2 at 80% weight, `combined` is less likely to produce extreme values driven purely by k15. But keep the cap until the fused edge distribution is observed on live trades and the right ceiling is confirmed.
+**Note:** Once regime v2 is live, the edge is computed from the fused signal. The 20¢ ceiling may need recalibrating — the fused edge distribution is tighter. Revisit after 50 regime v2 trades.
+
+---
+
+### Gate D — Ranging Suppression (at regime v2 deployment, ~June 8)
+**Change:** Not an explicit gate — deploy regime v2 at 80% weight. Ranging trades die naturally because regime v2 outputs low `prob_up` in ranging, pulling `combined` below 0.5 or below Gate 5's edge threshold.
+**Why:** Ranging is **-$1.75/trade on 227 trades** (-$397 total) — the single biggest money pit. Regime v2 learned k15=0.85 in ranging → `prob_up=0.27` (DOWN), meaning it correctly opposes Kronos in ranging. The fused signal will naturally suppress these entries.
+**Fallback if regime v2 isn't working:** Add explicit gate `if deepseek_regime == 'ranging': reject`. But prefer regime v2's principled approach over a hard label block.
+
+---
+
+### Gate E — Kalshi Drift Gate (after kalshi_open_mid data accumulates, ~June 15+)
+**Change:** Reject trades where Kalshi has moved more than 10¢ from candle open to current signal time: `abs(fill_price/100 - kalshi_open_mid) > 0.10`.
+**Location:** `btc_kalshi_system/execution/pretrade_checklist.py` — new gate using `kalshi_open_mid` from Redis (write it there when the open snapshot is captured).
+**Why:** Early entry (Gate A) blocks entries after 15% progress. But even within the 0–15% window, Kalshi can move 10¢ if BTC gaps on the open. When Kalshi drifts far from 50¢ in the first 2 minutes, the market already has information. The `kalshi_open_mid` + `kalshi_mid_candle_mid` data being collected since session 31 will quantify this.
+**When to implement:** Once 2–3 weeks of `kalshi_open_mid` data exists and the drift distribution is understood. Run: `SELECT AVG(ABS(fill_price_cents/100.0 - kalshi_open_mid)) FROM trades WHERE kalshi_open_mid IS NOT NULL AND candle_progress <= 0.15` to see the baseline drift.
+
+---
+
+### Edge Recalibration (after regime v2 live trades, ~June 15+)
+**What:** Recalibrate Gate 5's edge floor and ceiling using the fused signal (0.2×Kronos + 0.8×regime_v2).
+**Why:** The current 3–20¢ edge band was derived from `kronos_calibrated` edge. With regime v2 at 80% weight, the fused edge distribution shifts — regime v2 has stronger opinions and concentrates into fewer, higher-conviction trades. The 20¢ ceiling (Gate C) and current floor may both need adjustment.
+**When:** After observing 50+ live trades with regime v2 active. Query: `SELECT edge_at_fill, outcome, pnl_dollars FROM trades WHERE regime_prob IS NOT NULL ORDER BY timestamp DESC LIMIT 100` and re-run the edge-bucket win rate analysis.
+
+---
+
 ## Future Roadmap
 
 Ordered by data requirements. Each item has a clear trigger condition before implementation begins.
