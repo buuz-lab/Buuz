@@ -23,6 +23,7 @@ class KalshiClientRouter:
         self,
         api_key_id: str | None = None,
         private_key_path: str | None = None,
+        orderbook_feed=None,
     ) -> None:
         self._api_key_id = api_key_id or config.KALSHI_API_KEY_ID
         self._private_key_path = private_key_path or config.KALSHI_PRIVATE_KEY_PATH
@@ -40,6 +41,8 @@ class KalshiClientRouter:
                 "Check KALSHI_PRIVATE_KEY_PATH in .env and ensure the file exists."
             )
             raise
+
+        self._orderbook_feed = orderbook_feed
 
         self._primary = self._init_pykalshi()
         self._state: ClientState = (
@@ -199,7 +202,12 @@ class KalshiClientRouter:
             raise RuntimeError("Both Kalshi clients failed") from exc
 
     def get_orderbook(self, ticker: str) -> dict:
-        # Always use raw HTTP — no reason to route through pykalshi
+        if self._orderbook_feed is not None:
+            result = self._orderbook_feed.get_orderbook(ticker)
+            if result is not None:
+                return result
+            logger.debug(f"WS orderbook not ready for {ticker} — falling back to REST")
+            self._orderbook_feed.count_rest_fallback()
         return self._raw.get_orderbook(ticker)
 
     def get_positions(self) -> dict:

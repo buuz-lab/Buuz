@@ -190,3 +190,65 @@ def test_place_order_raw_failure_sets_both_failed():
         router.place_order("KXBTC", "yes", 1, 50)
 
     assert router.state is ClientState.BOTH_FAILED
+
+
+# ------------------------------------------------------------------
+# get_orderbook: WS cache integration
+# ------------------------------------------------------------------
+
+def make_router_with_ws_feed(ws_return_value):
+    """Build a router with a mock KalshiOrderbookFeed."""
+    feed_mock = MagicMock()
+    feed_mock.get_orderbook.return_value = ws_return_value
+
+    raw = MagicMock()
+    raw.get_orderbook.return_value = {"orderbook": {"from": "rest"}}
+
+    with patch("btc_kalshi_system.execution.router.KalshiRawClient", return_value=raw), \
+         patch.object(KalshiClientRouter, "_init_pykalshi", return_value=None):
+        router = KalshiClientRouter(
+            api_key_id="test-key",
+            private_key_path="./keys/test.key",
+            orderbook_feed=feed_mock,
+        )
+
+    router._raw = raw
+    router._orderbook_feed = feed_mock
+    return router, raw, feed_mock
+
+
+def test_get_orderbook_uses_ws_cache_when_available():
+    ws_data = {"orderbook_fp": {"yes_dollars": [["0.45", "10"]], "no_dollars": [["0.55", "5"]]}}
+    router, raw, feed_mock = make_router_with_ws_feed(ws_return_value=ws_data)
+
+    result = router.get_orderbook("KXBTC-25JUN-T95000")
+
+    feed_mock.get_orderbook.assert_called_once_with("KXBTC-25JUN-T95000")
+    raw.get_orderbook.assert_not_called()
+    assert result == ws_data
+
+
+def test_get_orderbook_falls_back_to_rest_when_ws_returns_none():
+    router, raw, feed_mock = make_router_with_ws_feed(ws_return_value=None)
+
+    result = router.get_orderbook("KXBTC-25JUN-T95000")
+
+    raw.get_orderbook.assert_called_once_with("KXBTC-25JUN-T95000")
+    assert result == {"orderbook": {"from": "rest"}}
+
+
+def test_get_orderbook_counts_rest_fallback():
+    router, raw, feed_mock = make_router_with_ws_feed(ws_return_value=None)
+    router.get_orderbook("KXBTC-25JUN-T95000")
+    feed_mock.count_rest_fallback.assert_called_once()
+
+
+def test_get_orderbook_no_ws_feed_always_uses_rest():
+    """Without an orderbook_feed, behaviour is unchanged (raw only)."""
+    router, raw, _ = make_router(primary_available=True)
+    raw.get_orderbook.return_value = {"orderbook": {}}
+
+    result = router.get_orderbook("KXBTC-25JUN-T95000")
+
+    raw.get_orderbook.assert_called_once_with("KXBTC-25JUN-T95000")
+    assert result == {"orderbook": {}}

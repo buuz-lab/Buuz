@@ -19,6 +19,7 @@ from btc_kalshi_system.data.derivatives_feed import DerivativesFeed
 from btc_kalshi_system.data.deribit_options_feed import DeribitOptionsFeed
 from btc_kalshi_system.data.exchange_feed import BitstampFeed, CoinbaseFeed, GeminiFeed, KrakenFeed
 from btc_kalshi_system.data.feature_store import FeatureStore
+from btc_kalshi_system.execution.kalshi_orderbook_feed import KalshiOrderbookFeed
 from btc_kalshi_system.execution.kelly import KellySizer
 from btc_kalshi_system.execution.position_monitor import PositionMonitor
 from btc_kalshi_system.execution.pretrade_checklist import PreTradeChecklist
@@ -288,7 +289,11 @@ class KronosV2:
         self._stratified_edge = StratifiedEdgeTracker()
         self._kelly = KellySizer()
         self._checklist = PreTradeChecklist(self._kelly)
-        self._router = KalshiClientRouter()
+        self._orderbook_feed = KalshiOrderbookFeed(
+            api_key_id=config.KALSHI_API_KEY_ID,
+            private_key_path=config.KALSHI_PRIVATE_KEY_PATH,
+        )
+        self._router = KalshiClientRouter(orderbook_feed=self._orderbook_feed)
         self._monitor = PortfolioMonitor()
         self._breaker = CircuitBreaker(
             monitor=self._monitor,
@@ -385,6 +390,7 @@ class KronosV2:
             self._store.run(agg.out_queue),
             deriv.run(),
             deribit_feed.run(),
+            self._orderbook_feed.run(),
             self._main_loop(),
             self._regime_watchdog(),
             self._position_monitor.run(),
@@ -581,6 +587,10 @@ class KronosV2:
         if not markets:
             logger.info("No active BTC markets found")
             return
+
+        # Keep WS orderbook subscriptions in sync with active tickers
+        active_tickers = {m["ticker"] for m in markets}
+        self._orderbook_feed.update_subscriptions(active_tickers)
 
         # 6. Process each market
         for market in markets:
