@@ -20,6 +20,7 @@ _KRAKEN_SYMBOL = "BTC/USD"
 _COINGLASS_BASE = "https://open-api-v4.coinglass.com"
 _HYPERLIQUID_BASE = HYPERLIQUID_BASE_URL
 _KRAKEN_FUTURES_BASE = KRAKEN_FUTURES_BASE_URL
+_DERIBIT_BASE = "https://www.deribit.com/api/v2/public"
 
 
 class DerivativesFeed:
@@ -41,7 +42,7 @@ class DerivativesFeed:
         self._ccxt_async = ccxt_async
         self._exchange = None   # resolved lazily on first fetch
         self._exchange_name: str = ""
-        self._prev_oi: dict[str, float] = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0}
+        self._prev_oi: dict[str, float] = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0, "deribit": 0.0}
         self._kraken_exchange = None  # lazy init for Kraken trade fallback
 
     # ── Public entry point ─────────────────────────────────────────────────────
@@ -69,23 +70,15 @@ class DerivativesFeed:
     async def run(self) -> None:
         """Refresh features every 5 minutes indefinitely."""
         try:
-            while not await self._resolve_exchange():
-                # No exchange available on startup — keep retrying rather than
-                # running a permanent no-op loop. OKX may come back up.
-                logger.warning(
-                    "DerivativesFeed: no exchange available at startup — "
-                    f"retrying in {_REFRESH_INTERVAL}s"
-                )
-                await asyncio.sleep(_REFRESH_INTERVAL)
+            # Best-effort startup resolve. Hyperliquid, Deribit, and Kraken Futures
+            # are independent REST sources that carry the feed even when no ccxt
+            # exchange (OKX/Bybit) is available — don't block startup on it.
+            await self._resolve_exchange()
 
             while True:
-                # Re-resolve if exchange was nulled out by a prior failure that
-                # was swallowed internally (individual fetchers fall back to
-                # Kraken but never trigger the outer except block).
                 if self._exchange is None:
-                    if not await self._resolve_exchange():
-                        await asyncio.sleep(_REFRESH_INTERVAL)
-                        continue
+                    await self._resolve_exchange()  # best-effort; proceed regardless
+
                 success = False
                 try:
                     features = await self._fetch_features()
@@ -95,21 +88,11 @@ class DerivativesFeed:
                     success = True
                 except Exception as exc:
                     logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
-                    # Any failure may indicate a dead session (timeout, reset, rate limit,
-                    # geo-block, etc.) — always close and re-resolve to get a fresh instance.
                     if self._exchange is not None:
                         await self._exchange.close()
                     self._exchange = None
-                    if not await self._resolve_exchange():
-                        # All exchanges unavailable right now — don't exit, keep
-                        # retrying so a temporary OKX maintenance window doesn't
-                        # permanently kill the feed for the rest of the session.
-                        logger.warning(
-                            "DerivativesFeed: all exchanges unavailable — "
-                            f"will retry in {_REFRESH_INTERVAL}s"
-                        )
-                        await asyncio.sleep(_REFRESH_INTERVAL)
-                        continue
+                    await self._resolve_exchange()  # best-effort re-resolve after failure
+
                 # On success, refresh 60s early so the key (TTL=600s) is always
                 # renewed with headroom to spare even if the fetch runs long.
                 # On failure, wait the full interval before retrying.
@@ -163,17 +146,18 @@ class DerivativesFeed:
     async def _fetch_funding_and_oi(self) -> tuple[float, float, float, bool]:
         """Returns (curr_funding, funding_trend, oi_delta_pct, okx_partial).
 
-        Queries OKX (via ccxt), Hyperliquid, and Kraken Futures in parallel.
+        Queries OKX (via ccxt), Hyperliquid, Deribit, and Kraken Futures in parallel.
         Averages results from whichever sources succeed. okx_partial=True only
-        when ALL three sources fail — that is the only case worth marking stale.
+        when ALL four sources fail — that is the only case worth marking stale.
         """
         results = await asyncio.gather(
             self._fetch_okx_funding_and_oi(),
             self._fetch_hyperliquid_funding_and_oi(),
+            self._fetch_deribit_funding_and_oi(),
             self._fetch_kraken_futures_funding_and_oi(),
             return_exceptions=True,
         )
-        okx_result, hl_result, kf_result = results
+        okx_result, hl_result, db_result, kf_result = results
 
         fundings: list[float] = []
         oi_deltas: list[float] = []
@@ -194,6 +178,13 @@ class DerivativesFeed:
         else:
             logger.warning(f"DerivativesFeed: Hyperliquid source failed — {hl_result}")
 
+        if not isinstance(db_result, Exception):
+            f, d = db_result
+            fundings.append(f)
+            oi_deltas.append(d)
+        else:
+            logger.warning(f"DerivativesFeed: Deribit source failed — {db_result}")
+
         if not isinstance(kf_result, Exception):
             f, d = kf_result
             fundings.append(f)
@@ -208,7 +199,7 @@ class DerivativesFeed:
         avg_funding = sum(fundings) / len(fundings)
         avg_oi_delta = sum(oi_deltas) / len(oi_deltas)
         sources_used = len(fundings)
-        logger.info(f"DerivativesFeed: funding/OI from {sources_used}/3 sources — funding={avg_funding:.6f} oi_delta={avg_oi_delta:.4f}")
+        logger.info(f"DerivativesFeed: funding/OI from {sources_used}/4 sources — funding={avg_funding:.6f} oi_delta={avg_oi_delta:.4f}")
         return avg_funding, trend, avg_oi_delta, False
 
     async def _coinglass_funding_and_oi(self) -> tuple[float, float, float, bool]:
@@ -271,6 +262,27 @@ class DerivativesFeed:
         oi_delta = self._oi_delta_pct(prev, curr_oi)
         self._prev_oi["hyperliquid"] = curr_oi
 
+        return funding_8h, oi_delta
+
+    async def _fetch_deribit_funding_and_oi(self) -> tuple[float, float]:
+        """Returns (funding_rate_8h, oi_delta_pct) from Deribit BTC-PERPETUAL.
+        US-accessible public REST endpoint; no geo-blocking."""
+        url = f"{_DERIBIT_BASE}/ticker"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                params={"instrument_name": "BTC-PERPETUAL"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                data = await resp.json()
+
+        result = data["result"]
+        # funding_8h is the settled 8h average; current_funding is mid-period accumulator (0 at period start)
+        funding_8h = float(result.get("funding_8h", 0.0))
+        curr_oi = float(result.get("open_interest", 0.0))
+        prev = self._prev_oi["deribit"]
+        oi_delta = self._oi_delta_pct(prev, curr_oi)
+        self._prev_oi["deribit"] = curr_oi
         return funding_8h, oi_delta
 
     async def _fetch_kraken_futures_funding_and_oi(self) -> tuple[float, float]:
