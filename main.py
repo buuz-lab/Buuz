@@ -374,6 +374,7 @@ class KronosV2:
         if config.PAPER_TRADING:
             logger.info("Running in PAPER TRADING mode — no real orders will be placed")
         logger.info("KronosV2 starting up")
+        self._check_auth()
 
         queues = [asyncio.Queue() for _ in range(4)]
         agg = BRTIAggregator()
@@ -914,6 +915,24 @@ class KronosV2:
                 logger.error(f"SQLite gate_rejections shadow insert failed: {exc}")
 
     # ── Helper methods ────────────────────────────────────────────────────────
+
+    def _check_auth(self) -> None:
+        """Verify API key works for authenticated endpoints at startup.
+
+        In paper trading mode the system only calls public endpoints, so a
+        broken key is otherwise invisible until WS or live trading fails.
+        Logs a loud warning rather than blocking startup.
+        """
+        try:
+            self._router._raw._request("GET", "/trade-api/v2/portfolio/balance")
+            logger.info("Auth check passed — API key is valid for authenticated endpoints")
+        except Exception as exc:
+            logger.error(
+                f"AUTH CHECK FAILED: {exc}\n"
+                "The API key cannot authenticate against Kalshi. "
+                "WebSocket and live order placement will not work. "
+                "Regenerate the key at https://kalshi.com and update .env + keys/kalshi_private.key"
+            )
 
     def _market_is_in_blackout(self, market: dict) -> bool:
         """Return True if we are too close to this market's close_time to enter a new position."""
