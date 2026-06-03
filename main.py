@@ -664,6 +664,21 @@ class KronosV2:
         active_tickers = {m["ticker"] for m in markets}
         self._orderbook_feed.update_subscriptions(active_tickers)
 
+        # Capture opening Kalshi price for any ticker we haven't seen before.
+        # Done here (via get_orderbook) rather than in _handle so we always have
+        # a live, non-empty book rather than the potentially-empty initial snapshot.
+        for m in markets:
+            _t = m.get("ticker", "")
+            if _t and self._orderbook_feed.get_open_snapshot(_t) is None:
+                try:
+                    _ob = self._router.get_orderbook(_t)
+                    if _ob:
+                        _bid, _ask, _ = self._parse_orderbook(_ob)
+                        if _ask > 0:
+                            self._orderbook_feed.set_open_snapshot(_t, _bid, _ask)
+                except Exception:
+                    pass
+
         # 6. Process each market
         for market in markets:
             try:

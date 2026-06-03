@@ -184,6 +184,24 @@ class KalshiOrderbookFeed:
         with self._lock:
             return self._open_snapshots.get(ticker)
 
+    def set_open_snapshot(self, ticker: str, bid_cents: int, ask_cents: int) -> None:
+        """Write opening snapshot from a live orderbook read (fallback to _handle capture).
+
+        Called from _run_cycle on the first cycle a ticker is seen, ensuring we
+        always capture a non-empty book rather than the potentially-empty initial WS snapshot.
+        Only writes if no snapshot exists yet.
+        """
+        with self._lock:
+            if ticker not in self._open_snapshots:
+                self._open_snapshots[ticker] = {
+                    "mid_prob":  (bid_cents + ask_cents) / 200.0,
+                    "spread":    (ask_cents - bid_cents) / 100.0,
+                    "depth_bid": 0.0,
+                    "depth_ask": 0.0,
+                    "ts":        time.time(),
+                }
+                logger.debug(f"WS orderbook: open snapshot captured for {ticker} mid={( bid_cents + ask_cents)/200:.3f}")
+
     def count_rest_fallback(self) -> None:
         """Called by the router when WS returned None and REST was used instead."""
         self._rest_reads += 1
