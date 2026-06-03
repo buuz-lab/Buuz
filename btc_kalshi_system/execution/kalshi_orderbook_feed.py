@@ -51,12 +51,37 @@ class KalshiOrderbookFeed:
     # ── Public API ────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Main loop: connect, subscribe, process deltas.  Runs forever."""
+        """Main loop: connect, subscribe, process deltas.
+
+        Probes the WS connection once on startup. If Kalshi returns 401
+        (account lacks WS access), logs a one-time warning and exits cleanly
+        so the router keeps using REST without retrying indefinitely.
+        """
         client = AsyncKalshiClient(
             api_key_id=self._api_key_id,
             private_key_path=self._private_key_path,
         )
         feed = client.feed()
+
+        # Probe: attempt one connection before entering the message loop.
+        # A 401 here means the account doesn't have WS access — bail out
+        # immediately rather than hammering the endpoint every 30s forever.
+        try:
+            await asyncio.wait_for(feed.connect(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "WS orderbook: connection timed out — falling back to REST for all orderbook reads"
+            )
+            return
+        except Exception as exc:
+            logger.warning(
+                f"WS orderbook: connection failed ({type(exc).__name__}: {exc}) — "
+                "this account may not have WebSocket API access. "
+                "All orderbook reads will use REST. Contact Kalshi support to enable WS access."
+            )
+            return
+
+        logger.info("WS orderbook: connected — subscriptions will start on next cycle")
 
         @feed.on("orderbook_delta")
         def _handle(msg):
