@@ -4,11 +4,62 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 28 complete. Phase 1 + Phase 2 infrastructure shipped. `auto_retrain_regime.py` built (TDD, 25 tests). Deploy gate weights fixed to 0.2/0.8 in `train_regime.py`. 453 tests pass. **Next:** accumulate ~670 candle_features rows with Kronos populated (~June 6–7), then retrain regime model and flip weights to **0.2/0.8** (Kronos/regime). Kronos has proven unreliable in ranging short-term markets — regime becomes primary signal at deploy, Kronos kept as weak sanity check. If regime v2 performs well in production, evaluate going 0.0/1.0 after 2 weeks of data.
+**Current focus:** Session 29 complete. WebSocket orderbook cache shipped — `KalshiOrderbookFeed` eliminates ~300ms REST round-trip on every `get_orderbook()` call. 480 tests pass. **Next:** monitor WS hit rate in production logs, then continue accumulating candle_features rows for regime v2 retrain (~June 6–7).
 
 ---
 
 ## Current Progress
+
+**As of 2026-06-03 session 29: WebSocket orderbook cache. 480 tests pass.**
+
+**Goal:** Cut ~300ms from every trade entry by reading orderbook state from a local WebSocket cache instead of making a REST call on each `get_orderbook()` invocation.
+
+**Changes — session 29:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `btc_kalshi_system/execution/kalshi_orderbook_feed.py` | **New**: `KalshiOrderbookFeed` — maintains one `OrderbookManager` per active ticker via `pykalshi.AsyncFeed` on the `orderbook_delta` channel. `run()` connects and iterates forever (reconnects handled internally by `AsyncFeed.__aiter__`). `update_subscriptions(tickers)` is thread-safe (called from `asyncio.to_thread`). `get_orderbook(ticker)` returns cached data in `orderbook_fp` format or `None` if: not subscribed, no snapshot yet, or last update > 10s old. `_drain_loop` runs every 1s: detects reconnects (resets `has_snapshot` flags so stale data isn't served), then calls `_apply_drain(feed)` to subscribe/unsubscribe based on diff of `_desired_tickers` vs `_subscribed`. `count_rest_fallback()` called by router when WS returns None. Logs WS vs REST read stats every 100 calls. | ✅ |
+| `btc_kalshi_system/execution/router.py` | Added optional `orderbook_feed=None` param to `__init__`. `get_orderbook()` hits WS cache first; falls back to REST with DEBUG log + `count_rest_fallback()` call. No behavioral change when `orderbook_feed=None`. | ✅ |
+| `main.py` | Creates `self._orderbook_feed = KalshiOrderbookFeed(config.KALSHI_API_KEY_ID, config.KALSHI_PRIVATE_KEY_PATH)`. Passes it to `KalshiClientRouter(orderbook_feed=...)`. Adds `self._orderbook_feed.run()` to `asyncio.gather()`. Calls `self._orderbook_feed.update_subscriptions(active_tickers)` in `_run_cycle()` after `_get_active_markets()`, before the market loop. | ✅ |
+| `tests/execution/test_kalshi_orderbook_feed.py` | **New**: 23 TDD tests covering: None before snapshot, None when stale (>10s), None for unknown ticker, correct `orderbook_fp` format + ascending order, snapshot+delta quantity update, level removal on zero qty, `_parse_orderbook` compatibility, `update_subscriptions` diffing, thread safety, `_apply_drain` subscribe/unsubscribe/cleanup, reconnect snapshot reset, desired-tickers preserved across reconnect. | ✅ |
+| `tests/execution/test_router.py` | 4 new tests: WS cache used when available, REST fallback when WS returns None, `count_rest_fallback` called on fallback, no-feed path unchanged. | ✅ |
+
+**What Worked:**
+- `pykalshi.AsyncFeed.__aiter__` handles reconnect internally — no custom retry loop needed in `run()`.
+- `_TickerState` dataclass (manager + has_snapshot + last_update_ts) is the cleanest unit of per-ticker state.
+- Resetting `has_snapshot=False` on reconnect (via `reconnect_count` delta in drain loop) prevents serving stale data after a WS drop.
+- `_apply_drain(feed)` extracted as a sync helper — drain loop calls it, tests can call it directly without async complexity.
+- `threading.Lock` on `_books` and `_desired_tickers` — event loop holds it only briefly (dict ops), no blocking risk.
+
+**What Failed / Gotchas:**
+- `asyncio.create_task()` in `AsyncFeed.subscribe()` is NOT safe to call from a thread — so `update_subscriptions()` only writes to `_desired_tickers` (thread-safe), and the drain loop (event loop) calls `feed.subscribe()` from within the async context.
+- `AsyncFeed` is NOT created with `AsyncFeed(client)` directly — use `client.feed()` which returns `AsyncFeed(self)`.
+- The channel name for subscription is `"orderbook_delta"` — both snapshots AND deltas arrive on this channel. Distinguish via `isinstance(msg, OrderbookSnapshotMessage)`.
+- `OrderbookManager.yes` / `.no` are plain dicts (no guaranteed order) — must `sorted(..., key=lambda x: float(x[0]))` before returning levels.
+- `_subscribed` is event-loop-only (no lock needed); `_desired_tickers` and `_books` are cross-thread (lock required).
+
+**Files Touched / Created:**
+- **New**: `btc_kalshi_system/execution/kalshi_orderbook_feed.py`
+- **New**: `tests/execution/test_kalshi_orderbook_feed.py`
+- **Modified**: `btc_kalshi_system/execution/router.py`
+- **Modified**: `main.py`
+- **Modified**: `tests/execution/test_router.py`
+- **Auto-updated**: `models/calibrator_last_trained.json` (auto-retrain cron fired)
+
+**Next Steps:**
+1. **Monitor WS hit rate** in production logs: `grep "WS orderbook cache hit\|falling back to REST" logs/kronos_*.log`. After 100 `get_orderbook()` calls, an INFO line logs `WS=N REST=M`. Target: REST calls only on startup (before first snapshot) and brief reconnect windows.
+2. **Verify no REST fallback after ~30s of uptime**: the first `update_subscriptions()` call queues subscriptions; the drain loop fires within 1s; the server sends a snapshot within ~1–2s. After that, WS should serve 100% of reads.
+3. **Regime v2 retrain** (~June 6–7): `python3 scripts/train_regime.py --dry-run`. Needs ~670 `candle_features` rows with `kronos_raw_15min` populated.
+4. **After regime retrain**: flip `_KRONOS_WEIGHT=0.2` / `_REGIME_WEIGHT=0.8` in `fusion.py`, remove disagreement neutralization block.
+5. **Consider wrapping `_orderbook_feed.run()` in an outer retry loop** if production shows it crashing the gather on auth failures — currently `AsyncFeed.__aiter__` handles network reconnects but not auth errors (which would propagate up and cancel all tasks).
+
+**Context / Gotchas:**
+- `_parse_orderbook()` in `main.py` is unchanged — the WS output format (`orderbook_fp` with ascending `yes_dollars`/`no_dollars` lists) must exactly match what it expects. Both fetches in `_process_market` (T+0 for feature injection, T+1 for freshness check before order) now go through the WS cache path.
+- `_run_cycle()` runs via `asyncio.to_thread` — `update_subscriptions()` must be thread-safe. It is.
+- `KalshiOrderbookFeed.run()` is a long-lived coroutine added to `asyncio.gather()`. If it raises (e.g., key file missing), it cancels all other tasks. The `AsyncFeed.__aiter__` handles network errors internally; startup errors (bad key) would propagate. Config must be valid before launch.
+- Test helper `_inject_ticker()` directly manipulates `_books` — this is intentional to avoid async complexity in unit tests. All behavior under test is synchronous (state reads/writes).
+
+---
 
 **As of 2026-06-01 session 28: auto_retrain_regime.py built (TDD). Deploy gate weights corrected. 453 tests pass.**
 
