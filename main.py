@@ -531,7 +531,7 @@ class KronosV2:
         last_logged_ts = None
         while self._running:
             try:
-                await asyncio.sleep(30)
+                await asyncio.sleep(10)
                 df15 = self._store.get_ohlcv("15min")
                 if df15 is None or len(df15) < 3:
                     continue
@@ -570,7 +570,6 @@ class KronosV2:
                 closed_ts = df15.index[-2]
                 if closed_ts == last_logged_ts:
                     continue
-                last_logged_ts = closed_ts
                 closed_candle = df15.iloc[-2]
                 btc_direction = 1 if closed_candle["close"] > closed_candle["open"] else 0
                 features, features_stale, deribit_stale = self._fusion.get_features_snapshot()
@@ -620,6 +619,7 @@ class KronosV2:
                     ],
                 )
                 self._db.commit()
+                last_logged_ts = closed_ts
                 logger.info(f"CandleLogger: logged candle {closed_ts} direction={btc_direction}")
             except Exception as exc:
                 logger.warning(f"CandleLogger: {exc}")
