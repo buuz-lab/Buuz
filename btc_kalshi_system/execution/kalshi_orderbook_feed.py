@@ -41,6 +41,9 @@ class KalshiOrderbookFeed:
         self._lock = threading.Lock()
         self._books: dict[str, _TickerState] = {}
         self._desired_tickers: set[str] = set()
+        # First-snapshot capture per ticker: {mid_prob, spread, depth_bid, depth_ask, ts}
+        # Never overwritten after first capture — survives unsubscribe for candle logger lookups.
+        self._open_snapshots: dict[str, dict] = {}
 
         # Only accessed from the event loop — no lock needed.
         self._subscribed: set[str] = set()
@@ -96,6 +99,21 @@ class KalshiOrderbookFeed:
                     state.manager.apply_snapshot(msg.yes_dollars, msg.no_dollars)
                     state.has_snapshot = True
                     state.last_update_ts = now
+                    # Capture opening snapshot once per ticker (first snapshot only).
+                    if ticker not in self._open_snapshots:
+                        yes_lvls = sorted(state.manager.yes.items(), key=lambda x: float(x[0]))
+                        no_lvls  = sorted(state.manager.no.items(),  key=lambda x: float(x[0]))
+                        if yes_lvls and no_lvls:
+                            best_yes_bid = float(yes_lvls[-1][0])
+                            best_no_bid  = float(no_lvls[-1][0])
+                            best_yes_ask = 100.0 - best_no_bid
+                            self._open_snapshots[ticker] = {
+                                "mid_prob":   (best_yes_bid + best_yes_ask) / 200.0,
+                                "spread":     (best_yes_ask - best_yes_bid) / 100.0,
+                                "depth_bid":  float(yes_lvls[-1][1]),
+                                "depth_ask":  float(no_lvls[-1][1]),
+                                "ts":         now,
+                            }
                 logger.debug(f"WS orderbook: snapshot received for {ticker}")
             else:
                 with self._lock:
@@ -156,6 +174,15 @@ class KalshiOrderbookFeed:
                 "no_dollars": [[p, q] for p, q in no_levels],
             }
         }
+
+    def get_open_snapshot(self, ticker: str) -> dict | None:
+        """Return the first orderbook snapshot captured for this ticker, or None.
+
+        Keys: mid_prob (float, 0-1), spread (float, 0-1), depth_bid, depth_ask, ts.
+        Safe to call from any thread after the contract has opened.
+        """
+        with self._lock:
+            return self._open_snapshots.get(ticker)
 
     def count_rest_fallback(self) -> None:
         """Called by the router when WS returned None and REST was used instead."""

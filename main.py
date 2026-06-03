@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -246,8 +246,16 @@ _CREATE_CANDLE_FEATURES_TABLE = (
 )
 
 _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
-    ("kronos_raw_15min", "REAL DEFAULT NULL"),
-    ("kronos_raw_5min",  "REAL DEFAULT NULL"),
+    ("kronos_raw_15min",   "REAL DEFAULT NULL"),
+    ("kronos_raw_5min",    "REAL DEFAULT NULL"),
+    # Kalshi opening-price snapshot — first WS orderbook snapshot for each contract.
+    # Enables regime v2 edge comparison: does our model beat the market's opening estimate?
+    ("kalshi_open_mid",          "REAL DEFAULT NULL"),  # mid-price at candle open (0-1)
+    ("kalshi_open_spread",       "REAL DEFAULT NULL"),  # bid-ask spread at candle open (0-1)
+    ("kalshi_open_depth",        "REAL DEFAULT NULL"),  # total contracts at best bid+ask at open
+    ("kalshi_mid_candle_mid",    "REAL DEFAULT NULL"),  # mid-price at ~50% candle progress (0-1)
+    ("kalshi_mid_candle_spread", "REAL DEFAULT NULL"),  # spread at ~50% candle progress (0-1)
+    ("kalshi_mid_candle_progress", "REAL DEFAULT NULL"),  # actual progress when snapshot taken
 ]
 
 
@@ -366,6 +374,12 @@ class KronosV2:
         self._last_recovery_attempt = 0.0
         self._cached_kronos: dict | None = None
         self._cache_updated_event = asyncio.Event()
+        # Maps candle-open ISO timestamp → Kalshi ticker (populated in _process_market).
+        # Used by _candle_logger_loop to look up the WS opening snapshot for each candle.
+        self._candle_ticker_map: dict[str, str] = {}
+        # Mid-candle Kalshi snapshots keyed by candle_ts ISO string (captured once per candle
+        # when progress crosses 40-60%). Written by _candle_logger_loop, read at close time.
+        self._mid_candle_snaps: dict[str, dict] = {}
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -521,6 +535,36 @@ class KronosV2:
                 df15 = self._store.get_ohlcv("15min")
                 if df15 is None or len(df15) < 3:
                     continue
+
+                # Mid-candle snapshot: capture Kalshi mid once per candle at ~40-60% progress.
+                try:
+                    _in_progress_ts = df15.index[-1]
+                    _in_progress_key = _in_progress_ts.to_pydatetime().astimezone(timezone.utc).replace(
+                        second=0, microsecond=0
+                    ).isoformat()
+                    if _in_progress_key not in self._mid_candle_snaps:
+                        _now_utc = datetime.now(timezone.utc)
+                        _elapsed = (_now_utc - _in_progress_ts.to_pydatetime().astimezone(timezone.utc)).total_seconds()
+                        _progress = _elapsed / 900.0
+                        if 0.40 <= _progress <= 0.60:
+                            _mc_ticker = self._candle_ticker_map.get(_in_progress_key)
+                            if _mc_ticker:
+                                _mc_ob = self._orderbook_feed.get_orderbook(_mc_ticker)
+                                if _mc_ob:
+                                    _bid, _ask, _ = self._parse_orderbook(_mc_ob)
+                                    if _ask > 0:
+                                        self._mid_candle_snaps[_in_progress_key] = {
+                                            "mid_prob": (_bid + _ask) / 200.0,
+                                            "spread":   (_ask - _bid) / 100.0,
+                                            "progress": round(_progress, 3),
+                                        }
+                                        logger.debug(
+                                            f"CandleLogger: mid-candle snapshot {_mc_ticker} "
+                                            f"mid={(_bid+_ask)/200:.3f} progress={_progress:.2f}"
+                                        )
+                except Exception as exc:
+                    logger.debug(f"CandleLogger: mid-candle snapshot failed — {exc}")
+
                 # Second-to-last row is the most recently closed candle;
                 # the last row is the in-progress candle — skip it.
                 closed_ts = df15.index[-2]
@@ -530,11 +574,32 @@ class KronosV2:
                 closed_candle = df15.iloc[-2]
                 btc_direction = 1 if closed_candle["close"] > closed_candle["open"] else 0
                 features, features_stale, deribit_stale = self._fusion.get_features_snapshot()
+
+                # Look up Kalshi opening snapshot for the closed candle.
+                _candle_key = closed_ts.to_pydatetime().astimezone(timezone.utc).replace(
+                    second=0, microsecond=0
+                ).isoformat()
+                _ot = self._candle_ticker_map.get(_candle_key)
+                _open_snap = self._orderbook_feed.get_open_snapshot(_ot) if _ot else None
+                kalshi_open_mid    = _open_snap["mid_prob"] if _open_snap else None
+                kalshi_open_spread = _open_snap["spread"]   if _open_snap else None
+                kalshi_open_depth  = (
+                    (_open_snap["depth_bid"] + _open_snap["depth_ask"]) if _open_snap else None
+                )
+
+                # Look up mid-candle snapshot (captured below while candle was in progress).
+                _mid_snap = self._mid_candle_snaps.pop(_candle_key, None)
+                kalshi_mid_candle_mid      = _mid_snap["mid_prob"]  if _mid_snap else None
+                kalshi_mid_candle_spread   = _mid_snap["spread"]    if _mid_snap else None
+                kalshi_mid_candle_progress = _mid_snap["progress"]  if _mid_snap else None
+
                 cols = list(_FEATURE_ORDER)
                 vals = [features.get(c) for c in cols]
-                placeholders = ", ".join(["?"] * (5 + len(cols)))
+                placeholders = ", ".join(["?"] * (11 + len(cols)))
                 col_names = (
                     "candle_ts, btc_direction, logged_at, features_stale, deribit_stale, "
+                    "kalshi_open_mid, kalshi_open_spread, kalshi_open_depth, "
+                    "kalshi_mid_candle_mid, kalshi_mid_candle_spread, kalshi_mid_candle_progress, "
                     + ", ".join(cols)
                 )
                 self._db.execute(
@@ -545,6 +610,12 @@ class KronosV2:
                         datetime.utcnow().isoformat(),
                         int(features_stale),
                         int(deribit_stale),
+                        kalshi_open_mid,
+                        kalshi_open_spread,
+                        kalshi_open_depth,
+                        kalshi_mid_candle_mid,
+                        kalshi_mid_candle_spread,
+                        kalshi_mid_candle_progress,
                         *vals,
                     ],
                 )
@@ -672,6 +743,10 @@ class KronosV2:
             _k15_post_open: int | None = (
                 1 if cached["candle_ts"].timestamp() >= _market_open_unix else 0
             )
+            # Record candle-open → ticker mapping so _candle_logger_loop can look up the
+            # WS opening snapshot for this contract when it logs the closed candle.
+            _open_dt = _close_dt.replace(second=0, microsecond=0) - timedelta(seconds=900)
+            self._candle_ticker_map[_open_dt.isoformat()] = ticker
         except Exception:
             _k15_post_open = None
         logger.debug(

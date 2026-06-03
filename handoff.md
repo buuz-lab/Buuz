@@ -4,11 +4,51 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 30 complete. WS orderbook feed now live and serving cache hits. Root cause of 401s was a stale API key — old key had no WS access, new key works. **Next:** monitor WS hit rate and REST fallback frequency, then regime v2 retrain (~June 6–7).
+**Current focus:** Session 31 complete. Kalshi opening + mid-candle price snapshots now logged in `candle_features`. This enables the definitive regime v2 edge test once data accumulates. **Next:** wait for regime v2 row threshold (~June 8), then retrain and run the `kalshi_open_mid` Brier comparison on holdout rows.
 
 ---
 
 ## Current Progress
+
+**As of 2026-06-03 session 31: Kalshi open + mid-candle snapshots logging. Regime v2 dry-run analysed. Handoff Phase 3c added.**
+
+**Goal:** Assess whether regime v2 has edge on Kalshi pricing; add Kalshi data needed to answer that question definitively.
+
+**Key findings — session 31:**
+- Regime v2 dry-run (forced, 243 rows): holdout Brier **0.1480**, accuracy **79%** on 100 held-out candles. CV trend improving fold-over-fold (0.263 → 0.186). Model is learning something real.
+- Regime v2 uses `kronos_raw_15min` + `kronos_raw_5min` as features (raw only, no calibrated) — correct, as calibration is Kalshi-specific and would add noise for a candle-direction model.
+- **Regime v2 cannot prove edge against Kalshi yet**: prior `kalshi_implied_prob` in `candle_features` was logged near candle close (Kalshi already resolving). We needed opening price. Holdout rows had no `kalshi_implied_prob` at all.
+- The clean test — Brier(regime_v2) vs Brier(kalshi_open_mid) on holdout rows — is now set up and will be runnable once a few weeks of data accumulate.
+- Current system profitability analysis: ranging regime is −$1.75/trade (412 trades = −$397 total). k15_raw > 0.80 for YES bets inverts (30% win rate). These are the two main levers before go-live.
+
+**Changes — session 31:**
+
+| File | Change | Status |
+|------|--------|--------|
+| `btc_kalshi_system/execution/kalshi_orderbook_feed.py` | Capture first WS orderbook snapshot per ticker in `_open_snapshots`; expose `get_open_snapshot(ticker)` | ✅ |
+| `main.py` | `_candle_ticker_map`: maps candle-open ISO ts → ticker (populated in `_process_market`) | ✅ |
+| `main.py` | `_mid_candle_snaps`: captures Kalshi mid at 40–60% candle progress once per candle | ✅ |
+| `main.py` | `_candle_logger_loop`: writes `kalshi_open_mid`, `kalshi_open_spread`, `kalshi_open_depth`, `kalshi_mid_candle_mid`, `kalshi_mid_candle_spread`, `kalshi_mid_candle_progress` to `candle_features` | ✅ |
+| `main.py` | `_CANDLE_FEATURES_COLUMN_MIGRATIONS`: migration entries for 6 new columns | ✅ |
+| `handoff.md` | Phase 3c added: regime v2 calibrator plan + `kalshi_open_mid` Brier test prerequisite | ✅ |
+
+**What's now logged per candle in `candle_features`:**
+
+| Column | Timing | Purpose |
+|---|---|---|
+| `kalshi_open_mid` | First WS snapshot at contract open | Regime v2 edge test baseline |
+| `kalshi_open_spread` | Same | Market efficiency at open |
+| `kalshi_open_depth` | Same | Liquidity at open |
+| `kalshi_mid_candle_mid` | 40–60% progress (~7 min in) | How much has market moved before typical entry? |
+| `kalshi_mid_candle_spread` | Same | Is market tightening mid-candle? |
+| `kalshi_mid_candle_progress` | Same | Exact timing of snapshot |
+
+**Next Steps:**
+1. **Wait for regime v2 rows** (~June 8): `python3 scripts/train_regime.py --dry-run` — needs 672 qualifying `candle_features` rows.
+2. **After retrain**: run Brier(`regime_v2_prob_up`, `btc_direction`) vs Brier(`kalshi_open_mid`, `btc_direction`) on holdout rows. This is the definitive edge test.
+3. **Profitability levers to revisit after edge test**: (a) ranging suppression gate, (b) k15_raw > 0.80 inversion block for YES direction. Do not implement until edge test is done — if regime v2 has no edge, the priority shifts to signal quality, not gate tuning.
+
+---
 
 **As of 2026-06-03 session 30: WS orderbook feed live. API key rotated. Cache hits confirmed.**
 
@@ -1669,6 +1709,16 @@ Ordered by data requirements. Each item has a clear trigger condition before imp
 - Expect the ranging calibrator to learn a more aggressive compression (closer to 0.5) than the global one
 - high_uncertainty: segmented calibrator only if ≥400 k15 rows accumulate. Otherwise keep on global
 - trending_up/down: probably never enough rows — keep on global or Phase 3a regime-feature model
+
+### Phase 3c — Regime v2 calibrator (~after regime v2 deployed and 200+ trades accumulated)
+**Trigger:** Regime v2 deployed as primary signal (80% weight) and ≥200 resolved trades with `regime_prob` recorded.
+
+- XGBoost `predict_proba` tends to be overconfident at the extremes — if it outputs 0.85, actual win rate may only be 0.70. That gap directly inflates Kelly sizing.
+- The current Kronos calibrator becomes mostly vestigial at 0.2 weight — its miscalibration barely moves `combined`. The calibration problem shifts to the regime v2 output itself.
+- Build a lightweight isotonic regression stage on regime v2's `prob_up` output, or run `combined` (the fused probability) through a single isotonic stage post-fusion. The latter is simpler and covers both components.
+- Evaluate Brier score on `prob_up` vs actual `btc_direction` outcomes before building — if XGBoost happens to be well-calibrated at scale, this phase may not be needed.
+- Do not build until regime v2 has been live long enough to accumulate meaningful calibration data (~200+ trades).
+- **Key prerequisite**: to evaluate whether regime v2's `prob_up` beats Kalshi's own pricing, compare against `kalshi_open_mid` in `candle_features` (now being logged as of session 31). The clean test: Brier(`prob_up`, `btc_direction`) vs Brier(`kalshi_open_mid`, `btc_direction`) on holdout rows. If regime v2 wins, real edge exists. If not, calibration won't help — the signal just matches what Kalshi already knows.
 
 ### Phase 4 — MC path weighting with S/R (~late 2026, if ever)
 **Trigger:** hourly_sr_proximity win rate shows a consistent pattern across ≥ 200 trades per bucket. Currently flat (45–52% across all buckets). Requires redefining S/R from 24h high/low (range position) to pivot-point or volume-cluster based levels.
