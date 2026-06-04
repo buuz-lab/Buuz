@@ -262,7 +262,7 @@ class SignalFusionEngine:
         # existed, OR (b) ctx carries _lkg=True — LKG fallback was used because
         # the primary key expired during an exchange outage. In both cases the
         # row must be excluded from RegimeModel training.
-        stale = not ctx or ctx.get("_lkg", False)
+        stale = not ctx or ctx.get("_lkg", False) or ctx.get("_cvd_stale", False)
 
         # Read OHLCV once — reused by multiple features
         df5 = self._store.get_ohlcv("5min")

@@ -110,7 +110,7 @@ class DerivativesFeed:
             self._fetch_volume_ratio(),
         )
         curr_funding, trend, oi_delta, okx_partial = results[0]
-        cvd, basis, large_print = results[1]
+        cvd, basis, large_print, trades_available = results[1]
         volume_ratio = results[2]
         vol = self._brti_volatility_1h()
         fg = fetch_fear_greed(self._redis)
@@ -128,6 +128,10 @@ class DerivativesFeed:
         }
         if okx_partial:
             features["_okx_partial"] = True
+        if not trades_available:
+            # CVD and large_print are zeros — key stays alive but row must be
+            # excluded from regime training. Fusion reads this and sets stale=True.
+            features["_cvd_stale"] = True
         return features
 
     async def _fetch_okx_funding_and_oi(self) -> tuple[float, float, float]:
@@ -314,17 +318,28 @@ class DerivativesFeed:
 
         return funding_8h, oi_delta
 
-    async def _fetch_trades_data(self) -> tuple[float, float, float]:
-        """Returns (cvd_normalized, basis_spread_pct, large_print_direction).
-        Tries OKX first; falls back to Kraken fetchTrades on any exception."""
+    async def _fetch_trades_data(self) -> tuple[float, float, float, bool]:
+        """Returns (cvd_normalized, basis_spread_pct, large_print_direction, trades_available).
+
+        Tries OKX first, then Kraken. If both fail (e.g. exchange outage),
+        returns zeros with trades_available=False so the caller can mark the
+        feature snapshot as stale without letting the exception crash the loop.
+        """
         try:
             trades = await self._exchange.fetch_trades(_SYMBOL, limit=500)
-            return self._cvd_normalized(trades), self._basis_spread_pct(trades), self._large_print_direction(trades)
+            return self._cvd_normalized(trades), self._basis_spread_pct(trades), self._large_print_direction(trades), True
         except Exception as exc:
             logger.warning(
                 f"DerivativesFeed: OKX trades fetch failed — using Kraken fallback ({exc})"
             )
-            return await self._kraken_trades_data()
+        try:
+            cvd, basis, lp = await self._kraken_trades_data()
+            return cvd, basis, lp, True
+        except Exception as exc:
+            logger.warning(
+                f"DerivativesFeed: Kraken trades fallback also failed — CVD zeroed ({exc})"
+            )
+            return 0.0, 0.0, 0.0, False
 
     async def _get_kraken_exchange(self):
         """Lazy-initialize and return the Kraken ccxt exchange instance."""
