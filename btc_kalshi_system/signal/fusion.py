@@ -265,7 +265,8 @@ class SignalFusionEngine:
         stale = not ctx or ctx.get("_lkg", False) or ctx.get("_cvd_stale", False)
 
         # Read OHLCV once — reused by multiple features
-        df5 = self._store.get_ohlcv("5min")
+        df5  = self._store.get_ohlcv("5min")
+        df15 = self._store.get_ohlcv("15min")
         df1h = self._store.get_ohlcv("1h")
 
         # --- Features 1-6: existing ---
@@ -307,14 +308,31 @@ class SignalFusionEngine:
             cvd_velocity_10m = (cvd_now - cvd_10m_ago) / 10.0
             cvd_acceleration = cvd_velocity - cvd_velocity_10m
 
-        # --- Features 9-10: brti_momentum ---
-        if df5 is not None and len(df5) >= 4:
-            brti_momentum_5min = float(df5["close"].iloc[-1] / df5["close"].iloc[-2] - 1)
-            brti_momentum_15min = float(df5["close"].iloc[-1] / df5["close"].iloc[-4] - 1)
-        else:
-            brti_momentum_5min = 0.0
+        # --- Features 9-10: brti_momentum (prior closed candle, non-leaky) ---
+        # Use the prior CLOSED 15-min and 5-min candles so the feature is the same
+        # at T=0 (training) and T=33% (deployment). The old formula used df5[-1]
+        # which at logging time (T+10s) ≈ the just-closed candle's return — leakage.
+        try:
+            if df15 is not None and len(df15) >= 3 and df5 is not None and len(df5) >= 5:
+                prior = df15.iloc[-2]
+                brti_momentum_15min = float(prior["close"] / prior["open"] - 1) if prior["open"] != 0 else 0.0
+                # Last completed 5-min candle before the current 15-min candle opened
+                current_15_open = df15.index[-1]
+                df5_prior = df5[df5.index < current_15_open]
+                if len(df5_prior) >= 2:
+                    brti_momentum_5min = float(df5_prior["close"].iloc[-1] / df5_prior["close"].iloc[-2] - 1)
+                else:
+                    brti_momentum_5min = 0.0
+            elif df5 is not None and len(df5) >= 4:
+                brti_momentum_5min  = float(df5["close"].iloc[-1] / df5["close"].iloc[-2] - 1)
+                brti_momentum_15min = float(df5["close"].iloc[-1] / df5["close"].iloc[-4] - 1)
+            else:
+                brti_momentum_5min  = 0.0
+                brti_momentum_15min = 0.0
+                stale = True
+        except Exception:
+            brti_momentum_5min  = 0.0
             brti_momentum_15min = 0.0
-            stale = True
 
         # --- Feature 11: candle_progress ---
         candle_progress = float((time.time() % 900) / 900)
