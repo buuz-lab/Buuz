@@ -413,6 +413,11 @@ class SignalFusionEngine:
         # --- Feature 21: large_print_direction ---
         large_print_direction = float(ctx.get("large_print_direction", 0.0))
 
+        # --- Feature 29: volume_ratio_1h (liquidity context) ---
+        # 1.0 = normal volume; <0.5 = thin market; >2.0 = high activity.
+        # Default 1.0 (neutral) when unavailable rather than 0.0 (extreme thin).
+        volume_ratio_1h = float(ctx.get("volume_ratio_1h") or 1.0)
+
         # --- Feature 28: btc_24h_return ---
         if df1h is not None and len(df1h) >= 25:
             btc_24h_return = float(df1h["close"].iloc[-1] / df1h["close"].iloc[-25] - 1)
@@ -462,6 +467,7 @@ class SignalFusionEngine:
             "range_breakout_flag":      range_breakout_flag,
             "tape_speed_tpm":           tape_speed_tpm,
             "large_print_direction":    large_print_direction,
+            "volume_ratio_1h":          volume_ratio_1h,
             "atm_iv":                   atm_iv,
             "iv_rv_spread":             iv_rv_spread,
             "pcr_oi":                   pcr_oi,

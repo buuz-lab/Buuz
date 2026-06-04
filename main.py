@@ -256,6 +256,7 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("kalshi_mid_candle_mid",    "REAL DEFAULT NULL"),  # mid-price at ~50% candle progress (0-1)
     ("kalshi_mid_candle_spread", "REAL DEFAULT NULL"),  # spread at ~50% candle progress (0-1)
     ("kalshi_mid_candle_progress", "REAL DEFAULT NULL"),  # actual progress when snapshot taken
+    ("volume_ratio_1h",          "REAL DEFAULT NULL"),  # hourly volume vs 30-day avg (regime feature)
 ]
 
 

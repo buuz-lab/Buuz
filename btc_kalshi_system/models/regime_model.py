@@ -28,6 +28,10 @@ _FEATURE_ORDER = [
     "range_breakout_flag",
     "tape_speed_tpm",
     "large_print_direction",
+    # Liquidity context (session 31) — current hourly volume vs 30-day average.
+    # 1.0 = normal, <0.5 = thin (noisy), >2.0 = active. XGBoost handles NaN on
+    # pre-session rows where the column was not yet logged.
+    "volume_ratio_1h",
     # Deribit options (session 6) — independent of Kalshi
     "atm_iv",
     "iv_rv_spread",
