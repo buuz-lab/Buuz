@@ -11,7 +11,7 @@ from config import COINGLASS_API_KEY, HYPERLIQUID_BASE_URL, KRAKEN_FUTURES_BASE_
 from btc_kalshi_system.data.fear_greed import fetch_fear_greed
 
 _REFRESH_INTERVAL = 300   # 5 minutes
-_FEATURES_TTL = 900       # 3x refresh interval — tolerates slow ccxt fetches without expiring
+_FEATURES_TTL = 1800      # 6x refresh interval — tolerates network timeouts stacking up
 _CCXT_TIMEOUT_MS = 10_000  # 10 s — fail fast on DNS timeouts rather than hanging
 _LKG_TTL = 86_400         # 24 hours — last-known-good survives multi-hour exchange outages
 _FUNDING_LOOKBACK_MS = 4 * 3600_000  # 4 hours in milliseconds
