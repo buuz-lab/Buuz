@@ -4,11 +4,62 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 31 complete. Kalshi opening + mid-candle price snapshots now logged in `candle_features`. This enables the definitive regime v2 edge test once data accumulates. **Next:** wait for regime v2 row threshold (~June 8), then retrain and run the `kalshi_open_mid` Brier comparison on holdout rows.
+**Current focus:** Session 32 complete. Four training data leakage sources found and fixed in regime v2 feature engineering. Honest Brier is 0.178 (73% accuracy) vs inflated 0.106 pre-fix. Model now limited by data volume, not by cheating. **Next:** wait for 672-row threshold (~June 8), retrain on clean features, run `kalshi_open_mid` Brier comparison.
 
 ---
 
 ## Current Progress
+
+**As of 2026-06-04 session 32: Training data leakage purged from regime v2. Four features fixed, all rows backfilled.**
+
+**Goal:** Audit all regime v2 features for training/deployment timing mismatch. At logging time (T+10s after candle close), several features inadvertently encoded the direction of the candle being predicted.
+
+**Root cause:** The candle logger fires at T+10s after candle N closes. `df5[-1]` at that moment ≈ the closing price of candle N. Any feature using `df5[-1]["close"]`, `df5[-1]["high"]`, or `df5[-1]["low"]` partially encodes `btc_direction` — the target variable.
+
+**Four leakage sources fixed:**
+
+| Feature | What leaked | Fix |
+|---|---|---|
+| `brti_momentum_15min` | `df5[-1]/df5[-4]` ≈ return of candle N (11% importance was ~tautology) | `df15.iloc[-2]` open/close (prior closed 15-min candle's return) |
+| `brti_momentum_5min` | `df5[-1]/df5[-2]` ≈ last 5-min of candle N | `df5_prior[-1]/df5_prior[-2]` (last complete 5-min before candle opened) |
+| `range_breakout_flag` | `df5[-1]` close vs box that included candle N's first 2/3 (16% importance → tautology) | `df15[-2]` high/low vs `df15[-3]` high/low (prior candle vs its prior) |
+| `hourly_sr_proximity` | `df5[-1]["close"]` (close of candle N) as reference price | `df15[-2]["open"]` (open of candle N = price at candle start) |
+
+**All 380+ existing `candle_features` rows backfilled** using Redis OHLCV history (`brti:candles:15min`, `brti:candles:5min`, `brti:candles:1h`).
+
+**Impact on Brier:**
+
+| State | Holdout Brier | Accuracy |
+|---|---|---|
+| Pre-fix (inflated) | 0.106 | 83% |
+| After momentum fix | 0.150 | 78% |
+| After range_breakout fix | 0.184 | 72% |
+| After hourly_sr_proximity fix | **0.178** | **73%** |
+| Naive baseline | 0.250 | 50% |
+
+The model still beats the naive baseline. The inflated 0.106 was masking ~0.07 of artificial performance from three dominant leaky features.
+
+**Feature importances post-fix:** Flat distribution (1–6% each, top is `range_breakout_flag` at 6.4%). No single dominant feature — the model now learns from the full 29-feature set rather than relying on two leaky proxies for the answer.
+
+**Additional improvements — session 32:**
+- Added `volume_ratio_1h` (hourly volume vs 30-day avg) to `_FEATURE_ORDER` as feature 29. Was computed in derivatives_feed but never used in model. Backfilled all rows from OKX historical OHLCV. Currently at 4.7% importance.
+- Fixed `_fetch_trades_data` to never throw on exchange outage — returns zeros + `_cvd_stale=True` flag so `regime:features` key stays alive during outages. Fusion reads flag and marks candle stale (excluded from training) without letting the TTL expire.
+- Fixed `deribit_stale` rows excluded from regime training (added `AND atm_iv IS NOT NULL` to qualifying filter in `train_regime.py` and `auto_retrain_regime.py`).
+- Regime v2 dry-run at 308 rows: Brier **0.178**, 73% accuracy. CV mean 0.230 ± 0.026 — folds are weak at this data volume but that's honest. Fold 3 at 0.259 (worse than baseline) reflects genuine data scarcity, not model failure.
+
+**Current state (as of session 32 end):**
+- 308 qualifying rows | 364 more to 672 threshold | ~3.6 days
+- All leakage removed — model limited by data volume, not by cheating
+- Clean Brier trajectory will be meaningful once 672 rows reached
+
+**Next Steps:**
+1. **~June 8**: Reach 672 qualifying rows, run full `train_regime.py` train on clean features
+2. Run `kalshi_open_mid` Brier comparison on holdout (the key edge test)
+3. Deploy in shadow mode (Gate 2 not enforcing), observe ~50 trades
+4. Enforce Gate 2 once disagreement rate is stable — deploy with anti-Kronos bias for current bear market
+5. **Drawdown trigger**: if regime v2 enforcement causes >$30 additional loss vs paper baseline in 3 days, pause and wait for auto-retrain (200 new rows)
+
+---
 
 **As of 2026-06-03 session 31: Kalshi open + mid-candle snapshots logging. Regime v2 dry-run analysed. Handoff Phase 3c added.**
 
