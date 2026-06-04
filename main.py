@@ -1052,18 +1052,22 @@ class KronosV2:
                 ctx = json.loads(raw_features)
             else:
                 # Primary key expired (exchange outage) — try last-known-good fallback.
-                # LKG features are still better than zeros for Gate 2 inference, but
-                # the row is still marked stale (features_stale=1) so it never enters
-                # RegimeModel training. _lkg sentinel is checked in fusion._regime_features().
+                # If LKG is fresh (< 15 min) the features are still representative;
+                # derivatives update every 5 min so a 15-min-old snapshot is good
+                # enough for training. Only mark stale when LKG is ≥ 15 min old.
+                _LKG_FRESH_THRESHOLD_S = 900  # 15 minutes
                 lkg_raw = r.get("regime:features:lkg")
                 if lkg_raw:
                     lkg = json.loads(lkg_raw)
                     age_s = _time.time() - lkg.pop("_lkg_written_at", _time.time())
+                    is_stale_lkg = age_s >= _LKG_FRESH_THRESHOLD_S
                     logger.warning(
                         f"regime:features expired — falling back to LKG features "
-                        f"({age_s / 3600:.1f}h old); row will be marked stale"
+                        f"({age_s / 60:.0f}min old); "
+                        f"row will {'be marked stale' if is_stale_lkg else 'qualify (LKG fresh)'}"
                     )
-                    lkg["_lkg"] = True
+                    if is_stale_lkg:
+                        lkg["_lkg"] = True
                     ctx = lkg
                 else:
                     ctx = {}
