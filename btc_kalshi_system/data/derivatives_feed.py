@@ -471,7 +471,12 @@ class DerivativesFeed:
             lkg_payload["_lkg_written_at"] = time.time()
             self._redis.set("regime:features:lkg", json.dumps(lkg_payload), ex=_LKG_TTL)
 
+        # Use timestamp as the unique member key so duplicate CVD values don't
+        # collapse into one entry. The old scheme used str(cvd_value) as the key,
+        # meaning repeated 0.0 writes (during exchange outages) could reduce the
+        # set below the 5-entry minimum and trigger a silent stale cascade.
         cvd_value = features.get("cvd_normalized", 0.0)
-        self._redis.zadd("regime:cvd_history", {str(float(cvd_value)): time.time()})
-        self._redis.zremrangebyscore("regime:cvd_history", 0, time.time() - 7200)
+        now_ts = time.time()
+        self._redis.zadd("regime:cvd_history", {f"{now_ts:.3f}:{float(cvd_value):.6f}": now_ts})
+        self._redis.zremrangebyscore("regime:cvd_history", 0, now_ts - 7200)
         self._redis.zremrangebyrank("regime:cvd_history", 0, -91)

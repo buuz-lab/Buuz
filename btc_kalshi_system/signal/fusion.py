@@ -298,10 +298,15 @@ class SignalFusionEngine:
         else:
             now_ts = time.time()
 
-            def _closest(ents, target_ts):
-                return float(min(ents, key=lambda e: abs(e[1] - target_ts))[0])
+            def _parse_cvd(member: bytes) -> float:
+                # Member format: "timestamp:cvd_value" (new) or plain float str (old)
+                s = member.decode() if isinstance(member, bytes) else str(member)
+                return float(s.split(":", 1)[-1])
 
-            cvd_now = float(entries[-1][0])
+            def _closest(ents, target_ts):
+                return _parse_cvd(min(ents, key=lambda e: abs(e[1] - target_ts))[0])
+
+            cvd_now = _parse_cvd(entries[-1][0])
             cvd_5m_ago = _closest(entries, now_ts - 300)
             cvd_10m_ago = _closest(entries, now_ts - 600)
             cvd_velocity = (cvd_now - cvd_5m_ago) / 5.0
