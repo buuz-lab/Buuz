@@ -374,9 +374,12 @@ class SignalFusionEngine:
             trend_slope_1h = 0.0
             trend_r2_1h = 0.0
 
-        # --- Feature 18: hourly_sr_proximity ---
-        if df1h is not None and len(df1h) >= 2 and df5 is not None and len(df5) >= 1:
-            current_price = float(df5["close"].iloc[-1])
+        # --- Feature 18: hourly_sr_proximity (non-leaky) ---
+        # Old formula used df5[-1]["close"] at T+10s ≈ close of the candle being
+        # predicted. Fix: use the candle's OPEN price (df15[-2]["open"]) so the
+        # feature captures "where was price at the start of this candle vs S/R?"
+        if df1h is not None and len(df1h) >= 2 and df15 is not None and len(df15) >= 3:
+            current_price = float(df15.iloc[-2]["open"])
             resistance = float(df1h["high"].tail(24).max())
             support = float(df1h["low"].tail(24).min())
             price_range = resistance - support
