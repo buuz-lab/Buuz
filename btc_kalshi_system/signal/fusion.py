@@ -388,21 +388,41 @@ class SignalFusionEngine:
         else:
             hourly_sr_proximity = 0.5
 
-        # --- Feature 19: range_breakout_flag ---
-        if df5 is not None and len(df5) >= 5:
-            box = df5.iloc[-5:-2]
-            box_high = float(box["high"].max())
-            box_low = float(box["low"].min())
-            box_range = box_high - box_low
-            curr_high = float(df5["high"].iloc[-1])
-            curr_low = float(df5["low"].iloc[-1])
-            if box_range > 1e-6:
-                breakout_up = max(0.0, curr_high - box_high) / box_range
-                breakout_down = max(0.0, box_low - curr_low) / box_range
-                range_breakout_flag = float(breakout_up - breakout_down)
+        # --- Feature 19: range_breakout_flag (prior closed candle, non-leaky) ---
+        # Old formula used df5[-1] at T+10s ≈ close of the candle being predicted —
+        # leakage. Fix: did the last CLOSED 15-min candle (N-1) break above/below
+        # the range of the candle before it (N-2)? Same value at T=0 and T=33%.
+        try:
+            if df15 is not None and len(df15) >= 4:
+                prior  = df15.iloc[-2]   # N-1: last closed 15-min candle
+                prior2 = df15.iloc[-3]   # N-2: the candle before that
+                box_high  = float(prior2["high"])
+                box_low   = float(prior2["low"])
+                box_range = box_high - box_low
+                curr_high = float(prior["high"])
+                curr_low  = float(prior["low"])
+                if box_range > 1e-6:
+                    breakout_up   = max(0.0, curr_high - box_high) / box_range
+                    breakout_down = max(0.0, box_low  - curr_low)  / box_range
+                    range_breakout_flag = float(breakout_up - breakout_down)
+                else:
+                    range_breakout_flag = 0.0
+            elif df5 is not None and len(df5) >= 5:
+                box = df5.iloc[-5:-2]
+                box_high = float(box["high"].max())
+                box_low  = float(box["low"].min())
+                box_range = box_high - box_low
+                curr_high = float(df5["high"].iloc[-1])
+                curr_low  = float(df5["low"].iloc[-1])
+                if box_range > 1e-6:
+                    breakout_up   = max(0.0, curr_high - box_high) / box_range
+                    breakout_down = max(0.0, box_low  - curr_low)  / box_range
+                    range_breakout_flag = float(breakout_up - breakout_down)
+                else:
+                    range_breakout_flag = 0.0
             else:
                 range_breakout_flag = 0.0
-        else:
+        except Exception:
             range_breakout_flag = 0.0
 
         # --- Feature 20: tape_speed_tpm ---
