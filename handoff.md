@@ -10,6 +10,32 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ## Current Progress
 
+**As of 2026-06-04 session 32 (continued): Staleness reliability fixes — three root causes identified and fixed. Training row drop rate significantly reduced.**
+
+**Staleness root causes and fixes:**
+
+**1. LKG freshness threshold** (`main.py`)
+- **Before:** Any LKG use unconditionally marked `features_stale=1`, losing valid training rows during brief exchange blips (e.g. one missed 5-min refresh cycle).
+- **Fix:** Only mark stale if LKG is ≥ 15 minutes old. LKG < 15 min = features still representative (derivatives refresh every 5 min). Brief outages no longer cost training rows.
+
+**2. `_cvd_stale` flag for exchange outages** (`derivatives_feed.py`, `fusion.py`)
+- **Before:** When OKX + Bybit + Kraken all failed to fetch trades, `_fetch_features()` threw an exception, skipped the Redis write entirely, and the `regime:features` key eventually expired → LKG cascade → stale rows.
+- **Fix:** `_fetch_trades_data()` now catches the final exception and returns `(0.0, 0.0, 0.0, False)`. `_fetch_features()` writes `_cvd_stale=True` into the Redis key. Key stays alive. Fusion reads `_cvd_stale` and marks the row stale — correct behavior without the expiry cascade.
+
+**3. CVD history deduplication — silent stale cascade** (`derivatives_feed.py`, `fusion.py`)
+- **Root cause of the 6-candle stale block:** `regime:cvd_history` used `str(cvd_value)` as the sorted-set member key. During exchange outages, `_cvd_stale` writes `0.0` repeatedly — but `"0.0"` is the same member, so all those entries collapse into ONE. When combined with normal pruning, the set could silently drop below the 5-entry minimum, triggering `stale=True` on every candle with **no log output** and **no warning**.
+- **Fix:** Member key changed to `"timestamp:cvd_value"` — every write is unique. `_parse_cvd()` helper in fusion.py extracts the value from the new format (backward-compatible with old plain-float keys). Cleared existing history on deploy.
+
+**Three-layer staleness protection now in place:**
+
+| Failure | Before | After |
+|---|---|---|
+| Brief blip < 15 min (LKG used) | Row stale | Row qualifies |
+| Full exchange outage (trades fail) | Key expires → cascade | Key alive with `_cvd_stale`, row correctly stale |
+| Repeated 0.0 CVD writes deduplicating | Silent history collapse → stale with no log | Each write unique, history never collapses |
+
+---
+
 **As of 2026-06-04 session 32: Training data leakage purged from regime v2. Four features fixed, all rows backfilled.**
 
 **Goal:** Audit all regime v2 features for training/deployment timing mismatch. At logging time (T+10s after candle close), several features inadvertently encoded the direction of the candle being predicted.
