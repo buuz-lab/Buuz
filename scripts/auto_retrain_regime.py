@@ -58,6 +58,7 @@ WHERE features_stale = 0
   AND brti_momentum_5min IS NOT NULL
   AND funding_window_proximity IS NOT NULL
   AND large_print_direction IS NOT NULL
+  AND atm_iv IS NOT NULL
 ORDER BY candle_ts ASC
 """
 
