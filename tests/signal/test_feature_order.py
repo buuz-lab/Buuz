@@ -101,7 +101,7 @@ def test_feature_order_all_three_match():
     """All three sources must be identical including ORDER (not just membership)."""
     fusion_keys = _get_fusion_feature_keys()
     assert _FEATURE_ORDER == _FEATURE_COLS == fusion_keys
-    assert len(_FEATURE_ORDER) == 28  # 26 market features + kronos_raw_15min + kronos_raw_5min
+    assert len(_FEATURE_ORDER) == 29  # 27 market features + kronos_raw_15min + kronos_raw_5min
 
 
 def test_feature_order_includes_kronos_features():

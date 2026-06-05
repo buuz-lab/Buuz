@@ -61,10 +61,12 @@ def test_gate7_no_longer_blocks_yes_up_with_negative_cvd():
 
 
 def test_gate7_no_longer_blocks_no_down_with_positive_cvd():
-    """direction=0, cvd=+0.4 → checklist passes (Gate 7 is shadow-only)."""
+    """direction=0, cvd=+0.4 → checklist passes (Gate 7 is shadow-only).
+    Uses best_bid_cents=51 so NO fill=49¢ (edge=0.16 > 0.15 ranging floor, ≤ 0.20 Gate 14)."""
     checklist = _make_checklist()
     signal = _make_signal(direction=0, cvd=0.4, calibrated_prob=0.35)
-    result = checklist.run(signal=signal, **GOOD_KWARGS)
+    kw = {**GOOD_KWARGS, "best_ask_cents": 53, "best_bid_cents": 51}
+    result = checklist.run(signal=signal, **kw)
     assert result.passed
     assert result.failed_gate != 7
 

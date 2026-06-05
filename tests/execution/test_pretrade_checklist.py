@@ -93,13 +93,14 @@ def test_gate2_depth_capped_to_available(checklist):
 
     Regression: previously hard-failed on depth, leaving edge on the table when
     the orderbook had fewer contracts than Kelly requested (e.g. 10 available, 27 wanted).
-    Uses 50¢ fill (above Gate 11's 45¢ floor) so Gate 11 does not fire.
+    Uses prob=0.65 (edge=0.15 ≤ 0.20, passes Gate 14) at 50¢ fill (above Gate 11's
+    45¢ floor) so neither Gate 11 nor Gate 14 fires.
     """
-    signal = make_signal(direction=1, calibrated_prob=0.85)
+    signal = make_signal(direction=1, calibrated_prob=0.65)
     kw = base_kwargs(signal)
     kw["best_ask_cents"] = 50
     kw["best_bid_cents"] = 49
-    kw["available_contracts"] = 5   # Kelly will want far more than 5 at 85%/50¢
+    kw["available_contracts"] = 5   # Kelly will want far more than 5 at 65%/50¢
     r = checklist.run(**kw)
     assert r.passed
     assert r.kelly_contracts == 5
@@ -173,12 +174,13 @@ def test_all_gates_pass(checklist):
 
 
 def test_passing_result_has_correct_kelly_values(checklist):
-    signal = make_signal(calibrated_prob=0.65)
+    # Use prob=0.60 → Kelly=$7.50 < $8 Gate 13 cap so the cap doesn't interfere.
+    signal = make_signal(calibrated_prob=0.60)
     kw = base_kwargs(signal)
     r = checklist.run(**kw)
     sizer = KellySizer()
     expected_dollars = sizer.compute_size(
-        prob=0.65,
+        prob=0.60,
         market_price=kw["best_ask_cents"] / 100,
         current_exposure=kw["current_exposure"],
         same_timeframe_open=kw["same_timeframe_open"],
@@ -287,8 +289,10 @@ def test_gate8_oi_squeeze_compound(checklist):
 
 
 def test_gate8_kelly_multiplier_reduces_dollars(checklist):
-    """kalshi_mid=0.55 for NO bet: opposing=0.05, mult=1-0.05/0.30≈0.83 → kelly_dollars reduced."""
-    signal = make_signal(direction=0, calibrated_prob=0.35)
+    """kalshi_mid=0.55 for NO bet: opposing=0.05, mult=1-0.05/0.30≈0.83 → kelly_dollars reduced.
+    Uses prob=0.40 (win_prob=0.60) so Kelly=$6.25 < $8 Gate 13 cap, letting the
+    multiplier comparison be visible."""
+    signal = make_signal(direction=0, calibrated_prob=0.40)
     kw = base_kwargs(signal)
     # Use a kalshi_mid that passes the hard gate but triggers the multiplier
     kw["fresh_kalshi_mid"] = 0.55  # opposing=0.05, mult≈0.83; passes hard gate (0.05 < 0.25)
@@ -299,16 +303,17 @@ def test_gate8_kelly_multiplier_reduces_dollars(checklist):
 
 
 def test_high_confidence_k15_passes_when_kalshi_disagrees_moderately(checklist):
-    """k15=0.89 YES@50¢, Kalshi=0.29 → opposing=0.21 < threshold=0.25 → passes Gate 8.
+    """k15=0.89 YES@72¢, Kalshi=0.29 → opposing=0.21 < threshold=0.25 → passes Gate 8.
 
     Regression: old Gate 8 threshold (0.08) and Gate 8b denominator (0.20) blocked
-    high-confidence YES calls with moderate Kalshi disagreement. Uses 50¢ fill to avoid
-    Gate 11 (which blocks YES fills < 45¢ at k_cal > 0.75 — different issue).
+    high-confidence YES calls with moderate Kalshi disagreement. Uses 72¢ fill so
+    edge=|0.89-0.72|=0.17 ≤ 0.20 (Gate 14 passes) and fill >= 45¢ (Gate 11 passes).
+    fresh_kalshi_mid=0.29 → opposing=0.50-0.29=0.21 < 0.25 threshold → Gate 8 passes.
     """
     signal = make_signal(direction=1, calibrated_prob=0.89)
     kw = base_kwargs(signal)
-    kw["best_ask_cents"] = 50
-    kw["best_bid_cents"] = 49
+    kw["best_ask_cents"] = 72
+    kw["best_bid_cents"] = 71
     kw["fresh_kalshi_mid"] = 0.29
     kw["available_contracts"] = 200
     r = checklist.run(**kw)
@@ -338,8 +343,9 @@ def test_direction_win_rate_passed_to_kelly(checklist):
 
 
 def test_gate8_both_shrinks_stack(checklist):
-    """Kalshi mult AND drift shrink both active → kelly_dollars = base * mult * 0.5."""
-    signal = make_signal(direction=0, calibrated_prob=0.35)
+    """Kalshi mult AND drift shrink both active → kelly_dollars = base * mult * 0.5.
+    Uses prob=0.40 (win_prob=0.60, Kelly≈$6.25 < $8 cap) so Gate 13 doesn't interfere."""
+    signal = make_signal(direction=0, calibrated_prob=0.40)
     r_base = checklist.run(**base_kwargs(signal))
     kw = base_kwargs(signal)
     kw["fresh_kalshi_mid"] = 0.55  # opposing=0.05, mult=1-0.05/0.30≈0.833
@@ -428,14 +434,17 @@ def test_min_price_allows_no_at_low_cents(checklist):
     assert r.failed_gate != 2
 
 def test_min_price_allows_trade_at_boundary(checklist):
-    """Trade at exactly 20¢ is allowed through the price filter."""
+    """Trade at exactly 20¢ is allowed through the Gate 2a price filter.
+    Note: Gate 14 (edge ceiling) may fire since edge=0.45 > 0.20 at prob=0.65,
+    but the test only verifies Gate 2a does NOT block — other gates may still fire."""
     signal = make_signal(direction=1, calibrated_prob=0.65)
     kw = base_kwargs(signal)
     kw["best_ask_cents"] = 20
     kw["best_bid_cents"] = 18
     kw["available_contracts"] = 200  # Kelly at 20¢ requests ~105 contracts
     r = checklist.run(**kw)
-    assert r.passed
+    # Gate 2a must not block — test verifies min price filter does not fire
+    assert r.failed_gate != 2
 
 
 # ── Gate 2b: NO maximum price filter ─────────────────────────────────────────
@@ -466,11 +475,12 @@ def test_gate2b_allows_no_at_55c_boundary(checklist):
 
 def test_gate8_low_confidence_signal_blocked_at_mild_kalshi_disagreement(checklist):
     """Low k15 confidence (prob=0.60, distance=0.10 < 0.15) → threshold=0.10.
-    kalshi_mid=0.38 → opposing=0.12 > 0.10 → Gate 8 blocks even at mild disagreement."""
+    kalshi_mid=0.38 → opposing=0.12 > 0.10 → Gate 8 blocks even at mild disagreement.
+    Uses best_ask_cents=42 (edge=0.18 ≤ 0.20) to avoid Gate 14."""
     signal = make_signal(direction=1, calibrated_prob=0.60)
     kw = base_kwargs(signal)
-    kw["best_ask_cents"] = 38
-    kw["best_bid_cents"] = 37
+    kw["best_ask_cents"] = 42
+    kw["best_bid_cents"] = 40
     kw["available_contracts"] = 200
     kw["fresh_kalshi_mid"] = 0.38
     r = checklist.run(**kw)
@@ -480,11 +490,12 @@ def test_gate8_low_confidence_signal_blocked_at_mild_kalshi_disagreement(checkli
 
 def test_gate8_medium_confidence_signal_blocked_at_moderate_kalshi_disagreement(checklist):
     """Medium k15 confidence (prob=0.70, distance=0.20 in 0.15–0.29) → threshold=0.15.
-    kalshi_mid=0.30 → opposing=0.20 > 0.15 → Gate 8 blocks."""
+    kalshi_mid=0.30 → opposing=0.20 > 0.15 → Gate 8 blocks.
+    Uses best_ask_cents=52 (edge=0.18 ≤ 0.20) to avoid Gate 14."""
     signal = make_signal(direction=1, calibrated_prob=0.70)
     kw = base_kwargs(signal)
-    kw["best_ask_cents"] = 30
-    kw["best_bid_cents"] = 29
+    kw["best_ask_cents"] = 52
+    kw["best_bid_cents"] = 51
     kw["available_contracts"] = 200
     kw["fresh_kalshi_mid"] = 0.30
     r = checklist.run(**kw)
@@ -507,12 +518,12 @@ def test_gate8_medium_confidence_passes_when_kalshi_barely_aligned(checklist):
 
 def test_gate8_high_confidence_still_passes_moderate_kalshi_disagreement(checklist):
     """High k15 confidence (prob=0.89, distance=0.39 ≥ 0.30) → threshold=0.25.
-    kalshi_mid=0.29 → opposing=0.21 < 0.25 → passes Gate 8. Uses 50¢ fill to avoid
-    Gate 11 (Gate 11 blocks YES < 45¢ at k_cal > 0.75; Gate 8 behavior is separate)."""
+    kalshi_mid=0.29 → opposing=0.21 < 0.25 → passes Gate 8.
+    Uses best_ask_cents=72 (edge=0.17 ≤ 0.20) to avoid Gate 14."""
     signal = make_signal(direction=1, calibrated_prob=0.89)
     kw = base_kwargs(signal)
-    kw["best_ask_cents"] = 50
-    kw["best_bid_cents"] = 49
+    kw["best_ask_cents"] = 72
+    kw["best_bid_cents"] = 71
     kw["available_contracts"] = 200
     kw["fresh_kalshi_mid"] = 0.29
     r = checklist.run(**kw)
@@ -599,9 +610,10 @@ def test_gate11_does_not_fire_no_direction(checklist):
 # sizing filter uncorrelated with signal quality (68.4% WR blocked, 45.2% taken).
 
 def test_high_uncertainty_kelly_same_as_neutral(checklist):
-    """high_uncertainty regime no longer shrinks kelly — fusion handles it."""
-    uncertain = make_signal(calibrated_prob=0.75, deepseek_regime="high_uncertainty")
-    normal    = make_signal(calibrated_prob=0.75, deepseek_regime="neutral")
+    """high_uncertainty regime no longer shrinks kelly — fusion handles it.
+    Uses prob=0.65 (edge=0.15 ≤ 0.20) to avoid Gate 14."""
+    uncertain = make_signal(calibrated_prob=0.65, deepseek_regime="high_uncertainty")
+    normal    = make_signal(calibrated_prob=0.65, deepseek_regime="neutral")
     r_u = checklist.run(**base_kwargs(uncertain))
     r_n = checklist.run(**base_kwargs(normal))
     assert r_u.passed
@@ -609,9 +621,10 @@ def test_high_uncertainty_kelly_same_as_neutral(checklist):
 
 
 def test_high_uncertainty_kelly_contracts_same_as_neutral(checklist):
-    """high_uncertainty no longer reduces contracts vs neutral at same prob."""
-    uncertain = make_signal(calibrated_prob=0.80, deepseek_regime="high_uncertainty")
-    normal    = make_signal(calibrated_prob=0.80, deepseek_regime="neutral")
+    """high_uncertainty no longer reduces contracts vs neutral at same prob.
+    Uses prob=0.65 (edge=0.15 ≤ 0.20) to avoid Gate 14."""
+    uncertain = make_signal(calibrated_prob=0.65, deepseek_regime="high_uncertainty")
+    normal    = make_signal(calibrated_prob=0.65, deepseek_regime="neutral")
     r_u = checklist.run(**base_kwargs(uncertain))
     r_n = checklist.run(**base_kwargs(normal))
     assert r_u.passed
@@ -627,10 +640,11 @@ def test_high_uncertainty_does_not_block(checklist):
 
 
 def test_other_regimes_kelly_unchanged(checklist):
-    """ranging, trending_up, neutral regimes all produce the same kelly."""
+    """ranging, trending_up, neutral regimes all produce the same kelly.
+    Uses prob=0.65 (edge=0.15 ≤ 0.20) to avoid Gate 14."""
     normal_kelly = None
     for regime in ("neutral", "ranging", "trending_up"):
-        signal = make_signal(calibrated_prob=0.75, deepseek_regime=regime)
+        signal = make_signal(calibrated_prob=0.65, deepseek_regime=regime)
         r = checklist.run(**base_kwargs(signal))
         assert r.passed
         if normal_kelly is None:
@@ -641,13 +655,14 @@ def test_other_regimes_kelly_unchanged(checklist):
 
 
 def test_high_uncertainty_strong_k15_no_longer_blocked_by_shrink(checklist):
-    """Regression: high_uncertainty + strong k15 (0.75) that old shrink would kill.
+    """Regression: high_uncertainty + strong k15 (0.70) that old shrink would kill.
 
     Old path: compute_size=0.26, halved to 0.13, 0.13 < 0.25 (0.5×50¢) →
     fail Gate 2 'rounds to 0 after high_uncertainty shrink'.
     New path: no shrink → kelly_dollars=0.26 ≥ 0.25 → 1 contract → passes.
+    Uses prob=0.70 (edge=0.20, NOT > 0.20) to pass Gate 14.
     """
-    signal = make_signal(calibrated_prob=0.75, deepseek_regime="high_uncertainty")
+    signal = make_signal(calibrated_prob=0.70, deepseek_regime="high_uncertainty")
     kw = base_kwargs(signal)
     kw["best_ask_cents"] = 50
     kw["best_bid_cents"] = 48
@@ -711,11 +726,12 @@ def test_gate8_high_uncertainty_uses_flat_005_threshold(checklist):
     In high_uncertainty: gate8_base=0.05.
     fresh_kalshi_mid=0.44 → opposing=0.06 > 0.05 → Gate 8 blocks.
     In neutral at same opposing=0.06 < 0.25 → Gate 8 would pass.
+    Uses best_ask_cents=72 (edge=0.17 ≤ 0.20) to avoid Gate 14.
     """
     signal = make_signal(direction=1, calibrated_prob=0.89, deepseek_regime="high_uncertainty")
     kw = base_kwargs(signal)
-    kw["best_ask_cents"] = 50
-    kw["best_bid_cents"] = 48
+    kw["best_ask_cents"] = 72
+    kw["best_bid_cents"] = 70
     kw["available_contracts"] = 200
     kw["fresh_kalshi_mid"] = 0.44  # opposing=0.06 > 0.05 flat threshold
     r = checklist.run(**kw)

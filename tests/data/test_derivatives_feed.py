@@ -142,7 +142,7 @@ def test_features_written_to_redis_key_with_ttl():
     raw = feed._redis.get("regime:features")
     assert raw is not None
     ttl = feed._redis.ttl("regime:features")
-    assert 890 <= ttl <= 900
+    assert 1790 <= ttl <= 1800
 
 
 def test_features_contain_all_six_keys():
@@ -269,7 +269,7 @@ async def test_kraken_fallback_when_okx_trades_fail():
     # Seed BRTI so basis_spread_pct has a denominator
     feed._redis.set("brti:resolution_estimate", "67000.0")
 
-    cvd, basis, large_print = await feed._fetch_trades_data()
+    cvd, basis, large_print, _cvd_stale_flag = await feed._fetch_trades_data()
 
     feed._ccxt_async.kraken.assert_called_once()
     mock_kraken.fetch_trades.assert_called_once()

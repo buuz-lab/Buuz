@@ -122,22 +122,41 @@ def test_cvd_five_entries_not_stale():
 # ── brti_momentum ─────────────────────────────────────────────────────────────
 
 def test_brti_momentum_5min_correct():
-    """brti_momentum_5min = close[-1] / close[-2] - 1."""
+    """brti_momentum_5min = last complete 5-min candle before current 15-min opened.
+    The mock returns df5 for both '5min' and '15min', so df15=df5. The current
+    15-min candle is df15.index[-1]; df5_prior excludes it. With n=10 rows and
+    slope=1.0, df5_prior closes are [100..108], so expected = 108/107 - 1."""
     df5 = _make_df5(n=10, base_price=100.0, slope=1.0)
-    # close[-1] = 109.0, close[-2] = 108.0
+    # df5_prior.close[-1] = 108.0, df5_prior.close[-2] = 107.0
     engine = _make_engine(df5=df5)
     features, _, _, _ = engine._regime_features()
-    expected = 109.0 / 108.0 - 1.0
+    expected = 108.0 / 107.0 - 1.0
     assert features["brti_momentum_5min"] == pytest.approx(expected, rel=1e-6)
 
 
 def test_brti_momentum_15min_correct():
-    """brti_momentum_15min = close[-1] / close[-4] - 1."""
-    df5 = _make_df5(n=10, base_price=100.0, slope=1.0)
-    # close[-1] = 109.0, close[-4] = 106.0
+    """brti_momentum_15min = prior closed 15-min candle's close/open - 1.
+    The mock returns df5 for both '5min' and '15min', so df15=df5. With n=10
+    rows and slope=1.0, open=close=prices, so df15.iloc[-2] has open=108, close=108.
+    To get a non-trivial value, build a custom df5 with open=100 and close=110 on
+    the second-to-last row."""
+    n = 10
+    prices = [100.0 + i for i in range(n)]
+    idx = pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC")
+    opens = list(prices)
+    closes = list(prices)
+    # Set prior candle (iloc[-2]) to have a distinct open and close
+    opens[-2] = 100.0
+    closes[-2] = 110.0
+    df5 = pd.DataFrame({
+        "open": opens, "high": [p + 10 for p in prices],
+        "low": [p - 10 for p in prices], "close": closes,
+        "volume": [0.0] * n, "amount": [0.0] * n,
+    }, index=idx)
     engine = _make_engine(df5=df5)
     features, _, _, _ = engine._regime_features()
-    expected = 109.0 / 106.0 - 1.0
+    # prior = df15.iloc[-2]: open=100.0, close=110.0 → 110/100 - 1 = 0.10
+    expected = 110.0 / 100.0 - 1.0
     assert features["brti_momentum_15min"] == pytest.approx(expected, rel=1e-6)
 
 
@@ -210,16 +229,18 @@ def test_hourly_sr_proximity_in_unit_interval():
 # ── range_breakout_flag ───────────────────────────────────────────────────────
 
 def test_range_breakout_flag_bullish_breakout_is_positive():
-    """Candle breaking above the prior 3-candle box → positive flag."""
-    # Box candles: 100.0-101.0 range. Breakout candle: high=102.0, low=100.0
-    prices = [100.0] * 5
-    idx = pd.date_range("2024-01-01", periods=5, freq="5min", tz="UTC")
+    """Last CLOSED 15-min candle (df15.iloc[-2]) breaking above df15.iloc[-3] → positive flag.
+    The mock returns df5 for both '5min' and '15min', so df15=df5. With n>=4 rows,
+    the new code uses df15.iloc[-2] as the 'prior' candle and df15.iloc[-3] as the box.
+    Put the breakout in iloc[-2] (not iloc[-1] which is the current open candle)."""
+    prices = [100.0] * 6
+    idx = pd.date_range("2024-01-01", periods=6, freq="5min", tz="UTC")
     df5 = pd.DataFrame({
         "open": prices,
-        "high": [100.5, 100.5, 100.5, 100.5, 102.0],   # last candle breaks above
-        "low":  [99.5,  99.5,  99.5,  99.5,  100.0],
+        "high": [100.5, 100.5, 100.5, 100.5, 102.0, 100.5],  # iloc[-2] breaks above box
+        "low":  [99.5,  99.5,  99.5,  99.5,  100.0, 99.5],
         "close": prices,
-        "volume": [0.0] * 5, "amount": [0.0] * 5,
+        "volume": [0.0] * 6, "amount": [0.0] * 6,
     }, index=idx)
     engine = _make_engine(df5=df5)
     features, _, _, _ = engine._regime_features()
@@ -227,15 +248,17 @@ def test_range_breakout_flag_bullish_breakout_is_positive():
 
 
 def test_range_breakout_flag_bearish_breakout_is_negative():
-    """Candle breaking below the box → negative flag."""
-    prices = [100.0] * 5
-    idx = pd.date_range("2024-01-01", periods=5, freq="5min", tz="UTC")
+    """Last CLOSED 15-min candle (df15.iloc[-2]) breaking below df15.iloc[-3] → negative flag.
+    The mock returns df5 for both '5min' and '15min', so df15=df5. Put the bearish
+    breakout in iloc[-2] (not iloc[-1] which is the current open candle)."""
+    prices = [100.0] * 6
+    idx = pd.date_range("2024-01-01", periods=6, freq="5min", tz="UTC")
     df5 = pd.DataFrame({
         "open": prices,
-        "high": [100.5, 100.5, 100.5, 100.5, 100.0],
-        "low":  [99.5,  99.5,  99.5,  99.5,  98.0],    # last candle breaks below
+        "high": [100.5, 100.5, 100.5, 100.5, 100.0, 100.5],
+        "low":  [99.5,  99.5,  99.5,  99.5,  98.0,  99.5],   # iloc[-2] breaks below box
         "close": prices,
-        "volume": [0.0] * 5, "amount": [0.0] * 5,
+        "volume": [0.0] * 6, "amount": [0.0] * 6,
     }, index=idx)
     engine = _make_engine(df5=df5)
     features, _, _, _ = engine._regime_features()
@@ -299,9 +322,10 @@ def test_kalshi_implied_prob_missing_sets_stale():
 # ── CVD buffer stale-timestamp detection ──────────────────────────────────────
 
 def test_cvd_stale_buffer_marks_stale_and_zeros_velocity():
-    """5 entries present but most recent is > 360s old → stale buffer, velocity=0."""
+    """5 entries present but most recent is > 450s old → stale buffer, velocity=0.
+    Threshold raised from 360s to 450s (session 32) to survive multi-timeout outages."""
     now = _time.time()
-    old_ts = now - 400  # 400s ago — beyond the 360s threshold
+    old_ts = now - 460  # 460s ago — beyond the 450s threshold
     entries = [(0.1, old_ts - 400), (0.2, old_ts - 300), (0.3, old_ts - 200),
                (0.4, old_ts - 100), (0.5, old_ts)]
     engine = _make_engine(cvd_entries=entries)

@@ -9,14 +9,14 @@ import pytest
 from btc_kalshi_system.signal.fusion import SignalFusionEngine
 
 
-_ALL_28_KEYS = [
+_ALL_29_KEYS = [
     # kalshi_implied_prob and kalshi_spread_normalized excluded — see regime_model.py
     "funding_rate", "funding_rate_trend", "oi_delta_pct", "cvd_normalized",
     "basis_spread_pct", "brti_volatility_1h", "cvd_velocity", "cvd_acceleration",
     "brti_momentum_5min", "brti_momentum_15min", "candle_progress",
     "hour_sin", "hour_cos", "funding_window_proximity",
     "trend_slope_1h", "trend_r2_1h", "hourly_sr_proximity", "range_breakout_flag",
-    "tape_speed_tpm", "large_print_direction",
+    "tape_speed_tpm", "large_print_direction", "volume_ratio_1h",
     "atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope", "skew_25d",
     "btc_24h_return",
     "kronos_raw_15min", "kronos_raw_5min",
@@ -80,14 +80,14 @@ def _base_ctx() -> dict:
 # ── test_regime_features_includes_all_27_keys ─────────────────────────────────
 
 def test_regime_features_includes_all_28_keys():
-    """_regime_features() must return exactly 28 keys in the correct order."""
+    """_regime_features() must return exactly 29 keys in the correct order."""
     engine = _make_engine(_base_ctx())
     features, stale, deribit_stale, _ = engine._regime_features()
     keys = list(features.keys())
-    assert keys == _ALL_28_KEYS, (
-        f"Key mismatch.\nExpected: {_ALL_28_KEYS}\nGot:      {keys}"
+    assert keys == _ALL_29_KEYS, (
+        f"Key mismatch.\nExpected: {_ALL_29_KEYS}\nGot:      {keys}"
     )
-    assert len(keys) == 28
+    assert len(keys) == 29
 
 
 # ── test_deribit_stale flags ──────────────────────────────────────────────────

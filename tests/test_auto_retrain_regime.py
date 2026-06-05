@@ -36,7 +36,7 @@ _FEATURE_COLS_FOR_DB = [
     "brti_momentum_5min", "brti_momentum_15min", "candle_progress",
     "hour_sin", "hour_cos", "funding_window_proximity",
     "trend_slope_1h", "trend_r2_1h", "hourly_sr_proximity", "range_breakout_flag",
-    "tape_speed_tpm", "large_print_direction",
+    "tape_speed_tpm", "large_print_direction", "volume_ratio_1h",
     "atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope", "skew_25d",
     "btc_24h_return", "kronos_raw_15min", "kronos_raw_5min",
 ]
@@ -64,7 +64,7 @@ def _make_db(rows: list[dict]) -> str:
             0.002, 0.003, 0.5,
             0.5, 0.866, 0.1,
             0.0001, 0.8, 0.5, 0.0,
-            5.0, 1.0,
+            5.0, 1.0, 1.0,
             50.0, 0.5, 1.1, 0.01, 0.02,
             0.02,
             r.get("kronos_raw_15min", 0.6),
