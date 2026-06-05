@@ -14,7 +14,13 @@ import pytest
 
 import config
 from btc_kalshi_system.models.regime_model import NotTrainedError
-from btc_kalshi_system.signal.fusion import _BOOTSTRAP_SHRINK, SignalFusionEngine, TradingSignal
+from btc_kalshi_system.signal.fusion import (
+    _BOOTSTRAP_SHRINK,
+    _KRONOS_WEIGHT,
+    _REGIME_WEIGHT,
+    SignalFusionEngine,
+    TradingSignal,
+)
 
 
 # ── Test fixture helpers ───────────────────────────────────────────────────────
@@ -176,10 +182,10 @@ def test_gate2_boundary_kronos_exactly_half_is_down():
 # ── Combined probability formula (trained regime model) ───────────────────────
 
 def test_combined_weighted_average():
-    """combined = 0.8 * kronos_cal + 0.2 * regime_prob"""
+    """combined = _KRONOS_WEIGHT * kronos_cal + _REGIME_WEIGHT * regime_prob"""
     engine = make_engine(kronos_cal=0.70, regime_prob=0.80, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
-    expected = 0.8 * 0.70 + 0.2 * 0.80
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.80
     assert result.calibrated_prob == pytest.approx(expected)
 
 
@@ -200,8 +206,8 @@ def test_high_uncertainty_shrinks_combined_toward_half():
         deepseek_result=_ds_result(regime="high_uncertainty"),
     )
     result = engine.get_signal("5min", 76000.0)
-    base = 0.8 * 0.70 + 0.2 * 0.80        # 0.72
-    expected = 0.5 + (base - 0.5) * 0.5   # 0.61
+    base = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.80
+    expected = 0.5 + (base - 0.5) * 0.5
     assert result.calibrated_prob == pytest.approx(expected)
 
 
@@ -219,7 +225,7 @@ def test_high_uncertainty_does_not_suppress():
 def test_trending_up_regime_no_shrinkage():
     engine = make_engine(kronos_cal=0.70, regime_prob=0.80, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
-    expected = 0.8 * 0.70 + 0.2 * 0.80
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.80
     assert result.calibrated_prob == pytest.approx(expected)
 
 
@@ -426,9 +432,8 @@ def test_gate2_shadow_mode_does_not_block(monkeypatch):
     engine = make_engine(kronos_cal=0.70, regime_prob=0.30, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    # Regime neutralized on disagreement (kronos bullish, regime bearish) →
-    # _regime_in_fusion=0.5 so combined = 0.8×0.70 + 0.2×0.50 = 0.66
-    expected = 0.8 * 0.70 + 0.2 * 0.50   # 0.66 — regime neutralized on disagreement
+    # Regime neutralized on disagreement → _regime_in_fusion=0.5
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.50
     assert result.calibrated_prob == pytest.approx(expected)
 
 
@@ -453,12 +458,11 @@ def test_gate2_shadow_mode_does_not_affect_agreement(monkeypatch):
 
 def test_disagreement_neutralization_bullish_kronos_bearish_regime():
     """kronos_cal=0.70 (bullish), regime_prob=0.20 (bearish) → disagree.
-    Neutralization: _regime_in_fusion=0.5 → combined = 0.8×0.70 + 0.2×0.50 = 0.66.
-    NOT 0.8×0.70 + 0.2×0.20 = 0.60 (old non-neutralizing formula)."""
+    Neutralization: _regime_in_fusion=0.5, not the raw regime_prob."""
     engine = make_engine(kronos_cal=0.70, regime_prob=0.20, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = 0.8 * 0.70 + 0.2 * 0.50   # 0.66
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.50
     assert result.calibrated_prob == pytest.approx(expected)
     # Raw regime_prob is stored on the signal unchanged (not the neutralized value)
     assert result.regime_prob == pytest.approx(0.20)
@@ -466,30 +470,29 @@ def test_disagreement_neutralization_bullish_kronos_bearish_regime():
 
 def test_disagreement_neutralization_bearish_kronos_bullish_regime():
     """kronos_cal=0.30 (bearish), regime_prob=0.80 (bullish) → disagree.
-    Neutralization: _regime_in_fusion=0.5 → combined = 0.8×0.30 + 0.2×0.50 = 0.34.
-    NOT 0.8×0.30 + 0.2×0.80 = 0.40."""
+    Neutralization: _regime_in_fusion=0.5, not the raw regime_prob."""
     engine = make_engine(kronos_cal=0.30, regime_prob=0.80, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = 0.8 * 0.30 + 0.2 * 0.50   # 0.34
+    expected = _KRONOS_WEIGHT * 0.30 + _REGIME_WEIGHT * 0.50
     assert result.calibrated_prob == pytest.approx(expected)
 
 
 def test_disagreement_neutralization_does_not_fire_on_agreement_bullish():
-    """kronos_cal=0.70, regime_prob=0.65 — both bullish (both > 0.5) → no neutralization.
-    combined = 0.8×0.70 + 0.2×0.65 = 0.69 (regime fully preserved)."""
+    """kronos_cal=0.70, regime_prob=0.65 — both bullish (both > 0.5) → no neutralization,
+    regime_prob used directly."""
     engine = make_engine(kronos_cal=0.70, regime_prob=0.65, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = 0.8 * 0.70 + 0.2 * 0.65   # 0.69
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.65
     assert result.calibrated_prob == pytest.approx(expected)
 
 
 def test_disagreement_neutralization_does_not_fire_on_agreement_bearish():
-    """kronos_cal=0.35, regime_prob=0.20 — both bearish (both < 0.5) → no neutralization.
-    combined = 0.8×0.35 + 0.2×0.20 = 0.32 (regime fully preserved)."""
+    """kronos_cal=0.35, regime_prob=0.20 — both bearish (both < 0.5) → no neutralization,
+    regime_prob used directly."""
     engine = make_engine(kronos_cal=0.35, regime_prob=0.20, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = 0.8 * 0.35 + 0.2 * 0.20   # 0.32
+    expected = _KRONOS_WEIGHT * 0.35 + _REGIME_WEIGHT * 0.20
     assert result.calibrated_prob == pytest.approx(expected)
