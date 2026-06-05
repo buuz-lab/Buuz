@@ -85,6 +85,15 @@ class PreTradeChecklist:
         if signal.direction == 0 and trade_price_cents > _MAX_NO_TRADE_PRICE_CENTS:
             return fail(2, f"NO fill {trade_price_cents}¢ exceeds {_MAX_NO_TRADE_PRICE_CENTS}¢ max (market already bearish, 25% WR historically)")
 
+        # Gate 12 — Candle progress cap
+        # Only enter in the first 15% of the candle (~135s). After that, Kalshi has
+        # already priced in most of the move and regime v2's pre-candle features no
+        # longer have information advantage. Backtest: 216 trades after 15% progress
+        # lost -$174 combined; 119 early trades were nearly flat (+$2.64).
+        candle_progress = (signal.regime_features or {}).get("candle_progress", 0.0) or 0.0
+        if candle_progress > 0.15:
+            return fail(12, f"Candle progress {candle_progress:.2f} exceeds 0.15 — entry window closed")
+
         # NOTE: Gate 11 uses signal.kronos_calibrated which equals kronos_raw while the
         # calibrator is in passthrough mode. Once the calibrator activates and compresses
         # strong signals (e.g. k15_raw=0.80 → k15_cal≈0.55), this gate will silently
@@ -165,6 +174,18 @@ class PreTradeChecklist:
                 else:
                     return fail(2, "Kelly size rounds to 0 contracts after drift shrink")
 
+        # Gate 13 — Kelly hard cap at $8
+        # Regime v2 at 100% weight can produce extreme probabilities (0.02–0.98) that
+        # yield uncalibrated Kelly sizes. Until Phase 3c calibrator is built, cap at $8.
+        # Backtest: kelly≥$10 had 35% WR and -$3.30/trade; kelly<$5 had 52% WR and -$0.05/trade.
+        # This is a SCALE-DOWN not a reject — trade still proceeds at capped size.
+        _KELLY_HARD_CAP = 8.0
+        if kelly_dollars > _KELLY_HARD_CAP:
+            kelly_dollars = _KELLY_HARD_CAP
+            kelly_contracts = self._kelly.dollars_to_contracts(kelly_dollars, trade_price_cents)
+            if kelly_contracts == 0:
+                kelly_contracts = 1
+
         # Gate 3 — High uncertainty + thin edge
         edge_from_center = abs(signal.calibrated_prob - 0.5)
         if signal.deepseek_regime == "high_uncertainty" and edge_from_center < 0.05:
@@ -187,6 +208,15 @@ class PreTradeChecklist:
             min_required = base_min
         if signal_edge <= min_required:
             return fail(5, f"Signal edge {signal_edge:.4f} does not exceed min required {min_required:.4f} (regime={signal.deepseek_regime})")
+
+        # Gate 14 — Edge upper bound at 20¢
+        # Regime v2 at 100% weight produces extreme probabilities in the current bear
+        # market, yielding computed edges of 40–50¢. These are uncalibrated — XGBoost
+        # at 357 training rows is overconfident at the extremes. Backtest: >20¢ edge
+        # bucket had 46% WR and -$1.30/trade. Cap until Phase 3c calibrator is deployed.
+        _EDGE_CEILING = 0.20
+        if signal_edge > _EDGE_CEILING:
+            return fail(14, f"Edge {signal_edge:.4f} exceeds {_EDGE_CEILING:.2f} ceiling — uncalibrated regime v2 overconfidence")
 
         # Gate 6 — Strike proximity check (KXBTCD / strike markets only)
         # For KXBTC15M up/down markets _extract_strike uses the last completed

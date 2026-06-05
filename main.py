@@ -229,6 +229,12 @@ _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # 1 if cached k15 was computed from a candle AFTER this market opened, 0 if pre-open.
     # More precise than candle_progress for separating "k15 had current-market data" from "stale".
     ("k15_post_open",       "INTEGER DEFAULT NULL"),
+    # Regime v2 prob_up at signal time — primary signal once regime model deployed.
+    # Enables future analysis: did high-confidence regime blocks (near 0 or 1) save money?
+    ("regime_prob",         "REAL DEFAULT NULL"),
+    # Computed signal edge (win_prob - market_price) at block time.
+    # Enables Gate 14 threshold calibration once Phase 3c calibrator is deployed.
+    ("signal_edge",         "REAL DEFAULT NULL"),
 ]
 
 
@@ -839,14 +845,21 @@ class KronosV2:
                 _k15_raw = cached.get("prob_15min")
                 _k15_cal = self._calibrator.transform(_k15_raw, regime=signal.deepseek_regime) if _k15_raw is not None else None
                 _candle_prog = (signal.regime_features or {}).get("candle_progress")
+                _signal_edge = None
+                try:
+                    _wp = signal.calibrated_prob if signal.direction == 1 else (1.0 - signal.calibrated_prob)
+                    _mp = would_be_fill / 100.0
+                    _signal_edge = round(_wp - _mp, 6)
+                except Exception:
+                    pass
                 self._db.execute(
                     """INSERT OR IGNORE INTO gate_rejections
                        (rejection_id, timestamp, ticker, timeframe, direction,
                         failed_gate, failed_reason, signal_prob, deepseek_regime,
                         kalshi_mid_cents, features, kalshi_mid_at_block, would_be_fill_cents,
                         kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress,
-                        k15_post_open)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        k15_post_open, regime_prob, signal_edge)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(uuid.uuid4()),
                         time.time(),
@@ -866,6 +879,8 @@ class KronosV2:
                         _k15_cal,
                         _candle_prog,
                         _k15_post_open,
+                        signal.regime_prob if hasattr(signal, 'regime_prob') else None,
+                        _signal_edge,
                     ),
                 )
                 self._db.commit()

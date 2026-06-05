@@ -41,12 +41,12 @@ from btc_kalshi_system.models.deepseek_parser import DeepSeekContextParser
 from btc_kalshi_system.models.kronos_engine import KronosEngine
 from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
-_KRONOS_WEIGHT = 0.8
+_KRONOS_WEIGHT = 0.0   # regime v2 deployment: Kronos already embedded as features
 # Reduced from 0.4 → 0.2 (session 23): regime model v1 has circular label
 # (direction==outcome; kalshi_implied_prob is #1 feature at 19%). On bullish days,
 # model fires bearish and contaminates fusion. Restore to 0.4 after regime v2 retrains
 # with BTC-direction label. See handoff.md — Phase 1b.
-_REGIME_WEIGHT = 0.2
+_REGIME_WEIGHT = 1.0   # regime v2 deployment: full weight
 _UNCERTAINTY_SHRINK = 0.5   # applied when DeepSeek signals high_uncertainty
 _RANGING_SHRINK = 0.7       # applied when DeepSeek signals ranging (noisy, not untradeable)
 _BOOTSTRAP_SHRINK = 0.8     # applied when RegimeModel is untrained (bootstrap phase)
