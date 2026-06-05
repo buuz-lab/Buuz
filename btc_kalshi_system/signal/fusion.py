@@ -288,10 +288,10 @@ class SignalFusionEngine:
             cvd_velocity = 0.0
             cvd_acceleration = 0.0
             stale = True
-        elif time.time() - entries[-1][1] > 360:
-            # Most recent entry is > 1.5× the 240s refresh interval — feed has missed
-            # at least one full cycle. Count check passes but timestamps are stale,
-            # so velocity math would use wrong time windows. Mark stale.
+        elif time.time() - entries[-1][1] > 450:
+            # Most recent entry is > 1.875× the 240s refresh interval — feed has missed
+            # at least one full cycle plus slack. Count check passes but timestamps are
+            # stale, so velocity math would use wrong time windows. Mark stale.
             cvd_velocity = 0.0
             cvd_acceleration = 0.0
             stale = True
@@ -352,7 +352,8 @@ class SignalFusionEngine:
         mid_cents = self._market_context.get("kalshi_mid_cents")
         if mid_cents is None:
             kalshi_implied_prob = 0.5
-            stale = True
+            # kalshi_implied_prob is excluded from _FEATURE_ORDER (circularity fix,
+            # 2026-06-01) so None at candle roll time is harmless — do not mark stale.
         else:
             kalshi_implied_prob = float(mid_cents) / 100.0
 
