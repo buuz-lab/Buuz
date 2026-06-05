@@ -4,11 +4,65 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 32 complete. Four training data leakage sources found and fixed in regime v2 feature engineering. Honest Brier is 0.178 (73% accuracy) vs inflated 0.106 pre-fix. Model now limited by data volume, not by cheating. **Next:** wait for 672-row threshold (~June 8), retrain on clean features, run `kalshi_open_mid` Brier comparison.
+**Current focus:** Session 32 complete (extended). Regime v2 deployed at 100% weight with Gates 12/13/14. Kalshi edge test showing 22% Brier advantage on 92 rows. 357/672 qualifying rows, ~3.2 days to full train. **Next:** train 672-row model (~June 8), save to `models/regime.pkl`, restart → regime v2 takes over automatically.
 
 ---
 
 ## Current Progress
+
+**As of 2026-06-05 session 33: Regime v2 deployed at 100% weight. Gates 12/13/14 live. Kalshi edge test: 22% Brier advantage on 92 rows.**
+
+**What was deployed:**
+
+**Regime v2 at 100% weight** (`fusion.py`)
+- `_KRONOS_WEIGHT = 0.0`, `_REGIME_WEIGHT = 1.0`
+- Kronos is already embedded in regime v2 as features (k5=6.4%, k15=3.8%), so the 20% raw Kronos contribution was re-adding an inverted signal the model had already learned to discount. Removed.
+- In bootstrap (no trained model file): still falls back to Kronos-only. Switch is automatic on `models/regime.pkl` existing.
+
+**Gate 12 — Candle progress cap** (`pretrade_checklist.py`, gate=12)
+- Reject when `candle_progress > 0.15` (~135s into the candle)
+- Backtest: 216 trades after 15% progress lost **-$174**; 119 early trades were +$2.64
+- Regime v2 features are pre-candle (computed at T=0); Kalshi pricing converges within minutes. Early entry is where edge exists.
+
+**Gate 13 — Kelly hard cap at $8** (`pretrade_checklist.py`, applied post-Kelly compute)
+- Scale-down (not reject) when `kelly_dollars > $8`
+- Regime v2 at 100% produces extreme probabilities (0.02–0.98) in the current bear market → uncalibrated Kelly sizes. Backtest: kelly≥$10 = 35% WR / -$3.30/trade.
+- Remove after Phase 3c calibrator is deployed.
+
+**Gate 14 — Edge upper bound at 20¢** (`pretrade_checklist.py`, gate=14)
+- Reject when `signal_edge > 0.20`
+- Regime v2 extreme probs produce 40-50¢ edges that aren't real. Backtest: >20¢ bucket = 46% WR / -$1.30/trade.
+- Remove after Phase 3c calibrator is deployed.
+
+**gate_rejections tracking enhanced** (`main.py`)
+- Added `regime_prob REAL` — regime v2's prob_up at block time
+- Added `signal_edge REAL` — computed edge at block time
+- Enables future analysis: did Gate 14 blocks correctly catch overconfident regime v2 calls?
+
+**Kalshi edge test (92 rows as of session end):**
+- Regime v2 Brier: **0.174**  Accuracy: **75%**
+- Kalshi open Brier: **0.223**  Accuracy: **61%**
+- Advantage: +0.049 Brier / **22% improvement**
+- Contested opens (30–70¢): regime v2 74.5% accurate vs Kalshi 52.7% — near coin flip
+
+**Session 32 (extended) — staleness and leakage fixes (carried over from prior entry):**
+- See "As of 2026-06-04 session 32 (continued)" section below for full detail.
+
+**Current state (session 33 end):**
+- 357/672 qualifying rows | 315 more to 672 | ~3.2 days (~June 8)
+- Regime v2 at 100% weight live in bootstrap mode (waits for `models/regime.pkl`)
+- Gates 12/13/14 active immediately (not regime-model-dependent)
+- Kalshi edge test data accumulating (~98 rows/day, ~100-row milestone tomorrow)
+
+**Next Steps:**
+1. **June 8**: `python3 scripts/train_regime.py --db trades.db --out models/regime.pkl` — full train (no `--force`)
+2. Restart service → regime v2 auto-loads, takes 100% weight
+3. Run Kalshi edge test: `Brier(prob_up, btc_direction)` vs `Brier(kalshi_open_mid, btc_direction)` on holdout
+4. Watch Gate 2 shadow disagreement rate for ~50 trades before enforcing
+5. **Drawdown trigger**: if Gates 12/13/14 + regime v2 cause >$30 additional loss vs baseline over 3 days → pause regime model, retrain with `--max-rows 200`
+6. Remove Gates 13/14 after Phase 3c calibrator (200+ live regime trades)
+
+---
 
 **As of 2026-06-04 session 32 (continued): Staleness reliability fixes — three root causes identified and fixed. Training row drop rate significantly reduced.**
 
