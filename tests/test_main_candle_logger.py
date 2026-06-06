@@ -52,6 +52,7 @@ def _make_system() -> "main.KronosV2":
     system._fusion = MagicMock()
     system._candle_ticker_map = {}
     system._mid_candle_snaps = {}
+    system._early_candle_snaps = {}
 
     db = sqlite3.connect(":memory:")
     db.execute(main._CREATE_TRADES_TABLE)

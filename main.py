@@ -262,6 +262,8 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("kalshi_mid_candle_mid",    "REAL DEFAULT NULL"),  # mid-price at ~50% candle progress (0-1)
     ("kalshi_mid_candle_spread", "REAL DEFAULT NULL"),  # spread at ~50% candle progress (0-1)
     ("kalshi_mid_candle_progress", "REAL DEFAULT NULL"),  # actual progress when snapshot taken
+    ("kalshi_early_mid",         "REAL DEFAULT NULL"),  # mid-price at ~30s (3-7% progress) — T+30s edge test
+    ("kalshi_early_progress",    "REAL DEFAULT NULL"),  # actual progress when early snapshot taken
     ("volume_ratio_1h",          "REAL DEFAULT NULL"),  # hourly volume vs 30-day avg (regime feature)
 ]
 
@@ -387,6 +389,7 @@ class KronosV2:
         # Mid-candle Kalshi snapshots keyed by candle_ts ISO string (captured once per candle
         # when progress crosses 40-60%). Written by _candle_logger_loop, read at close time.
         self._mid_candle_snaps: dict[str, dict] = {}
+        self._early_candle_snaps: dict[str, dict] = {}
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -543,34 +546,44 @@ class KronosV2:
                 if df15 is None or len(df15) < 3:
                     continue
 
-                # Mid-candle snapshot: capture Kalshi mid once per candle at ~40-60% progress.
+                # Candle progress snapshots: early (~30s, 3-7%) and mid-candle (~50%, 40-60%).
                 try:
                     _in_progress_ts = df15.index[-1]
                     _in_progress_key = _in_progress_ts.to_pydatetime().astimezone(timezone.utc).replace(
                         second=0, microsecond=0
                     ).isoformat()
-                    if _in_progress_key not in self._mid_candle_snaps:
-                        _now_utc = datetime.now(timezone.utc)
-                        _elapsed = (_now_utc - _in_progress_ts.to_pydatetime().astimezone(timezone.utc)).total_seconds()
-                        _progress = _elapsed / 900.0
-                        if 0.40 <= _progress <= 0.60:
-                            _mc_ticker = self._candle_ticker_map.get(_in_progress_key)
-                            if _mc_ticker:
-                                _mc_ob = self._orderbook_feed.get_orderbook(_mc_ticker)
-                                if _mc_ob:
-                                    _bid, _ask, _ = self._parse_orderbook(_mc_ob)
-                                    if _ask > 0:
-                                        self._mid_candle_snaps[_in_progress_key] = {
-                                            "mid_prob": (_bid + _ask) / 200.0,
-                                            "spread":   (_ask - _bid) / 100.0,
-                                            "progress": round(_progress, 3),
-                                        }
-                                        logger.debug(
-                                            f"CandleLogger: mid-candle snapshot {_mc_ticker} "
-                                            f"mid={(_bid+_ask)/200:.3f} progress={_progress:.2f}"
-                                        )
+                    _now_utc = datetime.now(timezone.utc)
+                    _elapsed = (_now_utc - _in_progress_ts.to_pydatetime().astimezone(timezone.utc)).total_seconds()
+                    _progress = _elapsed / 900.0
+                    _snap_ticker = self._candle_ticker_map.get(_in_progress_key)
+                    _snap_ob = self._orderbook_feed.get_orderbook(_snap_ticker) if _snap_ticker else None
+
+                    # Early snapshot at T+30s (3-7% progress) — exact Kalshi price at entry window
+                    if _in_progress_key not in self._early_candle_snaps and 0.03 <= _progress <= 0.07:
+                        if _snap_ob:
+                            _bid, _ask, _ = self._parse_orderbook(_snap_ob)
+                            if _ask > 0:
+                                self._early_candle_snaps[_in_progress_key] = {
+                                    "mid_prob": (_bid + _ask) / 200.0,
+                                    "progress": round(_progress, 3),
+                                }
+
+                    # Mid-candle snapshot at ~50% progress (~7.5 min in)
+                    if _in_progress_key not in self._mid_candle_snaps and 0.40 <= _progress <= 0.60:
+                        if _snap_ob:
+                            _bid, _ask, _ = self._parse_orderbook(_snap_ob)
+                            if _ask > 0:
+                                self._mid_candle_snaps[_in_progress_key] = {
+                                    "mid_prob": (_bid + _ask) / 200.0,
+                                    "spread":   (_ask - _bid) / 100.0,
+                                    "progress": round(_progress, 3),
+                                }
+                                logger.debug(
+                                    f"CandleLogger: mid-candle snapshot {_snap_ticker} "
+                                    f"mid={(_bid+_ask)/200:.3f} progress={_progress:.2f}"
+                                )
                 except Exception as exc:
-                    logger.debug(f"CandleLogger: mid-candle snapshot failed — {exc}")
+                    logger.debug(f"CandleLogger: candle snapshot failed — {exc}")
 
                 # Second-to-last row is the most recently closed candle;
                 # the last row is the in-progress candle — skip it.
@@ -599,13 +612,18 @@ class KronosV2:
                 kalshi_mid_candle_spread   = _mid_snap["spread"]    if _mid_snap else None
                 kalshi_mid_candle_progress = _mid_snap["progress"]  if _mid_snap else None
 
+                _early_snap = self._early_candle_snaps.pop(_candle_key, None)
+                kalshi_early_mid      = _early_snap["mid_prob"]  if _early_snap else None
+                kalshi_early_progress = _early_snap["progress"]  if _early_snap else None
+
                 cols = list(_FEATURE_ORDER)
                 vals = [features.get(c) for c in cols]
-                placeholders = ", ".join(["?"] * (11 + len(cols)))
+                placeholders = ", ".join(["?"] * (13 + len(cols)))
                 col_names = (
                     "candle_ts, btc_direction, logged_at, features_stale, deribit_stale, "
                     "kalshi_open_mid, kalshi_open_spread, kalshi_open_depth, "
                     "kalshi_mid_candle_mid, kalshi_mid_candle_spread, kalshi_mid_candle_progress, "
+                    "kalshi_early_mid, kalshi_early_progress, "
                     + ", ".join(cols)
                 )
                 self._db.execute(
@@ -622,6 +640,8 @@ class KronosV2:
                         kalshi_mid_candle_mid,
                         kalshi_mid_candle_spread,
                         kalshi_mid_candle_progress,
+                        kalshi_early_mid,
+                        kalshi_early_progress,
                         *vals,
                     ],
                 )
