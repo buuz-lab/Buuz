@@ -105,7 +105,7 @@ class TestCandleLoggerLoop:
         system = _make_system()
         df15 = _make_df15(n=4)
         system._store.get_ohlcv.return_value = df15
-        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False)
+        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False, None)
 
         async def mock_sleep(_):
             system._running = False
@@ -121,7 +121,7 @@ class TestCandleLoggerLoop:
         system = _make_system()
         df15 = _make_df15(n=4, close_above_open=True)
         system._store.get_ohlcv.return_value = df15
-        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False)
+        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False, None)
 
         async def mock_sleep(_):
             system._running = False
@@ -140,7 +140,7 @@ class TestCandleLoggerLoop:
         system = _make_system()
         df15 = _make_df15(n=4, close_above_open=False)
         system._store.get_ohlcv.return_value = df15
-        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False)
+        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False, None)
 
         async def mock_sleep(_):
             system._running = False
@@ -159,7 +159,7 @@ class TestCandleLoggerLoop:
         system = _make_system()
         df15 = _make_df15(n=4)
         system._store.get_ohlcv.return_value = df15
-        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False)
+        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False, None)
 
         sleep_calls = [0]
 
@@ -180,7 +180,7 @@ class TestCandleLoggerLoop:
         """Loop continues after get_ohlcv() raises; next iteration writes row."""
         system = _make_system()
         df15 = _make_df15(n=4)
-        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False)
+        system._fusion.get_features_snapshot.return_value = (_make_features(), False, False, None)
 
         call_count = [0]
 
@@ -228,7 +228,7 @@ class TestKronosColumnsInCandleLogger:
         features = _make_features()
         features["kronos_raw_15min"] = 0.72
         features["kronos_raw_5min"] = 0.68
-        system._fusion.get_features_snapshot.return_value = (features, False, False)
+        system._fusion.get_features_snapshot.return_value = (features, False, False, None)
 
         async def mock_sleep(_):
             system._running = False
@@ -251,7 +251,7 @@ class TestKronosColumnsInCandleLogger:
         features = _make_features()
         features["kronos_raw_15min"] = None
         features["kronos_raw_5min"] = None
-        system._fusion.get_features_snapshot.return_value = (features, False, False)
+        system._fusion.get_features_snapshot.return_value = (features, False, False, None)
 
         async def mock_sleep(_):
             system._running = False

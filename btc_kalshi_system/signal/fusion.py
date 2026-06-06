@@ -240,14 +240,20 @@ class SignalFusionEngine:
             okx_stale=okx_stale,
         )
 
-    def get_features_snapshot(self) -> tuple[dict, bool, bool]:
+    def get_features_snapshot(self) -> tuple[dict, bool, bool, float | None]:
         """
-        Returns (features_dict, features_stale, deribit_stale).
-        Lightweight — reads Redis + OHLCV only; no MC, no calibration, no market context mutation.
-        Safe to call from a background loop.
+        Returns (features_dict, features_stale, deribit_stale, regime_prob).
+        regime_prob is the model's prob_up on the current features, or None when
+        not trained or paused. Safe to call from a background loop.
         """
         features, features_stale, deribit_stale, _okx_stale = self._regime_features()
-        return features, features_stale, deribit_stale
+        regime_prob: float | None = None
+        if not _REGIME_PAUSE_FLAG.exists():
+            try:
+                regime_prob = self._regime.get_regime(features)["prob_up"]
+            except NotTrainedError:
+                pass
+        return features, features_stale, deribit_stale, regime_prob
 
     def _regime_features(self) -> tuple[dict, bool, bool, bool]:
         """

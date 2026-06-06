@@ -179,7 +179,7 @@ def section_kalshi_edge(conn: sqlite3.Connection) -> list[str]:
     issues: list[str] = []
     print(f"\n── Kalshi Edge Trend {'─'*50}")
 
-    def _brier_acc(period_cutoff: str | None = None) -> tuple[int, float | None, float | None, float | None, float | None]:
+    def _brier_acc(period_cutoff: str | None = None) -> tuple:
         where = "WHERE features_stale=0 AND atm_iv IS NOT NULL AND kalshi_open_mid IS NOT NULL AND kronos_raw_15min IS NOT NULL"
         if period_cutoff:
             where += f" AND candle_ts >= '{period_cutoff}'"
@@ -207,6 +207,30 @@ def section_kalshi_edge(conn: sqlite3.Connection) -> list[str]:
 
     all_adv = _print_row("all-time", all_time)
     rec_adv  = _print_row("last 7d", recent_7d)
+
+    # Live regime v2 Brier — only available after model deploys (regime_prob non-NULL)
+    regime_rows = conn.execute(
+        "SELECT COUNT(*) FROM candle_features "
+        "WHERE features_stale=0 AND atm_iv IS NOT NULL AND regime_prob IS NOT NULL"
+    ).fetchone()[0]
+    if regime_rows >= 20:
+        rv2 = conn.execute("""
+            SELECT COUNT(*),
+              AVG((regime_prob - btc_direction)*(regime_prob - btc_direction)),
+              AVG((kalshi_open_mid - btc_direction)*(kalshi_open_mid - btc_direction)),
+              AVG(CASE WHEN regime_prob > 0.5 AND btc_direction=1 OR regime_prob < 0.5 AND btc_direction=0 THEN 1.0 ELSE 0.0 END)
+            FROM candle_features
+            WHERE features_stale=0 AND atm_iv IS NOT NULL
+              AND regime_prob IS NOT NULL AND kalshi_open_mid IS NOT NULL
+        """).fetchone()
+        n, rb, kb, ra = rv2
+        if rb is not None and n >= 20:
+            adv = (kb - rb) / kb * 100 if kb and kb > 0 else 0
+            print(f"  regime_v2     n={n:<4d}  regime={rb:.4f} ({ra*100:.1f}%)  kalshi={kb:.4f}  advantage={adv:+.1f}%")
+            if adv < 0:
+                issues.append(f"WARN  Regime v2 Brier WORSE than Kalshi open ({rb:.4f} vs {kb:.4f})")
+    elif regime_rows > 0:
+        print(f"  regime_v2     n={regime_rows:<4d}  (accumulating — need 20 for comparison)")
 
     if all_adv is not None and rec_adv is not None:
         delta = rec_adv - all_adv

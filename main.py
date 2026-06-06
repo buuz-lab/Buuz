@@ -265,6 +265,7 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("kalshi_early_mid",         "REAL DEFAULT NULL"),  # mid-price at ~30s (3-7% progress) — T+30s edge test
     ("kalshi_early_progress",    "REAL DEFAULT NULL"),  # actual progress when early snapshot taken
     ("volume_ratio_1h",          "REAL DEFAULT NULL"),  # hourly volume vs 30-day avg (regime feature)
+    ("regime_prob",              "REAL DEFAULT NULL"),  # regime v2 prob_up at candle close (NULL until model deployed)
 ]
 
 
@@ -592,7 +593,7 @@ class KronosV2:
                     continue
                 closed_candle = df15.iloc[-2]
                 btc_direction = 1 if closed_candle["close"] > closed_candle["open"] else 0
-                features, features_stale, deribit_stale = self._fusion.get_features_snapshot()
+                features, features_stale, deribit_stale, regime_prob = self._fusion.get_features_snapshot()
 
                 # Look up Kalshi opening snapshot for the closed candle.
                 _candle_key = closed_ts.to_pydatetime().astimezone(timezone.utc).replace(
@@ -618,12 +619,12 @@ class KronosV2:
 
                 cols = list(_FEATURE_ORDER)
                 vals = [features.get(c) for c in cols]
-                placeholders = ", ".join(["?"] * (13 + len(cols)))
+                placeholders = ", ".join(["?"] * (14 + len(cols)))
                 col_names = (
                     "candle_ts, btc_direction, logged_at, features_stale, deribit_stale, "
                     "kalshi_open_mid, kalshi_open_spread, kalshi_open_depth, "
                     "kalshi_mid_candle_mid, kalshi_mid_candle_spread, kalshi_mid_candle_progress, "
-                    "kalshi_early_mid, kalshi_early_progress, "
+                    "kalshi_early_mid, kalshi_early_progress, regime_prob, "
                     + ", ".join(cols)
                 )
                 self._db.execute(
@@ -642,6 +643,7 @@ class KronosV2:
                         kalshi_mid_candle_progress,
                         kalshi_early_mid,
                         kalshi_early_progress,
+                        regime_prob,
                         *vals,
                     ],
                 )
