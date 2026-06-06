@@ -13,6 +13,7 @@ import pytest
 
 from scripts.auto_retrain_regime import (
     get_qualifying_count,
+    get_recent_direction_mean,
     load_marker,
     save_marker,
     brier_score,
@@ -25,6 +26,9 @@ from scripts.auto_retrain_regime import (
     _MIN_ROWS,
     _WINDOW,
     _HOLDOUT_SIZE,
+    _REGIME_SHIFT_WINDOW,
+    _REGIME_SHIFT_DELTA,
+    _REGIME_PAUSE_FLAG,
 )
 
 
@@ -279,3 +283,116 @@ def test_constants_are_sane():
     assert _WINDOW >= _MIN_ROWS
     assert _HOLDOUT_SIZE > 0
     assert _HOLDOUT_SIZE < _MIN_ROWS
+
+
+# ── get_recent_direction_mean ─────────────────────────────────────────────────
+
+def test_get_recent_direction_mean_empty_db():
+    db = _make_db([])
+    assert get_recent_direction_mean(db) is None
+
+
+def test_get_recent_direction_mean_all_up():
+    rows = [_qualifying_row(btc_direction=1) for _ in range(10)]
+    db = _make_db(rows)
+    assert get_recent_direction_mean(db) == pytest.approx(1.0)
+
+
+def test_get_recent_direction_mean_mixed():
+    rows = ([_qualifying_row(btc_direction=1) for _ in range(3)] +
+            [_qualifying_row(btc_direction=0) for _ in range(7)])
+    db = _make_db(rows)
+    result = get_recent_direction_mean(db)
+    assert result is not None
+    assert 0.0 < result < 1.0
+
+
+def test_get_recent_direction_mean_respects_window():
+    # 20 rows: first 10 all DOWN (0), last 10 all UP (1)
+    rows = ([_qualifying_row(btc_direction=0, candle_ts=float(i)) for i in range(10)] +
+            [_qualifying_row(btc_direction=1, candle_ts=float(10 + i)) for i in range(10)])
+    db = _make_db(rows)
+    # window=5 takes the 5 most recent = all UP → mean=1.0
+    result = get_recent_direction_mean(db, window=5)
+    assert result == pytest.approx(1.0)
+
+
+# ── regime shift trigger ──────────────────────────────────────────────────────
+
+def _recent_marker(direction_mean_at_train: float | None = 0.42) -> dict:
+    return {
+        "trained_at_rows": 700,
+        "trained_at_timestamp": datetime.now(timezone.utc).isoformat(),
+        "direction_mean_at_train": direction_mean_at_train,
+    }
+
+
+def test_regime_shift_fires_when_bull_market_appears():
+    # Trained in bear (mean=0.40), now in bull (mean=0.60) — shift=0.20 ≥ 0.15
+    marker = _recent_marker(direction_mean_at_train=0.40)
+    result = should_retrain(count=700, marker=marker, direction_mean=0.60)
+    assert result is not None and "REGIME-SHIFT" in result
+
+
+def test_regime_shift_fires_when_bear_market_appears():
+    # Trained in bull (mean=0.65), now in bear (mean=0.40) — shift=-0.25 ≥ 0.15
+    marker = _recent_marker(direction_mean_at_train=0.65)
+    result = should_retrain(count=700, marker=marker, direction_mean=0.40)
+    assert result is not None and "REGIME-SHIFT" in result
+
+
+def test_regime_shift_does_not_fire_on_small_shift():
+    # Shift=0.08 < 0.15 threshold — no trigger
+    marker = _recent_marker(direction_mean_at_train=0.45)
+    result = should_retrain(count=700, marker=marker, direction_mean=0.53)
+    assert result is None or "REGIME-SHIFT" not in result
+
+
+def test_regime_shift_does_not_fire_without_direction_mean_in_marker():
+    # Marker has no direction_mean_at_train — no shift trigger
+    marker = {"trained_at_rows": 700,
+              "trained_at_timestamp": datetime.now(timezone.utc).isoformat()}
+    result = should_retrain(count=700, marker=marker, direction_mean=0.70)
+    assert result is None or "REGIME-SHIFT" not in result
+
+
+def test_regime_shift_does_not_fire_without_direction_mean_arg():
+    # No direction_mean passed — no shift trigger
+    marker = _recent_marker(direction_mean_at_train=0.40)
+    result = should_retrain(count=700, marker=marker, direction_mean=None)
+    assert result is None or "REGIME-SHIFT" not in result
+
+
+def test_regime_shift_takes_priority_over_row_trigger():
+    # Both row and shift fire — shift is returned (higher priority)
+    marker = _recent_marker(direction_mean_at_train=0.40)
+    count = 700 + _ROW_TRIGGER_DELTA + 1  # row trigger also fires
+    result = should_retrain(count=count, marker=marker, direction_mean=0.60)
+    assert result is not None and "REGIME-SHIFT" in result
+
+
+# ── save_marker stores direction_mean ─────────────────────────────────────────
+
+def test_save_marker_stores_direction_mean(tmp_path):
+    marker_path = str(tmp_path / "regime_last_trained.json")
+    with patch("scripts.auto_retrain_regime._MARKER_PATH", marker_path):
+        save_marker(trained_at_rows=750, total_rows=750, holdout_brier=0.20,
+                    direction_mean=0.43)
+    with open(marker_path) as f:
+        data = json.load(f)
+    assert data["direction_mean_at_train"] == pytest.approx(0.43)
+
+
+def test_save_marker_direction_mean_none_when_omitted(tmp_path):
+    marker_path = str(tmp_path / "regime_last_trained.json")
+    with patch("scripts.auto_retrain_regime._MARKER_PATH", marker_path):
+        save_marker(trained_at_rows=750, total_rows=750, holdout_brier=0.20)
+    with open(marker_path) as f:
+        data = json.load(f)
+    assert data["direction_mean_at_train"] is None
+
+
+# ── pause flag ────────────────────────────────────────────────────────────────
+
+def test_pause_flag_path_is_in_models_dir():
+    assert "models" in str(_REGIME_PAUSE_FLAG)

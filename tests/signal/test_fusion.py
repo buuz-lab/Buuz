@@ -8,7 +8,7 @@ no torch inference.
 
 import math
 from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -18,6 +18,7 @@ from btc_kalshi_system.signal.fusion import (
     _BOOTSTRAP_SHRINK,
     _KRONOS_WEIGHT,
     _REGIME_WEIGHT,
+    _REGIME_PAUSE_FLAG,
     SignalFusionEngine,
     TradingSignal,
 )
@@ -495,4 +496,30 @@ def test_disagreement_neutralization_does_not_fire_on_agreement_bearish():
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
     expected = _KRONOS_WEIGHT * 0.35 + _REGIME_WEIGHT * 0.20
+    assert result.calibrated_prob == pytest.approx(expected)
+
+
+# ── Regime pause flag ─────────────────────────────────────────────────────────
+
+def test_pause_flag_reverts_to_bootstrap(tmp_path):
+    """When regime_paused.flag exists, engine falls back to Kronos-only bootstrap signal."""
+    pause_flag = tmp_path / "regime_paused.flag"
+    pause_flag.touch()
+    engine = make_engine(kronos_cal=0.70, regime_prob=0.80, regime_direction=1)
+    with patch("btc_kalshi_system.signal.fusion._REGIME_PAUSE_FLAG", pause_flag):
+        result = engine.get_signal("5min", 76000.0)
+    assert result is not None
+    # Falls back to bootstrap: combined = 0.5 + (0.70 - 0.5) * _BOOTSTRAP_SHRINK
+    expected = 0.5 + (0.70 - 0.5) * _BOOTSTRAP_SHRINK
+    assert result.calibrated_prob == pytest.approx(expected)
+
+
+def test_pause_flag_absent_uses_regime_normally(tmp_path):
+    """When no pause flag exists, regime model is used as normal."""
+    pause_flag = tmp_path / "regime_paused.flag"  # does NOT exist
+    engine = make_engine(kronos_cal=0.70, regime_prob=0.80, regime_direction=1)
+    with patch("btc_kalshi_system.signal.fusion._REGIME_PAUSE_FLAG", pause_flag):
+        result = engine.get_signal("5min", 76000.0)
+    assert result is not None
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.80
     assert result.calibrated_prob == pytest.approx(expected)

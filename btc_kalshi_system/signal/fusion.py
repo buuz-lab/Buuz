@@ -28,6 +28,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -40,6 +41,8 @@ from btc_kalshi_system.models.calibrator import Calibrator
 from btc_kalshi_system.models.deepseek_parser import DeepSeekContextParser
 from btc_kalshi_system.models.kronos_engine import KronosEngine
 from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
+
+_REGIME_PAUSE_FLAG = Path("models/regime_paused.flag")
 
 _KRONOS_WEIGHT = 0.0   # regime v2 deployment: Kronos already embedded as features
 # Reduced from 0.4 → 0.2 (session 23): regime model v1 has circular label
@@ -165,6 +168,8 @@ class SignalFusionEngine:
         regime_features, features_stale, deribit_stale, okx_stale = self._regime_features()
 
         try:
+            if _REGIME_PAUSE_FLAG.exists():
+                raise NotTrainedError("regime model paused — drawdown protection active")
             regime_result = self._regime.get_regime(regime_features)
             regime_prob = regime_result["prob_up"]
             regime_direction = regime_result["direction"]

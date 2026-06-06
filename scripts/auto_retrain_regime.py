@@ -2,8 +2,9 @@
 # 0 2 * * 1 cd "/Users/ezrakornberg/Kronos V2" && source .env && python3 scripts/auto_retrain_regime.py >> logs/auto_retrain_regime.log 2>&1
 #
 # Retraining triggers (in priority order):
-#   1. Row-based: +200 new candle_features rows since last train (~2 days at 96/day)
-#   2. Time-based: 14 days elapsed since last train
+#   1. Regime-shift: rolling 48-candle btc_direction mean shifts ≥15% from train-time mean
+#   2. Row-based: +200 new candle_features rows since last train (~2 days at 96/day)
+#   3. Time-based: 14 days elapsed since last train
 #
 # Rolling window: last 2000 qualifying rows (~21 days). Time-ordered split: last
 # _HOLDOUT_SIZE rows held out for evaluation against the deployed model.
@@ -46,6 +47,14 @@ _MIN_ROWS = 672            # refuse to retrain below this (7 days × 96 candles/
 _WINDOW = 2000             # rolling window: last 2000 candles (~21 days)
 _HOLDOUT_SIZE = 100        # held-out rows for candidate vs deployed comparison
 
+_REGIME_SHIFT_WINDOW = 48  # candles to average for regime shift detection (~12 hours)
+_REGIME_SHIFT_DELTA  = 0.15  # mean btc_direction must swing ≥15% from train-time mean
+
+# When the drawdown trigger fires externally, this flag file is written to pause the
+# regime model without deleting it. Fusion reverts to bootstrap mode while paused.
+# Cleared automatically when a successful retrain deploys a new model.
+_REGIME_PAUSE_FLAG = Path("models/regime_paused.flag")
+
 _FEATURE_COLS = list(_FEATURE_ORDER)
 
 _CANDLE_QUERY = """
@@ -78,6 +87,23 @@ def get_qualifying_count(db_path: str) -> int:
     finally:
         conn.close()
     return int(count)
+
+
+def get_recent_direction_mean(db_path: str, window: int = _REGIME_SHIFT_WINDOW) -> float | None:
+    """Return mean btc_direction over the last `window` qualifying candles, or None."""
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT btc_direction FROM candle_features "
+            "WHERE features_stale=0 AND btc_direction IS NOT NULL AND atm_iv IS NOT NULL "
+            "ORDER BY candle_ts DESC LIMIT ?",
+            (window,)
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return None
+    return float(sum(r[0] for r in rows) / len(rows))
 
 
 def load_dataset(db_path: str, max_rows: int | None = None) -> list[tuple]:
@@ -121,7 +147,8 @@ def load_marker() -> dict | None:
         return None
 
 
-def save_marker(trained_at_rows: int, total_rows: int, holdout_brier: float) -> None:
+def save_marker(trained_at_rows: int, total_rows: int, holdout_brier: float,
+                direction_mean: float | None = None) -> None:
     """Write _MARKER_PATH with current training state."""
     p = Path(_MARKER_PATH)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -130,6 +157,7 @@ def save_marker(trained_at_rows: int, total_rows: int, holdout_brier: float) -> 
         "trained_at_timestamp": datetime.now(timezone.utc).isoformat(),
         "total_rows_at_train": total_rows,
         "holdout_brier": holdout_brier,
+        "direction_mean_at_train": direction_mean,
     }
     with p.open("w") as f:
         json.dump(data, f, indent=4)
@@ -149,12 +177,22 @@ def evaluate_deployed_model(
         return None
 
 
-def should_retrain(count: int, marker: dict | None, force: bool = False) -> str | None:
+def should_retrain(count: int, marker: dict | None, force: bool = False,
+                   direction_mean: float | None = None) -> str | None:
     """
-    Return trigger name ('FORCE', 'ROW-BASED', 'TIME-BASED') or None if no trigger fires.
+    Return trigger name or None if no trigger fires. Triggers in priority order:
+      'FORCE', 'REGIME-SHIFT', 'ROW-BASED', 'TIME-BASED'
     """
     if force:
         return "FORCE"
+
+    # Regime-shift trigger: market flipped direction since last train
+    if marker and direction_mean is not None:
+        train_mean = marker.get("direction_mean_at_train")
+        if train_mean is not None:
+            shift = direction_mean - train_mean
+            if abs(shift) >= _REGIME_SHIFT_DELTA:
+                return f"REGIME-SHIFT ({train_mean:.2f}→{direction_mean:.2f})"
 
     last_trained_rows = marker["trained_at_rows"] if marker else 0
     if count >= last_trained_rows + _ROW_TRIGGER_DELTA:
@@ -202,14 +240,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # 1. Get current qualifying row count
+    # 1. Get current qualifying row count and recent direction mean
     count = get_qualifying_count(args.db)
+    direction_mean = get_recent_direction_mean(args.db)
 
     # 2. Load marker
     marker = load_marker()
 
     # 3. Evaluate triggers
-    trigger = should_retrain(count=count, marker=marker, force=args.force)
+    trigger = should_retrain(count=count, marker=marker, force=args.force,
+                             direction_mean=direction_mean)
 
     # 4. Print status
     last_trained_rows = marker["trained_at_rows"] if marker else 0
@@ -304,9 +344,17 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     candidate.save(str(out_path))
-    save_marker(trained_at_rows=count, total_rows=n, holdout_brier=candidate_brier)
+    save_marker(trained_at_rows=count, total_rows=n, holdout_brier=candidate_brier,
+                direction_mean=direction_mean)
     print(f"\nSaved regime model → {out_path}")
-    print(f"Marker updated: trained_at_rows={count}  holdout_brier={candidate_brier:.4f}")
+    print(f"Marker updated: trained_at_rows={count}  holdout_brier={candidate_brier:.4f}"
+          f"  direction_mean={direction_mean:.3f}" if direction_mean is not None else "")
+
+    # Clear pause flag so fusion re-enables the regime model on next restart
+    if _REGIME_PAUSE_FLAG.exists():
+        _REGIME_PAUSE_FLAG.unlink()
+        print("Cleared regime pause flag — regime model active again.")
+
     print("Restart KronosV2 to pick up the new model.")
 
 
