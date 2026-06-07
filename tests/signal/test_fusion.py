@@ -395,12 +395,12 @@ def test_signal_carries_regime_features_dict():
     })
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    # All keys must be present; kronos_raw_* may be None until first cycle fires
+    # All keys must be present; kronos_raw_*, kalshi_open_imbalance may be None until first cycle fires
     from btc_kalshi_system.models.regime_model import _FEATURE_ORDER
-    _KRONOS_KEYS = {"kronos_raw_15min", "kronos_raw_5min"}
+    _NULLABLE_KEYS = {"kronos_raw_15min", "kronos_raw_5min", "kalshi_open_imbalance"}
     for key in _FEATURE_ORDER:
         assert key in result.regime_features, f"Missing key: {key}"
-        if key not in _KRONOS_KEYS:
+        if key not in _NULLABLE_KEYS:
             assert isinstance(result.regime_features[key], float), key
     assert result.regime_features["funding_rate"] == pytest.approx(0.0001)
     assert result.regime_features["cvd_normalized"] == pytest.approx(0.3)
@@ -523,3 +523,28 @@ def test_pause_flag_absent_uses_regime_normally(tmp_path):
     assert result is not None
     expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.80
     assert result.calibrated_prob == pytest.approx(expected)
+
+
+# ── Kalshi imbalance cache ────────────────────────────────────────────────────
+
+def test_set_kalshi_imbalance_updates_regime_features():
+    """set_kalshi_imbalance() causes kalshi_open_imbalance to appear in _regime_features."""
+    engine = make_engine()
+    engine.set_kalshi_imbalance(0.42)
+    features, _, _, _ = engine._regime_features()
+    assert features.get("kalshi_open_imbalance") == 0.42
+
+
+def test_set_kalshi_imbalance_none_passes_through():
+    """None imbalance (REST fallback) is passed through as None."""
+    engine = make_engine()
+    engine.set_kalshi_imbalance(None)
+    features, _, _, _ = engine._regime_features()
+    assert features.get("kalshi_open_imbalance") is None
+
+
+def test_kalshi_imbalance_defaults_to_none_before_set():
+    """Before set_kalshi_imbalance() is called, value is None."""
+    engine = make_engine()
+    features, _, _, _ = engine._regime_features()
+    assert features.get("kalshi_open_imbalance") is None

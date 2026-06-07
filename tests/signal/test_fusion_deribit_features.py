@@ -20,6 +20,7 @@ _ALL_29_KEYS = [
     "atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope", "skew_25d",
     "btc_24h_return",
     "kronos_raw_15min", "kronos_raw_5min",
+    "kalshi_open_imbalance", "btc_spx_corr_8d", "btc_qqq_corr_8d",
 ]
 
 
@@ -80,14 +81,14 @@ def _base_ctx() -> dict:
 # ── test_regime_features_includes_all_27_keys ─────────────────────────────────
 
 def test_regime_features_includes_all_28_keys():
-    """_regime_features() must return exactly 29 keys in the correct order."""
+    """_regime_features() must return exactly 32 keys in the correct order."""
     engine = _make_engine(_base_ctx())
     features, stale, deribit_stale, _ = engine._regime_features()
     keys = list(features.keys())
     assert keys == _ALL_29_KEYS, (
         f"Key mismatch.\nExpected: {_ALL_29_KEYS}\nGot:      {keys}"
     )
-    assert len(keys) == 29
+    assert len(keys) == 32
 
 
 # ── test_deribit_stale flags ──────────────────────────────────────────────────

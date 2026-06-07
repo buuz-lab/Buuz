@@ -44,6 +44,13 @@ _FEATURE_ORDER = [
     # NULL (→ NaN) when bootstrap loop hasn't fired yet; XGBoost treats NaN as missing.
     "kronos_raw_15min",
     "kronos_raw_5min",
+    # Kalshi imbalance snapshot (session 35) — captured from WS at trade entry time;
+    # None (→ NaN) when REST fallback is used. Independent of Kalshi implied_prob (Gate 5).
+    "kalshi_open_imbalance",
+    # Macro correlation features (session 35) — 8-day rolling BTC correlation with SPX/QQQ;
+    # sourced from Redis via DerivativesFeed; default 0.0 when unavailable.
+    "btc_spx_corr_8d",
+    "btc_qqq_corr_8d",
 ]
 
 

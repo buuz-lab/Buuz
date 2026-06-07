@@ -114,6 +114,7 @@ class SignalFusionEngine:
         # Exposed via _regime_features() so the candle logger can log them.
         self._last_kronos_raw_15min: float | None = None
         self._last_kronos_raw_5min: float | None = None
+        self._last_kalshi_open_imbalance: float | None = None
 
     def update_market_context(self, ctx: dict) -> None:
         self._market_context = ctx
@@ -123,6 +124,9 @@ class SignalFusionEngine:
 
     def update_kalshi_spread(self, spread: float) -> None:
         self._market_context["kalshi_spread_normalized"] = spread
+
+    def set_kalshi_imbalance(self, imbalance: float | None) -> None:
+        self._last_kalshi_open_imbalance = imbalance
 
     def get_signal(
         self,
@@ -518,5 +522,8 @@ class SignalFusionEngine:
             # XGBoost treats None→NaN as missing; candle logger stores None as SQL NULL.
             "kronos_raw_15min":         self._last_kronos_raw_15min,
             "kronos_raw_5min":          self._last_kronos_raw_5min,
+            "kalshi_open_imbalance":    self._last_kalshi_open_imbalance,
+            "btc_spx_corr_8d":          float(ctx.get("btc_spx_corr_8d") or 0.0),
+            "btc_qqq_corr_8d":          float(ctx.get("btc_qqq_corr_8d") or 0.0),
         }
         return features, stale, deribit_stale, okx_stale

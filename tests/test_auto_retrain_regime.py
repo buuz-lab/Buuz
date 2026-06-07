@@ -43,6 +43,7 @@ _FEATURE_COLS_FOR_DB = [
     "tape_speed_tpm", "large_print_direction", "volume_ratio_1h",
     "atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope", "skew_25d",
     "btc_24h_return", "kronos_raw_15min", "kronos_raw_5min",
+    "kalshi_open_imbalance", "btc_spx_corr_8d", "btc_qqq_corr_8d",
 ]
 
 
@@ -73,6 +74,9 @@ def _make_db(rows: list[dict]) -> str:
             0.02,
             r.get("kronos_raw_15min", 0.6),
             r.get("kronos_raw_5min", 0.55),
+            r.get("kalshi_open_imbalance", 0.5),
+            r.get("btc_spx_corr_8d", 0.3),
+            r.get("btc_qqq_corr_8d", 0.4),
         ]
         placeholders = ", ".join(["?"] * (4 + len(_FEATURE_COLS_FOR_DB)))
         col_names = "id, candle_ts, features_stale, btc_direction, " + ", ".join(_FEATURE_COLS_FOR_DB)
@@ -189,7 +193,7 @@ def test_brier_score_worst():
 # ── evaluate_deployed_model ───────────────────────────────────────────────────
 
 def test_evaluate_deployed_model_returns_none_when_no_model(tmp_path):
-    X = np.random.rand(20, 28)
+    X = np.random.rand(20, 32)
     y = np.random.randint(0, 2, 20)
     result = evaluate_deployed_model(str(tmp_path / "nonexistent.pkl"), X, y)
     assert result is None
@@ -198,13 +202,13 @@ def test_evaluate_deployed_model_returns_none_when_no_model(tmp_path):
 def test_evaluate_deployed_model_returns_float_when_trained(tmp_path):
     from btc_kalshi_system.models.regime_model import RegimeModel
     m = RegimeModel()
-    X = np.random.rand(100, 28)
+    X = np.random.rand(100, 32)
     y = np.random.randint(0, 2, 100)
     m.train(X, y)
     model_path = str(tmp_path / "regime.pkl")
     m.save(model_path)
 
-    X_holdout = np.random.rand(20, 28)
+    X_holdout = np.random.rand(20, 32)
     y_holdout = np.random.randint(0, 2, 20)
     result = evaluate_deployed_model(model_path, X_holdout, y_holdout)
     assert isinstance(result, float)
