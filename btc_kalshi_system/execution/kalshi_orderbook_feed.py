@@ -110,8 +110,8 @@ class KalshiOrderbookFeed:
                             self._open_snapshots[ticker] = {
                                 "mid_prob":   (best_yes_bid + best_yes_ask) / 200.0,
                                 "spread":     (best_yes_ask - best_yes_bid) / 100.0,
-                                "depth_bid":  float(yes_lvls[-1][1]),
-                                "depth_ask":  float(no_lvls[-1][1]),
+                                "depth_bid":  float(sum(float(q) for _, q in yes_lvls)),
+                                "depth_ask":  float(sum(float(q) for _, q in no_lvls)),
                                 "ts":         now,
                             }
                 logger.debug(f"WS orderbook: snapshot received for {ticker}")

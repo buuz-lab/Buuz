@@ -59,6 +59,13 @@ _REGIME_SHIFT_DELTA  = 0.15  # mean btc_direction must swing ≥15% from train-t
 # Cleared automatically when a successful retrain deploys a new model.
 _REGIME_PAUSE_FLAG = Path("models/regime_paused.flag")
 
+# Write this file to hold auto-deploy for manual review (e.g. before first deploy).
+# Remove it after reviewing --dry-run output and deciding to allow auto-deploy.
+# Usage: touch models/regime_deploy_hold.flag
+#        python3 scripts/train_regime.py --dry-run   # review output
+#        rm models/regime_deploy_hold.flag            # allow auto-deploy
+_REGIME_DEPLOY_HOLD_FLAG = Path("models/regime_deploy_hold.flag")
+
 _FEATURE_COLS = list(_FEATURE_ORDER)
 
 _CANDLE_QUERY = """
@@ -339,6 +346,11 @@ def main() -> None:
     if args.dry_run:
         print("\n--dry-run: model NOT saved.")
         return
+
+    if _REGIME_DEPLOY_HOLD_FLAG.exists():
+        print(f"\nDeploy hold active ({_REGIME_DEPLOY_HOLD_FLAG}). Model NOT saved.")
+        print("Review --dry-run output, then: rm models/regime_deploy_hold.flag")
+        sys.exit(0)
 
     if not deploy:
         print("Deployed model is better or equal. Not saving candidate.")

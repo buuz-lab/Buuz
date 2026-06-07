@@ -5,7 +5,7 @@ import numpy as np
 from loguru import logger
 from sklearn.linear_model import LogisticRegression
 
-_MIN_SAMPLES = 100
+_MIN_SAMPLES = 150  # 7 inputs × ~20 samples/feature = 140 minimum; 150 adds margin
 
 _REGIME_ENCODING: dict[str, float] = {
     "trending_up":      1.0,

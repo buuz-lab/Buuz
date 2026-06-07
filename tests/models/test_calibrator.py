@@ -58,9 +58,9 @@ def test_calibrated_output_differs_from_raw_after_fit():
 
 # ── pass-through when n < 300 ──────────────────────────────────────────────────
 
-def test_transform_is_passthrough_when_fewer_than_100_samples():
+def test_transform_is_passthrough_when_fewer_than_150_samples():
     cal = Calibrator()
-    raw, outcomes = _synthetic_data(n=99)
+    raw, outcomes = _synthetic_data(n=149)
     cal.fit(raw, outcomes)
     for p in [0.1, 0.5, 0.9]:
         assert cal.transform(p) == pytest.approx(p)
@@ -138,18 +138,18 @@ def test_fit_uses_y_up_labels():
     assert cal_correct.transform(0.7) != cal_inverted.transform(0.7)
 
 
-def test_minimum_training_rows_is_100():
-    """_MIN_SAMPLES=100 applies to the training split, not total rows.
-    With 20% holdout: n=123 → n_train=99 → passthrough; n=124 → n_train=100 → fits."""
-    # n=123: n_holdout=24, n_train=99 < 100 → passthrough (n_train guard fires first)
+def test_minimum_training_rows_is_150():
+    """_MIN_SAMPLES=150 applies to the training split, not total rows.
+    With 20% holdout: n=186 → n_train=149 → passthrough; n=187 → n_train=150 → fits."""
+    # n=186: n_holdout=37, n_train=149 < 150 → passthrough
     cal_under = Calibrator()
-    raw_under, y_under = _compressed_data(n=123, seed=7)
+    raw_under, y_under = _compressed_data(n=186, seed=7)
     cal_under.fit(raw_under, y_under)
     assert cal_under._passthrough is True
 
-    # n=124: n_holdout=24, n_train=100 = _MIN_SAMPLES → fitting proceeds and deploys
+    # n=187: n_holdout=37, n_train=150 = _MIN_SAMPLES → fitting proceeds
     cal_at = Calibrator()
-    raw_at, y_at = _compressed_data(n=124, seed=7)
+    raw_at, y_at = _compressed_data(n=187, seed=7)
     cal_at.fit(raw_at, y_at)
     assert cal_at._passthrough is False
 
