@@ -408,6 +408,7 @@ def test_pcr_delta_is_change_from_previous():
     feed._prev_skew_25d = 0.0
     result = feed._compute_features(_good_instruments())
     assert result["pcr_delta"] == pytest.approx(result["pcr_oi"] - 0.8, abs=1e-6)
+    assert feed._prev_pcr_oi == pytest.approx(result["pcr_oi"])
 
 
 def test_skew_delta_is_change_from_previous():
@@ -418,6 +419,7 @@ def test_skew_delta_is_change_from_previous():
     feed._prev_skew_25d = 5.0
     result = feed._compute_features(_good_instruments())
     assert result["skew_delta"] == pytest.approx(result["skew_25d"] - 5.0, abs=1e-6)
+    assert feed._prev_skew_25d == pytest.approx(result["skew_25d"])
 
 
 def test_prev_values_updated_after_compute():

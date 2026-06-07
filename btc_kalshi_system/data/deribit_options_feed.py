@@ -125,10 +125,8 @@ class DeribitOptionsFeed:
 
             pcr_delta = pcr_oi - self._prev_pcr_oi
             skew_delta = skew_25d - self._prev_skew_25d
-            self._prev_pcr_oi = pcr_oi
-            self._prev_skew_25d = skew_25d
 
-            return {
+            result = {
                 "atm_iv": near_iv,
                 "pcr_oi": pcr_oi,
                 "term_structure_slope": term_structure_slope,
@@ -136,6 +134,9 @@ class DeribitOptionsFeed:
                 "pcr_delta": pcr_delta,
                 "skew_delta": skew_delta,
             }
+            self._prev_pcr_oi = pcr_oi
+            self._prev_skew_25d = skew_25d
+            return result
         except Exception as exc:
             logger.warning(f"DeribitOptionsFeed: feature computation failed — {exc}")
             return {"atm_iv": None, "pcr_oi": 1.0, "term_structure_slope": 0.0, "skew_25d": 0.0,
