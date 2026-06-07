@@ -199,8 +199,19 @@ class SignalFusionEngine:
             # Phase 3c: regime v2 is the full signal — Kronos is already embedded as features.
             # Regime disagreements with Kronos are informative (regime is overriding Kronos
             # based on 32 features including k15_raw). No neutralization needed.
-            _signal_edge = abs(regime_prob - self._market_context.get("kalshi_mid_cents", 50.0) / 100.0)
-            combined = self._calibrator.transform(regime_prob, regime=deepseek_regime, edge=_signal_edge)
+            _signal_edge   = abs(regime_prob - self._market_context.get("kalshi_mid_cents", 50.0) / 100.0)
+            _k15_for_cal   = self._last_kronos_raw_15min if self._last_kronos_raw_15min is not None else 0.5
+            _disagreement  = abs(regime_prob - _k15_for_cal)
+            _cal_vol       = float(regime_features.get("brti_volatility_1h") or 0.0)
+            _cal_spread    = float(regime_features.get("kalshi_spread_normalized") or 0.0)
+            combined = self._calibrator.transform(
+                regime_prob,
+                regime=deepseek_regime,
+                edge=_signal_edge,
+                disagreement=_disagreement,
+                volatility=_cal_vol,
+                spread=_cal_spread,
+            )
             if deepseek_regime == "high_uncertainty":
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
             elif deepseek_regime == "ranging":

@@ -43,8 +43,10 @@ CREATE TABLE IF NOT EXISTS gate_rejections (
     k15_calibrated_prob REAL DEFAULT NULL,
     candle_progress     REAL DEFAULT NULL,
     k15_post_open       INTEGER DEFAULT NULL,
-    regime_prob         REAL DEFAULT NULL,
-    signal_edge         REAL DEFAULT NULL
+    regime_prob              REAL DEFAULT NULL,
+    signal_edge              REAL DEFAULT NULL,
+    brti_volatility_1h       REAL DEFAULT NULL,
+    kalshi_spread_normalized REAL DEFAULT NULL
 )
 """
 

@@ -235,6 +235,10 @@ _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # Computed signal edge (win_prob - market_price) at block time.
     # Enables Gate 14 threshold calibration once Phase 3c calibrator is deployed.
     ("signal_edge",         "REAL DEFAULT NULL"),
+    # Phase 3c calibrator context features — logged at block time so the calibrator
+    # can train on the full feature set including gate_rejections counterfactuals.
+    ("brti_volatility_1h",      "REAL DEFAULT NULL"),
+    ("kalshi_spread_normalized", "REAL DEFAULT NULL"),
 ]
 
 
@@ -923,14 +927,16 @@ class KronosV2:
                     _signal_edge = round(_wp - _mp, 6)
                 except Exception:
                     pass
+                _rf = signal.regime_features or {}
                 self._db.execute(
                     """INSERT OR IGNORE INTO gate_rejections
                        (rejection_id, timestamp, ticker, timeframe, direction,
                         failed_gate, failed_reason, signal_prob, deepseek_regime,
                         kalshi_mid_cents, features, kalshi_mid_at_block, would_be_fill_cents,
                         kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress,
-                        k15_post_open, regime_prob, signal_edge)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        k15_post_open, regime_prob, signal_edge,
+                        brti_volatility_1h, kalshi_spread_normalized)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(uuid.uuid4()),
                         time.time(),
@@ -942,7 +948,7 @@ class KronosV2:
                         signal.kronos_calibrated,
                         signal.deepseek_regime,
                         round(mid_cents),
-                        json.dumps(signal.regime_features or {}),
+                        json.dumps(_rf),
                         result.kalshi_mid_at_block,
                         would_be_fill,
                         _k15_raw,
@@ -952,6 +958,8 @@ class KronosV2:
                         _k15_post_open,
                         signal.regime_prob if hasattr(signal, 'regime_prob') else None,
                         _signal_edge,
+                        _rf.get("brti_volatility_1h"),
+                        _rf.get("kalshi_spread_normalized"),
                     ),
                 )
                 self._db.commit()

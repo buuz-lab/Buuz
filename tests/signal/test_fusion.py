@@ -105,7 +105,7 @@ def make_engine(
     # Phase 3c: calibrator transforms regime_prob (not k15_raw).
     # Passthrough behaviour: transform(x) = x — reflects calibrator before first training.
     calibrator = MagicMock()
-    calibrator.transform.side_effect = lambda raw, regime=None, edge=None: raw
+    calibrator.transform.side_effect = lambda raw, regime=None, edge=None, disagreement=None, volatility=None, spread=None: raw
 
     regime_model = MagicMock()
     if raise_not_trained:

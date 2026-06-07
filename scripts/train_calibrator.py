@@ -63,12 +63,15 @@ def main() -> None:
         sys.exit(f"Database not found: {args.db}")
 
     _UNION_QUERY = """
-        SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome FROM (
-            SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp
+        SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome,
+               kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized FROM (
+            SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp,
+                   kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized
             FROM trades
             WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
             UNION ALL
-            SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp
+            SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp,
+                   kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized
             FROM gate_rejections
             WHERE outcome IS NOT NULL AND shadow = 0
               AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
@@ -108,6 +111,15 @@ def main() -> None:
     outcomes      = np.array([r[4] for r in rows], dtype=float)
     y_yes = np.where(directions == 1, outcomes, 1.0 - outcomes)
 
+    # New calibrator context features (None→NaN→replaced with 0 via np.nan_to_num)
+    kronos_k15    = np.array([r[5] if r[5] is not None else np.nan for r in rows], dtype=float)
+    volatilities  = np.array([r[6] if r[6] is not None else np.nan for r in rows], dtype=float)
+    spreads       = np.array([r[7] if r[7] is not None else np.nan for r in rows], dtype=float)
+    # disagreement: abs(regime_prob - k15). When k15 is missing, use 0 (neutral).
+    disagreements = np.abs(regime_probs - np.where(np.isnan(kronos_k15), regime_probs, kronos_k15))
+    volatilities  = np.nan_to_num(volatilities,  nan=0.0)
+    spreads       = np.nan_to_num(spreads,        nan=0.0)
+
     # Load existing calibrator for pre-retrain Brier comparison
     pre_brier: float | None = None
     if Path(args.out).exists():
@@ -122,7 +134,14 @@ def main() -> None:
         print(f"No existing calibrator at {args.out} — fitting fresh")
 
     cal = Calibrator()
-    cal.fit(regime_probs, y_yes, regimes=regimes, edges=abs_edges)
+    cal.fit(
+        regime_probs, y_yes,
+        regimes=regimes,
+        edges=abs_edges,
+        disagreements=disagreements,
+        volatilities=volatilities,
+        spreads=spreads,
+    )
     post_brier = cal.brier_score(regime_probs, y_yes)
 
     print(f"Post-retrain Brier: {post_brier:.4f}")
