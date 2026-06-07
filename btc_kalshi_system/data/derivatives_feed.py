@@ -166,6 +166,7 @@ class StreamingCVDAccumulator:
                     await asyncio.sleep(backoff)
                 else:
                     logger.error(f"StreamingCVDAccumulator: Kraken WS also failed: {exc} — retry in 30s")
+                    okx_failures = 0  # probe OKX again next cycle
                     await asyncio.sleep(30)
 
     async def _run_okx(self) -> None:
