@@ -30,6 +30,7 @@ def _good_response() -> str:
         "suppress_trading": False,
         "suppress_reason": None,
         "notes": "Strong ETF inflow with positive funding.",
+        "dir_prob_up": 0.68,
     })
 
 
@@ -48,7 +49,7 @@ def test_returned_dict_has_all_required_keys():
     parser = DeepSeekContextParser(api_key="test-key")
     with patch.object(parser, "_call_api", return_value=_good_response()):
         result = parser.get_current_context(_good_context())
-    for key in ("regime", "confidence", "suppress_trading", "suppress_reason", "notes"):
+    for key in ("regime", "confidence", "suppress_trading", "suppress_reason", "notes", "dir_prob_up"):
         assert key in result
 
 
@@ -180,3 +181,58 @@ def test_missing_api_key_falls_back_to_neutral_default():
     assert result == NEUTRAL_DEFAULT
     assert result["suppress_trading"] is False
     assert result["regime"] == "ranging"
+
+
+# ── dir_prob_up ───────────────────────────────────────────────────────────────
+
+def test_good_response_includes_dir_prob_up():
+    """Successful parse returns dir_prob_up as a float."""
+    parser = DeepSeekContextParser(api_key="test-key")
+    with patch.object(parser, "_call_api", return_value=_good_response()):
+        result = parser.get_current_context(_good_context())
+    assert "dir_prob_up" in result
+    assert result["dir_prob_up"] == pytest.approx(0.68)
+
+
+def test_response_missing_dir_prob_up_returns_safe_default():
+    """Missing dir_prob_up field → SAFE_DEFAULT."""
+    parser = DeepSeekContextParser(api_key="test-key")
+    bad_response = json.dumps({
+        "regime": "trending_up",
+        "confidence": 0.72,
+        "suppress_trading": False,
+        "suppress_reason": None,
+        "notes": "Strong ETF inflow.",
+        # dir_prob_up absent
+    })
+    with patch.object(parser, "_call_api", return_value=bad_response):
+        result = parser.get_current_context(_good_context())
+    assert result == SAFE_DEFAULT
+
+
+def test_dir_prob_up_out_of_range_returns_safe_default():
+    """dir_prob_up > 1.0 is invalid → SAFE_DEFAULT."""
+    parser = DeepSeekContextParser(api_key="test-key")
+    bad_response = json.dumps({
+        "regime": "trending_up",
+        "confidence": 0.72,
+        "suppress_trading": False,
+        "suppress_reason": None,
+        "notes": "ok",
+        "dir_prob_up": 1.5,
+    })
+    with patch.object(parser, "_call_api", return_value=bad_response):
+        result = parser.get_current_context(_good_context())
+    assert result == SAFE_DEFAULT
+
+
+def test_neutral_default_has_dir_prob_up():
+    """NEUTRAL_DEFAULT must include dir_prob_up = 0.5."""
+    assert "dir_prob_up" in NEUTRAL_DEFAULT
+    assert NEUTRAL_DEFAULT["dir_prob_up"] == pytest.approx(0.5)
+
+
+def test_safe_default_has_dir_prob_up():
+    """SAFE_DEFAULT must include dir_prob_up = 0.5."""
+    assert "dir_prob_up" in SAFE_DEFAULT
+    assert SAFE_DEFAULT["dir_prob_up"] == pytest.approx(0.5)

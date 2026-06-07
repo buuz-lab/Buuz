@@ -28,7 +28,7 @@ _DEFAULT_CACHE_MINUTES = 15
 _HTTP_TIMEOUT_SECONDS = 30
 
 _VALID_REGIMES = {"trending_up", "trending_down", "ranging", "high_uncertainty"}
-_REQUIRED_KEYS = ("regime", "confidence", "suppress_trading", "suppress_reason", "notes")
+_REQUIRED_KEYS = ("regime", "confidence", "suppress_trading", "suppress_reason", "notes", "dir_prob_up")
 
 # Used when DeepSeek is reachable and returns a valid regime with no special conditions.
 NEUTRAL_DEFAULT: dict[str, Any] = {
@@ -37,6 +37,7 @@ NEUTRAL_DEFAULT: dict[str, Any] = {
     "suppress_trading": False,
     "suppress_reason": None,
     "notes": "DeepSeek unavailable — using neutral fallback so signals are not shrunk.",
+    "dir_prob_up": 0.5,
 }
 
 # Used when DeepSeek call fails in a way that suggests we should be cautious
@@ -47,6 +48,7 @@ SAFE_DEFAULT: dict[str, Any] = {
     "suppress_trading": False,
     "suppress_reason": "deepseek_unavailable",
     "notes": "Falling back to safe default — DeepSeek call failed or returned malformed data.",
+    "dir_prob_up": 0.5,
 }
 
 _PROMPT_TEMPLATE = """You are a BTC market regime classifier for an automated
@@ -101,8 +103,13 @@ Output exactly this JSON:
   "confidence": 0.0-1.0,
   "suppress_trading": true | false,
   "suppress_reason": "string or null",
-  "notes": "one sentence max"
-}}"""
+  "notes": "one sentence max",
+  "dir_prob_up": 0.0-1.0
+}}
+
+dir_prob_up is your probability (0.0-1.0) that BTC closes HIGHER at the end of the
+next 15-minute candle, based on current CVD, funding, options flow, and momentum.
+0.5 = no directional view. This is independent of your regime classification."""
 
 
 class DeepSeekContextParser:
@@ -333,10 +340,18 @@ class DeepSeekContextParser:
         if not isinstance(parsed["suppress_trading"], bool):
             return None
 
+        try:
+            dir_prob_up = float(parsed["dir_prob_up"])
+        except (TypeError, ValueError):
+            return None
+        if not (0.0 <= dir_prob_up <= 1.0):
+            return None
+
         return {
             "regime": parsed["regime"],
             "confidence": confidence,
             "suppress_trading": parsed["suppress_trading"],
             "suppress_reason": parsed.get("suppress_reason"),
             "notes": str(parsed.get("notes", "")),
+            "dir_prob_up": dir_prob_up,
         }
