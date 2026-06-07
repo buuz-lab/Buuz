@@ -285,6 +285,8 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("pcr_delta",            "REAL DEFAULT NULL"),
     ("skew_delta",           "REAL DEFAULT NULL"),
     ("deepseek_dir_prob",    "REAL DEFAULT NULL"),
+    ("cvd_price_divergence", "REAL DEFAULT NULL"),
+    ("recent_up_fraction",   "REAL DEFAULT NULL"),
 ]
 
 

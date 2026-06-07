@@ -63,6 +63,9 @@ _FEATURE_ORDER = [
     "pcr_delta",
     "skew_delta",
     "deepseek_dir_prob",
+    # Session 40 — microstructure divergence and directional trend context
+    "cvd_price_divergence",
+    "recent_up_fraction",
 ]
 
 

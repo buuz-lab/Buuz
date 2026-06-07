@@ -294,6 +294,14 @@ class PreTradeChecklist:
             side = "NO→DOWN" if signal.direction == 0 else "YES→UP"
             return fail(8, f"Kalshi consensus {fresh_kalshi_mid:.3f} opposes {side} (threshold {effective_threshold:.3f})", kalshi_mid=fresh_kalshi_mid)
 
+        # Trending-regime DOWN-direction shrink
+        # Data: DOWN bets in trending_up = -$1.17/trade (42.3% WR, bear-bias errors);
+        # DOWN bets in trending_down = -$3.03/trade (43.8% WR, chasing completed moves).
+        # UP bets in both trending regimes are neutral or mildly positive — leave alone.
+        if signal.deepseek_regime in ("trending_up", "trending_down") and signal.direction == 0:
+            kelly_dollars = kelly_dollars * 0.5
+            kelly_contracts = max(1, kelly_contracts // 2)
+
         return ChecklistResult(
             passed=True,
             failed_gate=None,

@@ -48,6 +48,8 @@ _FEATURE_COLS_FOR_DB = [
     # Session 39
     "liq_net_norm", "eth_direction_15min", "okx_spot_imbalance",
     "pcr_delta", "skew_delta", "deepseek_dir_prob",
+    # Session 40
+    "cvd_price_divergence", "recent_up_fraction",
 ]
 
 
@@ -89,6 +91,9 @@ def _make_db(rows: list[dict]) -> str:
             r.get("pcr_delta", 0.0),
             r.get("skew_delta", 0.0),
             r.get("deepseek_dir_prob", 0.5),
+            # Session 40
+            r.get("cvd_price_divergence", 0.0),
+            r.get("recent_up_fraction", 0.5),
         ]
         placeholders = ", ".join(["?"] * (4 + len(_FEATURE_COLS_FOR_DB)))
         col_names = "id, candle_ts, features_stale, btc_direction, " + ", ".join(_FEATURE_COLS_FOR_DB)

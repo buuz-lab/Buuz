@@ -25,6 +25,8 @@ _ALL_29_KEYS = [
     # Session 39 — cascade momentum, cross-asset, order flow, options delta, LLM direction
     "liq_net_norm", "eth_direction_15min", "okx_spot_imbalance",
     "pcr_delta", "skew_delta", "deepseek_dir_prob",
+    # Session 40 — microstructure divergence and directional trend context
+    "cvd_price_divergence", "recent_up_fraction",
 ]
 
 
@@ -92,7 +94,7 @@ def test_regime_features_includes_all_28_keys():
     assert keys == _ALL_29_KEYS, (
         f"Key mismatch.\nExpected: {_ALL_29_KEYS}\nGot:      {keys}"
     )
-    assert len(keys) == 39
+    assert len(keys) == 41
 
 
 # ── test_deribit_stale flags ──────────────────────────────────────────────────

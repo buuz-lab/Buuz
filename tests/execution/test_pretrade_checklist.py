@@ -815,3 +815,65 @@ def test_gate12_cap_logged_in_failed_reason(checklist):
     assert "vol=" in result.failed_reason
     assert "spread=" in result.failed_reason
 
+
+
+# ── Trending DOWN-direction Kelly shrink ─────────────────────────────────────
+# For DOWN bets: trade_price = 100 - best_bid_cents; edge = (1-prob) - trade_price/100.
+# With bid=48 (trade_price=52¢) and prob=0.30: edge = 0.70 - 0.52 = 0.18¢.
+# This satisfies: Gate 14 (<20¢), Gate 5 ranging floor (>15¢), NO-price limit (<55¢).
+
+def _down_bet_kwargs():
+    """Kwargs for a DOWN bet that passes all gates: bid=48→trade_price=52¢, edge=0.18¢."""
+    return {**base_kwargs(), "best_ask_cents": 50, "best_bid_cents": 48}
+
+
+def test_trending_up_down_bet_gets_half_kelly(checklist):
+    """DOWN bets in trending_up receive half Kelly — bear-bias guard."""
+    ranging_sig = make_signal(calibrated_prob=0.30, deepseek_regime="ranging",    direction=0)
+    trend_sig   = make_signal(calibrated_prob=0.30, deepseek_regime="trending_up", direction=0)
+    kw = _down_bet_kwargs()
+    full = checklist.run(**{**kw, "signal": ranging_sig})
+    half = checklist.run(**{**kw, "signal": trend_sig})
+    assert full.passed, f"Baseline failed: {full.failed_reason}"
+    assert half.passed, f"Trending shrink failed gate: {half.failed_gate} — {half.failed_reason}"
+    assert half.kelly_dollars == pytest.approx(full.kelly_dollars * 0.5, rel=0.05)
+
+
+def test_trending_down_down_bet_gets_half_kelly(checklist):
+    """DOWN bets in trending_down also receive half Kelly — chasing-move guard."""
+    ranging_sig = make_signal(calibrated_prob=0.30, deepseek_regime="ranging",      direction=0)
+    trend_sig   = make_signal(calibrated_prob=0.30, deepseek_regime="trending_down", direction=0)
+    kw = _down_bet_kwargs()
+    full = checklist.run(**{**kw, "signal": ranging_sig})
+    half = checklist.run(**{**kw, "signal": trend_sig})
+    assert full.passed, f"Baseline failed: {full.failed_reason}"
+    assert half.passed, f"Trending shrink failed gate: {half.failed_gate} — {half.failed_reason}"
+    assert half.kelly_dollars == pytest.approx(full.kelly_dollars * 0.5, rel=0.05)
+
+
+def test_trending_up_up_bet_not_shrunk(checklist):
+    """UP bets in trending_up are NOT reduced — only DOWN direction is penalised."""
+    ranging_sig = make_signal(calibrated_prob=0.65, deepseek_regime="ranging",    direction=1)
+    trend_sig   = make_signal(calibrated_prob=0.65, deepseek_regime="trending_up", direction=1)
+    kw = base_kwargs()
+    full   = checklist.run(**{**kw, "signal": ranging_sig})
+    result = checklist.run(**{**kw, "signal": trend_sig})
+    assert result.passed
+    assert result.kelly_dollars == pytest.approx(full.kelly_dollars, rel=0.01)
+
+
+def test_ranging_down_bet_not_shrunk(checklist):
+    """DOWN bets in ranging are NOT reduced — ranging is nearly breakeven at -$0.08/trade.
+
+    Verify by showing ranging Kelly > trending Kelly: the trending result is halved,
+    ranging is not. Both hit Gate 13's $8 cap at prob=0.30, so we compare them directly.
+    """
+    ranging_sig = make_signal(calibrated_prob=0.30, deepseek_regime="ranging",    direction=0)
+    trend_sig   = make_signal(calibrated_prob=0.30, deepseek_regime="trending_up", direction=0)
+    kw = _down_bet_kwargs()
+    ranging_result = checklist.run(**{**kw, "signal": ranging_sig})
+    trend_result   = checklist.run(**{**kw, "signal": trend_sig})
+    assert ranging_result.passed
+    assert trend_result.passed
+    # Trending result is halved; ranging result is NOT — so ranging > trending
+    assert ranging_result.kelly_dollars > trend_result.kelly_dollars

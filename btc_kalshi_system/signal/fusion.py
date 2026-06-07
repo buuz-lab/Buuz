@@ -497,6 +497,28 @@ class SignalFusionEngine:
         # OR (b) OKX funding/OI fetch failed with no Coinglass key (_okx_partial).
         okx_stale = (not ctx) or ctx.get("_lkg", False) or ctx.get("_okx_partial", False)
 
+        # CVD/price divergence: positive = CVD confirms momentum (conviction),
+        # negative = CVD contradicts price direction (distribution/accumulation signal).
+        try:
+            if abs(brti_momentum_15min) > 1e-6:
+                _mom_sign = 1.0 if brti_momentum_15min > 0 else -1.0
+                cvd_price_divergence = float(cvd_normalized * _mom_sign)
+            else:
+                cvd_price_divergence = 0.0
+        except Exception:
+            cvd_price_divergence = 0.0
+
+        # Fraction of last 8 completed 15-min candles that closed up.
+        # 0.0 = all down (sustained bear), 1.0 = all up (sustained bull), 0.5 = neutral.
+        try:
+            if df15 is not None and len(df15) >= 8:
+                recent = df15.iloc[-8:]
+                recent_up_fraction = float((recent["close"] > recent["open"]).sum()) / 8.0
+            else:
+                recent_up_fraction = 0.5
+        except Exception:
+            recent_up_fraction = 0.5
+
         # kalshi_implied_prob and kalshi_spread_normalized intentionally excluded —
         # regime model must be independent of Kalshi to avoid circularity with Gates 5/8.
         features = {
@@ -541,5 +563,8 @@ class SignalFusionEngine:
             "pcr_delta":             float(ctx.get("pcr_delta") or 0.0),
             "skew_delta":            float(ctx.get("skew_delta") or 0.0),
             "deepseek_dir_prob":     self._last_deepseek_dir_prob,
+            # Session 40 — microstructure divergence and directional trend context
+            "cvd_price_divergence":  cvd_price_divergence,
+            "recent_up_fraction":    recent_up_fraction,
         }
         return features, stale, deribit_stale, okx_stale
