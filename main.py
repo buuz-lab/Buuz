@@ -1621,10 +1621,10 @@ class KronosV2:
                          AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
                    ) ORDER BY timestamp DESC LIMIT 300"""
             ).fetchall()
-            if len(rows) < 200:
+            if len(rows) < 500:
                 logger.info(
                     f"Calibrator refit skipped: only {len(rows)} regime_prob rows "
-                    f"(need 200 — accumulating after regime v2 deploy)"
+                    f"(need 500 — accumulating after regime v2 deploy)"
                 )
                 return
             regime_probs  = np.array([r[0] for r in rows], dtype=float)

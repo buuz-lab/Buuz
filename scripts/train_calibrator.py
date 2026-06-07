@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", default=config.CALIBRATOR_MODEL_PATH)
     p.add_argument("--window", type=int, default=300,
                    help="Number of most-recent training-ready rows to use (default: 300)")
-    p.add_argument("--min-rows", type=int, default=100)
+    p.add_argument("--min-rows", type=int, default=500)
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
 
