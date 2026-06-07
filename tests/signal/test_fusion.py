@@ -102,8 +102,10 @@ def make_engine(
     kronos_engine = MagicMock()
     kronos_engine.run_monte_carlo.return_value = kronos_raw
 
+    # Phase 3c: calibrator transforms regime_prob (not k15_raw).
+    # Passthrough behaviour: transform(x) = x — reflects calibrator before first training.
     calibrator = MagicMock()
-    calibrator.transform.return_value = kronos_cal
+    calibrator.transform.side_effect = lambda raw, regime=None, edge=None: raw
 
     regime_model = MagicMock()
     if raise_not_trained:
@@ -166,7 +168,7 @@ def test_gate2_both_up_returns_signal():
 
 
 def test_gate2_both_down_returns_signal():
-    engine = make_engine(kronos_cal=0.35, regime_prob=0.35, regime_direction=0)
+    engine = make_engine(kronos_raw=0.35, regime_prob=0.35, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
     assert result.direction == 0
@@ -233,8 +235,8 @@ def test_trending_up_regime_no_shrinkage():
 # ── NotTrainedError fallback ───────────────────────────────────────────────────
 
 def test_not_trained_uses_kronos_only_formula():
-    """combined = 0.5 + (kronos_cal - 0.5) * _BOOTSTRAP_SHRINK"""
-    engine = make_engine(kronos_cal=0.70, raise_not_trained=True)
+    """combined = 0.5 + (k15_raw - 0.5) * _BOOTSTRAP_SHRINK. Phase 3c: uses raw k15, not calibrated."""
+    engine = make_engine(kronos_raw=0.70, raise_not_trained=True)
     result = engine.get_signal("5min", 76000.0)
     expected = 0.5 + (0.70 - 0.5) * _BOOTSTRAP_SHRINK
     assert result is not None
@@ -242,7 +244,7 @@ def test_not_trained_uses_kronos_only_formula():
 
 
 def test_not_trained_kronos_below_half():
-    engine = make_engine(kronos_cal=0.30, raise_not_trained=True)
+    engine = make_engine(kronos_raw=0.30, raise_not_trained=True)
     result = engine.get_signal("5min", 76000.0)
     expected = 0.5 + (0.30 - 0.5) * _BOOTSTRAP_SHRINK
     assert result is not None
@@ -259,8 +261,8 @@ def test_not_trained_bypasses_gate2():
 
 
 def test_not_trained_direction_follows_combined():
-    engine_up = make_engine(kronos_cal=0.70, raise_not_trained=True)
-    engine_dn = make_engine(kronos_cal=0.30, raise_not_trained=True)
+    engine_up = make_engine(kronos_raw=0.70, raise_not_trained=True)
+    engine_dn = make_engine(kronos_raw=0.30, raise_not_trained=True)
     assert engine_up.get_signal("5min", 76000.0).direction == 1
     assert engine_dn.get_signal("5min", 76000.0).direction == 0
 
@@ -276,7 +278,7 @@ def test_not_trained_sentinel_fields():
 def test_bootstrap_ranging_applies_035_shrink():
     """In bootstrap + ranging, Kronos signal compressed to 0.35× toward 0.5."""
     engine = make_engine(
-        kronos_cal=0.80,
+        kronos_raw=0.80,
         raise_not_trained=True,
         deepseek_result=_ds_result(regime="ranging"),
     )
@@ -287,7 +289,7 @@ def test_bootstrap_ranging_applies_035_shrink():
 def test_bootstrap_high_uncertainty_applies_050_shrink():
     """In bootstrap + high_uncertainty, Kronos signal compressed to 0.50× toward 0.5."""
     engine = make_engine(
-        kronos_cal=0.80,
+        kronos_raw=0.80,
         raise_not_trained=True,
         deepseek_result=_ds_result(regime="high_uncertainty"),
     )
@@ -298,7 +300,7 @@ def test_bootstrap_high_uncertainty_applies_050_shrink():
 def test_bootstrap_trending_up_keeps_080_shrink():
     """In bootstrap + trending_up, full _BOOTSTRAP_SHRINK (0.80) is preserved."""
     engine = make_engine(
-        kronos_cal=0.80,
+        kronos_raw=0.80,
         raise_not_trained=True,
         deepseek_result=_ds_result(regime="trending_up"),
     )
@@ -309,7 +311,7 @@ def test_bootstrap_trending_up_keeps_080_shrink():
 def test_bootstrap_unknown_regime_falls_back_to_080():
     """In bootstrap + unknown regime string, falls back to _BOOTSTRAP_SHRINK (0.80)."""
     engine = make_engine(
-        kronos_cal=0.80,
+        kronos_raw=0.80,
         raise_not_trained=True,
         deepseek_result=_ds_result(regime="unknown_regime"),
     )
@@ -320,10 +322,11 @@ def test_bootstrap_unknown_regime_falls_back_to_080():
 # ── TradingSignal field correctness ───────────────────────────────────────────
 
 def test_signal_carries_raw_and_calibrated_kronos():
-    engine = make_engine(kronos_raw=0.60, kronos_cal=0.63, regime_prob=0.70, regime_direction=1)
+    """Phase 3c: kronos_calibrated = k15_raw (calibrator now operates on regime_prob)."""
+    engine = make_engine(kronos_raw=0.60, regime_prob=0.70, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result.kronos_raw == pytest.approx(0.60)
-    assert result.kronos_calibrated == pytest.approx(0.63)
+    assert result.kronos_calibrated == pytest.approx(0.60)  # same as raw — calibrator not applied to k15
 
 
 def test_signal_carries_regime_fields():
@@ -470,32 +473,32 @@ def test_disagreement_neutralization_bullish_kronos_bearish_regime():
 
 
 def test_disagreement_neutralization_bearish_kronos_bullish_regime():
-    """kronos_cal=0.30 (bearish), regime_prob=0.80 (bullish) → disagree.
+    """k15_raw=0.30 (bearish), regime_prob=0.80 (bullish) → disagree.
     Neutralization: _regime_in_fusion=0.5, not the raw regime_prob."""
-    engine = make_engine(kronos_cal=0.30, regime_prob=0.80, regime_direction=1)
+    engine = make_engine(kronos_raw=0.30, regime_prob=0.80, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = _KRONOS_WEIGHT * 0.30 + _REGIME_WEIGHT * 0.50
+    expected = _REGIME_WEIGHT * 0.50  # _KRONOS_WEIGHT=0 so only regime contribution
     assert result.calibrated_prob == pytest.approx(expected)
 
 
 def test_disagreement_neutralization_does_not_fire_on_agreement_bullish():
-    """kronos_cal=0.70, regime_prob=0.65 — both bullish (both > 0.5) → no neutralization,
+    """k15_raw=0.70, regime_prob=0.65 — both bullish (both > 0.5) → no neutralization,
     regime_prob used directly."""
-    engine = make_engine(kronos_cal=0.70, regime_prob=0.65, regime_direction=1)
+    engine = make_engine(kronos_raw=0.70, regime_prob=0.65, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.65
+    expected = _REGIME_WEIGHT * 0.65  # _KRONOS_WEIGHT=0 so only regime contribution
     assert result.calibrated_prob == pytest.approx(expected)
 
 
 def test_disagreement_neutralization_does_not_fire_on_agreement_bearish():
-    """kronos_cal=0.35, regime_prob=0.20 — both bearish (both < 0.5) → no neutralization,
+    """k15_raw=0.35, regime_prob=0.20 — both bearish (both < 0.5) → no neutralization,
     regime_prob used directly."""
-    engine = make_engine(kronos_cal=0.35, regime_prob=0.20, regime_direction=0)
+    engine = make_engine(kronos_raw=0.35, regime_prob=0.20, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = _KRONOS_WEIGHT * 0.35 + _REGIME_WEIGHT * 0.20
+    expected = _REGIME_WEIGHT * 0.20  # _KRONOS_WEIGHT=0 so only regime contribution
     assert result.calibrated_prob == pytest.approx(expected)
 
 
@@ -505,11 +508,11 @@ def test_pause_flag_reverts_to_bootstrap(tmp_path):
     """When regime_paused.flag exists, engine falls back to Kronos-only bootstrap signal."""
     pause_flag = tmp_path / "regime_paused.flag"
     pause_flag.touch()
-    engine = make_engine(kronos_cal=0.70, regime_prob=0.80, regime_direction=1)
+    engine = make_engine(kronos_raw=0.70, regime_prob=0.80, regime_direction=1)
     with patch("btc_kalshi_system.signal.fusion._REGIME_PAUSE_FLAG", pause_flag):
         result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    # Falls back to bootstrap: combined = 0.5 + (0.70 - 0.5) * _BOOTSTRAP_SHRINK
+    # Falls back to bootstrap: combined = 0.5 + (k15_raw=0.70 - 0.5) * _BOOTSTRAP_SHRINK
     expected = 0.5 + (0.70 - 0.5) * _BOOTSTRAP_SHRINK
     assert result.calibrated_prob == pytest.approx(expected)
 

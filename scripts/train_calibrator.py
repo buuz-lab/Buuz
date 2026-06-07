@@ -1,9 +1,9 @@
 """
-Train the Calibrator from instrumented trades + gate_rejections in trades.db.
+Phase 3c: Train the Calibrator on regime_prob + signal_edge from trades.db.
 
 Usage:
     python3 scripts/train_calibrator.py [--db trades.db] [--out models/calibrator.pkl]
-                                        [--window 300] [--min-rows 100] [--dry-run]
+                                        [--window 300] [--min-rows 200] [--dry-run]
 
 Data sources
 ------------
@@ -12,17 +12,21 @@ Training rows are drawn from both tables to eliminate selection bias:
   - gate_rejections: blocked signals with resolved counterfactual outcomes
     (shadow=1 Gate 7 rows excluded via WHERE shadow=0)
 
+Only rows where regime_prob IS NOT NULL are used — rows from before regime v2 deployed
+have no regime_prob and are excluded.
+
 Label semantics
 ---------------
-The calibrator maps kronos_raw (P(market UP)) to a calibrated probability.
-It must be trained with y_up = int(direction == outcome), not raw outcome:
+The calibrator maps regime_prob (P(market UP) from XGBoost) to a calibrated probability.
+It must be trained with y_yes = P(YES happened):
 
-    direction=0, outcome=0 (NO loss = market UP)   → y_up=1 ✓
-    direction=0, outcome=1 (NO win  = market DOWN)  → y_up=0 ✓
-    direction=1, outcome=1 (YES win = market UP)    → y_up=1 ✓
-    direction=1, outcome=0 (YES loss = market DOWN) → y_up=0 ✓
+    direction=1, outcome=1 (YES win = market UP)    → y_yes=1
+    direction=1, outcome=0 (YES loss = market DOWN)  → y_yes=0
+    direction=0, outcome=1 (NO win = market DOWN)   → y_yes=0
+    direction=0, outcome=0 (NO loss = market UP)    → y_yes=1
 
-This matches the calibrator's role: predict P(market UP) from Kronos raw output.
+signal_edge = abs(regime_prob - kalshi_mid_cents/100) at trade time — stored signed in DB,
+taken absolute during training.
 """
 
 from __future__ import annotations
@@ -59,25 +63,25 @@ def main() -> None:
         sys.exit(f"Database not found: {args.db}")
 
     _UNION_QUERY = """
-        SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM (
-            SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM trades
-            WHERE outcome IS NOT NULL
-              AND kronos_raw_15min IS NOT NULL
+        SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome FROM (
+            SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp
+            FROM trades
+            WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
             UNION ALL
-            SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM gate_rejections
-            WHERE outcome IS NOT NULL
-              AND kronos_raw_15min IS NOT NULL
-              AND shadow = 0
+            SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp
+            FROM gate_rejections
+            WHERE outcome IS NOT NULL AND shadow = 0
+              AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
         )
         ORDER BY timestamp DESC LIMIT ?
     """
     _COUNT_QUERY = """
         SELECT COUNT(*) FROM (
-            SELECT kronos_raw_15min FROM trades
-            WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL
+            SELECT regime_prob FROM trades
+            WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
             UNION ALL
-            SELECT kronos_raw_15min FROM gate_rejections
-            WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL
+            SELECT regime_prob FROM gate_rejections
+            WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
               AND shadow = 0
         )
     """
@@ -90,29 +94,27 @@ def main() -> None:
         conn.close()
 
     n = len(rows)
-    print(f"Training-ready rows (trades + gate_rejections) in {args.db}: {total_available} available, using {n}")
-    if total_available < 200:
-        print(f"WARNING: only {total_available} combined rows — data is sparse, calibration may be unreliable")
-
+    print(f"Phase 3c training rows (regime_prob IS NOT NULL) in {args.db}: {total_available} available, using {n}")
     if total_available < args.min_rows:
         sys.exit(
-            f"Need ≥{args.min_rows} rows to fit calibrator; have {total_available}. "
-            f"Continue running paper trading and re-run later."
+            f"Need ≥{args.min_rows} regime_prob rows; have {total_available}. "
+            f"Regime v2 must be deployed and generating predictions before Phase 3c can train."
         )
 
-    raw_probs = np.array([r[0] for r in rows], dtype=float)
-    directions = np.array([r[1] for r in rows], dtype=float)
-    outcomes = np.array([r[2] for r in rows], dtype=float)
-    regimes = np.array([r[4] for r in rows], dtype=object)
-    y_up = (directions == outcomes).astype(float)
+    regime_probs  = np.array([r[0] for r in rows], dtype=float)
+    abs_edges     = np.abs(np.array([r[1] for r in rows], dtype=float))
+    regimes       = np.array([r[2] for r in rows], dtype=object)
+    directions    = np.array([r[3] for r in rows], dtype=float)
+    outcomes      = np.array([r[4] for r in rows], dtype=float)
+    y_yes = np.where(directions == 1, outcomes, 1.0 - outcomes)
 
     # Load existing calibrator for pre-retrain Brier comparison
     pre_brier: float | None = None
     if Path(args.out).exists():
         try:
             existing = Calibrator.load(args.out)
-            pre_brier = existing.brier_score(raw_probs, y_up)
-            print(f"Existing calibrator: n_samples={existing.n_samples} passthrough={existing._passthrough}")
+            pre_brier = existing.brier_score(regime_probs, y_yes)
+            print(f"Existing calibrator: n_samples={existing.n_samples} passthrough={existing._passthrough} edge_aware={existing._edge_aware}")
             print(f"Pre-retrain Brier:  {pre_brier:.4f}")
         except Exception as exc:
             print(f"Could not load existing calibrator: {exc}")
@@ -120,27 +122,26 @@ def main() -> None:
         print(f"No existing calibrator at {args.out} — fitting fresh")
 
     cal = Calibrator()
-    cal.fit(raw_probs, y_up, regimes=regimes)
-    post_brier = cal.brier_score(raw_probs, y_up)
+    cal.fit(regime_probs, y_yes, regimes=regimes, edges=abs_edges)
+    post_brier = cal.brier_score(regime_probs, y_yes)
 
     print(f"Post-retrain Brier: {post_brier:.4f}")
-    print(f"Passthrough: {cal._passthrough}")
-    print(f"n_samples:   {cal.n_samples}")
+    print(f"Passthrough:  {cal._passthrough}")
+    print(f"Edge-aware:   {cal._edge_aware}")
+    print(f"n_samples:    {cal.n_samples}")
 
     if pre_brier is not None and post_brier > pre_brier:
         print(f"WARNING: new Brier {post_brier:.4f} > old Brier {pre_brier:.4f} — calibration degraded")
 
-    # Compression map: shows how aggressively the calibrator squashes strong k15 signals.
-    # Watch k15_raw=0.80 → k15_cal: if it rises above ~0.65, the calibrator is loosening
-    # (more data is teaching it to trust strong signals). If it stays < 0.60, compression
-    # is still severe and fusion + regime shrinks will produce near-zero edge.
+    # Compression map: regime_prob → calibrated_prob at different edge levels.
+    # Low edge = regime agrees with market; high edge = big gap between regime and market.
     checkpoints = [0.60, 0.70, 0.80, 0.90, 1.00]
-    print("\nCompression map (k15_raw → k15_cal, neutral regime):")
-    for raw in checkpoints:
-        cal_val = cal.transform(raw, regime="trending_up")
-        bar = "█" * int((cal_val - 0.50) * 200)
-        flag = "  ← loosening!" if cal_val > 0.65 and raw >= 0.80 else ""
-        print(f"  {raw:.2f} → {cal_val:.4f}  {bar}{flag}")
+    for edge_level, label in [(0.05, "tight edge (5¢)"), (0.15, "normal edge (15¢)"), (0.30, "wide edge (30¢)")]:
+        print(f"\nCompression map (regime_prob → cal_prob, trending_up, {label}):")
+        for raw in checkpoints:
+            cal_val = cal.transform(raw, regime="trending_up", edge=edge_level)
+            bar = "█" * int((cal_val - 0.50) * 200)
+            print(f"  {raw:.2f} → {cal_val:.4f}  {bar}")
 
     if args.dry_run:
         print("\n--dry-run set — calibrator NOT saved.")

@@ -1598,56 +1598,48 @@ class KronosV2:
                 logger.warning(f"Failed to check resolution for {position.ticker}: {exc}")
 
     def _refit_calibrator(self) -> None:
-        """Refit isotonic calibrator on k15_raw vs 15-min market outcomes (most recent 300 rows).
+        """Phase 3c: refit calibrator on regime_prob + signal_edge (most recent 300 rows).
 
-        k15 predicts the next 15-min close direction, which is exactly what KXBTC15M
-        markets resolve against.  k5 predicts the next 5-min close — a different
-        horizon — so using k5 against 15-min outcomes produces a misaligned (near-flat)
-        calibration curve.  We fall back to k5 only when no k15 rows exist yet.
+        Requires 200+ rows where regime_prob IS NOT NULL (i.e., regime v2 has been deployed
+        and has been generating predictions). If fewer than 200 regime_prob rows exist, the
+        calibrator stays as-is — no fallback to k15, since Phase 3c is the target behaviour.
+
+        signal_edge = abs(regime_prob - kalshi_mid_cents/100) at trade time, already stored
+        in both tables. Captures how much edge exists between the model and the market price.
         """
         try:
             self._redis.set("calibration_drift:pending_refits", 0)
             rows = self._db.execute(
-                """SELECT kronos_raw_15min, direction, outcome, deepseek_regime FROM (
-                       SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM trades
-                       WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL
+                """SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome FROM (
+                       SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp
+                       FROM trades
+                       WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
                        UNION ALL
-                       SELECT kronos_raw_15min, direction, outcome, timestamp, deepseek_regime FROM gate_rejections
-                       WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw_15min IS NOT NULL AND shadow = 0
+                       SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp
+                       FROM gate_rejections
+                       WHERE outcome IS NOT NULL AND aged_out=0 AND shadow = 0
+                         AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
                    ) ORDER BY timestamp DESC LIMIT 300"""
             ).fetchall()
-            refit_regimes: np.ndarray | None = None
-            if not rows:
-                # No k15 data yet — fall back to k5 to avoid a cold start
-                rows = self._db.execute(
-                    """SELECT kronos_raw, direction, outcome, NULL FROM (
-                           SELECT kronos_raw, direction, outcome, timestamp FROM trades
-                           WHERE outcome IS NOT NULL AND kronos_raw IS NOT NULL
-                           UNION ALL
-                           SELECT kronos_raw, direction, outcome, timestamp FROM gate_rejections
-                           WHERE outcome IS NOT NULL AND aged_out=0 AND kronos_raw IS NOT NULL AND shadow = 0
-                       ) ORDER BY timestamp DESC LIMIT 300"""
-                ).fetchall()
-                if not rows:
-                    return
-                logger.info("Calibrator refit: no k15 data yet — using k5 fallback")
-            else:
-                refit_regimes = np.array([r[3] for r in rows], dtype=object)
-            raw_probs = np.array([r[0] for r in rows], dtype=float)
-            directions = np.array([r[1] for r in rows], dtype=float)
-            outcomes_arr = np.array([r[2] for r in rows], dtype=float)
-            # Target = P(YES happened). outcome=1 means predicted direction was correct:
-            #   direction=1, outcome=1 → YES happened → y=1
-            #   direction=0, outcome=1 → NO happened  → y=0
+            if len(rows) < 200:
+                logger.info(
+                    f"Calibrator refit skipped: only {len(rows)} regime_prob rows "
+                    f"(need 200 — accumulating after regime v2 deploy)"
+                )
+                return
+            regime_probs  = np.array([r[0] for r in rows], dtype=float)
+            abs_edges     = np.abs(np.array([r[1] for r in rows], dtype=float))
+            refit_regimes = np.array([r[2] for r in rows], dtype=object)
+            directions    = np.array([r[3] for r in rows], dtype=float)
+            outcomes_arr  = np.array([r[4] for r in rows], dtype=float)
             y_yes = np.where(directions == 1, outcomes_arr, 1.0 - outcomes_arr)
-            self._calibrator.fit(raw_probs, y_yes, regimes=refit_regimes)
+            self._calibrator.fit(regime_probs, y_yes, regimes=refit_regimes, edges=abs_edges)
             os.makedirs("models", exist_ok=True)
             self._calibrator.save(config.CALIBRATOR_MODEL_PATH)
             self._drift_monitor.reset_baseline()
             logger.info(
-                f"Calibrator refit: n_samples={self._calibrator.n_samples} "
-                f"passthrough={self._calibrator._passthrough} "
-                f"sources=k15+trades+gate_rejections"
+                f"Calibrator Phase 3c refit: n_samples={self._calibrator.n_samples} "
+                f"passthrough={self._calibrator._passthrough} edge_aware={self._calibrator._edge_aware}"
             )
         except Exception as exc:
             logger.warning(f"Calibrator refit failed: {exc}")

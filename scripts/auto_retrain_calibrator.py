@@ -1,19 +1,16 @@
 # Suggested crontab entry (runs every 2 hours):
 # 0 */2 * * * cd "/Users/ezrakornberg/Kronos V2" && source .env && python3 scripts/auto_retrain_calibrator.py >> logs/auto_retrain_calibrator.log 2>&1
 #
+# Phase 3c: calibrator now trains on regime_prob + signal_edge (not k15_raw).
+# Only fires once regime v2 is deployed and 200+ rows have regime_prob populated.
+#
 # Retraining triggers (in priority order):
-#   1. Emergency: Brier score on last 50 k15-ready rows > 0.25 (worse than near-coin-flip)
-#   2. Row-based: +50 new k15-ready rows since last train (~every day at current volume)
-#   3. Time-based: 7 days elapsed since last train (catches volume dry spells)
+#   1. Emergency: Brier score on last 50 regime_prob rows > 0.25
+#   2. Row-based: +50 new regime_prob rows since last train
+#   3. Time-based: 7 days elapsed since last train
 #
-# Rolling window: uses min(count, 300) rows — calibrator is a 2-parameter model,
-# recency matters more than volume.
-#
-# Minimum rows: 883 (683 rows as of 2026-05-30 + 200 new observations required).
-# The calibrator is currently in passthrough mode. 500 rows was insufficient —
-# at that volume, regime diversity is too low for the logistic curve to beat
-# passthrough on the evaluation set. The next retrain requires 200 genuinely new
-# observations beyond the current dataset to justify fitting a non-passthrough model.
+# Minimum rows: 200 regime_prob rows (rows where regime_prob IS NOT NULL).
+# Before regime v2 deploys all regime_prob values are NULL — auto-retrain is a no-op.
 """
 Auto-retrain script for the Kronos V2 calibrator.
 
@@ -42,9 +39,9 @@ from btc_kalshi_system.models.calibrator import Calibrator
 
 _MARKER_PATH = "models/calibrator_last_trained.json"
 
-_ROW_TRIGGER_DELTA = 50            # retrain when +50 new k15 rows since last train
+_ROW_TRIGGER_DELTA = 50            # retrain when +50 new regime_prob rows since last train
 _TIME_TRIGGER_DAYS = 7             # retrain if 7 days elapsed since last train
-_MIN_ROWS = 883                    # refuse to retrain below this (683 rows 2026-05-30 + 200 new required)
+_MIN_ROWS = 200                    # refuse to retrain below this — requires regime v2 deployed
 _WINDOW = 300                      # rolling window passed to train_calibrator.py
 _EMERGENCY_BRIER_THRESHOLD = 0.25  # worse than near-coin-flip → emergency retrain
 
@@ -52,18 +49,18 @@ _EMERGENCY_BRIER_THRESHOLD = 0.25  # worse than near-coin-flip → emergency ret
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 def get_k15_ready_count(db_path: str) -> int:
-    """Return combined COUNT(*) of k15-ready rows from trades + gate_rejections."""
+    """Return combined COUNT(*) of Phase 3c-ready rows (regime_prob IS NOT NULL)."""
     if not Path(db_path).exists():
         sys.exit(f"Database not found: {db_path}")
     conn = sqlite3.connect(db_path)
     try:
         count = conn.execute(
             "SELECT COUNT(*) FROM ("
-            "    SELECT kronos_raw_15min FROM trades"
-            "    WHERE outcome IS NOT NULL AND features_stale = 0 AND kronos_raw_15min IS NOT NULL"
+            "    SELECT regime_prob FROM trades"
+            "    WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL"
             "    UNION ALL"
-            "    SELECT kronos_raw_15min FROM gate_rejections"
-            "    WHERE outcome IS NOT NULL AND kronos_raw_15min IS NOT NULL"
+            "    SELECT regime_prob FROM gate_rejections"
+            "    WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL"
             "      AND shadow = 0"
             ")"
         ).fetchone()[0]
@@ -96,10 +93,9 @@ def compute_emergency_brier(db_path: str, model_path: str) -> tuple[float, bool]
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT kronos_raw_15min, direction, outcome FROM trades"
+            "SELECT regime_prob, direction, outcome FROM trades"
             " WHERE outcome IS NOT NULL"
-            "   AND features_stale = 0"
-            "   AND kronos_raw_15min IS NOT NULL"
+            "   AND regime_prob IS NOT NULL"
             " ORDER BY timestamp DESC LIMIT 50"
         ).fetchall()
     finally:
@@ -108,12 +104,12 @@ def compute_emergency_brier(db_path: str, model_path: str) -> tuple[float, bool]
     if not rows:
         return None
 
-    raw_probs = np.array([r[0] for r in rows], dtype=float)
-    directions = np.array([r[1] for r in rows], dtype=float)
-    outcomes = np.array([r[2] for r in rows], dtype=float)
-    y_up = (directions == outcomes).astype(float)
+    regime_probs = np.array([r[0] for r in rows], dtype=float)
+    directions   = np.array([r[1] for r in rows], dtype=float)
+    outcomes     = np.array([r[2] for r in rows], dtype=float)
+    y_yes = np.where(directions == 1, outcomes, 1.0 - outcomes)
 
-    brier = cal.brier_score(raw_probs, y_up)
+    brier = cal.brier_score(regime_probs, y_yes)
     return float(brier), False
 
 

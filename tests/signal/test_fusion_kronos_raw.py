@@ -87,7 +87,12 @@ def test_get_signal_calls_mc_when_kronos_raw_none():
 
 
 def test_get_signal_uses_provided_kronos_raw_value():
-    """Calibrator receives the provided kronos_raw value, not the MC output."""
+    """Phase 3c: provided kronos_raw is stored on the signal; calibrator transforms regime_prob."""
     engine = _make_engine(kronos_mc_return=0.50, kronos_cal=0.50)
-    engine.get_signal("15min", 95000.0, kronos_raw=0.90)
-    engine._calibrator.transform.assert_called_once_with(0.90, regime="trending_up")
+    result = engine.get_signal("15min", 95000.0, kronos_raw=0.90)
+    # kronos_raw stored on signal
+    assert result.kronos_raw == pytest.approx(0.90)
+    assert result.kronos_calibrated == pytest.approx(0.90)  # Phase 3c: k15_raw, not calibrated
+    # calibrator called with regime_prob (0.65 from mock), not kronos_raw (0.90)
+    call_args = engine._calibrator.transform.call_args
+    assert call_args.args[0] == pytest.approx(0.65)  # regime_prob from mock

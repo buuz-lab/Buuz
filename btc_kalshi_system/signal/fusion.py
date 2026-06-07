@@ -161,12 +161,11 @@ class SignalFusionEngine:
             kronos_raw = self._kronos.run_monte_carlo(self._store, threshold=strike)
         self._last_kronos_raw_5min = kronos_raw
         self._last_kronos_raw_15min = kronos_raw_15min
-        # Calibrate using k15 when available — k15 predicts the 15-min close direction,
-        # which is exactly what KXBTC15M markets resolve against.  k5 predicts the next
-        # 5-min close (misaligned horizon), so using it produces a near-flat calibration.
-        # Fall back to k5 on the rare candle where k15 hasn't computed yet.
-        _cal_input = kronos_raw_15min if kronos_raw_15min is not None else kronos_raw
-        kronos_cal = self._calibrator.transform(_cal_input, regime=deepseek_regime)
+        # Phase 3c: calibrator now trains on regime_prob, not k15_raw.
+        # kronos_cal holds raw k15 (for Gate 11 / TradingSignal.kronos_calibrated).
+        # combined is computed via calibrator.transform(regime_prob, edge=signal_edge) below.
+        # In passthrough mode transform(regime_prob) = regime_prob — identical to pre-3c behaviour.
+        kronos_cal = kronos_raw_15min if kronos_raw_15min is not None else kronos_raw
         kronos_direction = 1 if kronos_cal >= 0.5 else 0
 
         # Compute features ONCE per signal so the values we feed the regime model
@@ -208,7 +207,11 @@ class SignalFusionEngine:
                 _regime_in_fusion = 0.5
             else:
                 _regime_in_fusion = regime_prob
-            combined = _KRONOS_WEIGHT * kronos_cal + _REGIME_WEIGHT * _regime_in_fusion
+            # Phase 3c: calibrate regime_prob with signal_edge context.
+            # signal_edge = how far regime_prob is from the market price — a measure of conviction.
+            # Same edge used by Gate 5 and logged to trades.signal_edge.
+            _signal_edge = abs(_regime_in_fusion - self._market_context.get("kalshi_mid_cents", 50.0) / 100.0)
+            combined = self._calibrator.transform(_regime_in_fusion, regime=deepseek_regime, edge=_signal_edge)
             if deepseek_regime == "high_uncertainty":
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
             elif deepseek_regime == "ranging":
