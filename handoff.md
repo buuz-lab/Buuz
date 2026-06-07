@@ -4,13 +4,210 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 35/36 complete. System fully code-complete. Full deployment plan: regime v2 deploys ~June 8-9 locally → migrate to cloud server ~June 10-11 → go live from server ~June 15-18. Phase 3c auto-fires ~June 27-July 1. All deploy artifacts in `deploy/`.
+**Current focus:** Session 39+40 complete. 41 features (was 33). 556 tests. Gate 4 shadow mode live. Trending DOWN half-Kelly bootstrap-only. Service restarted — `features_early` now logging. Three layers of entry-timing improvements planned (see NEXT STEPS below): Gate 12 tighten to 10%, minimum 3% progress floor, DerivativesFeed 60s refresh. T+30s Phase B data-gated (~June 11-12). Regime v2 full train ~June 8-9.
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-06 session 35/36: Cloud migration prepared. systemd service, Linux cron jobs, and 7-phase migration checklist in `deploy/`. Target sequence: local regime v2 deploy June 8-9 → server migration June 10-11 → go live June 15-18.**
+**As of 2026-06-07 session 39+40: 41 features (added liq_net_norm, eth_direction_15min, okx_spot_imbalance, pcr_delta, skew_delta, deepseek_dir_prob, cvd_price_divergence, recent_up_fraction). Gate 4 shadow mode live. Trending DOWN half-Kelly in bootstrap only. Service restarted — features_early now logging. 556 tests passing. Three entry-timing improvements planned for next session (see below).**
+
+---
+
+### What was built — session 39+40
+
+| What | Status |
+|---|---|
+| `liq_net_norm` | OKX liquidation cascade net pressure (last 15 min, -1 to +1). In `derivatives_feed.py`. |
+| `eth_direction_15min` | Previous ETH/USDT 15-min candle direction via ccxt. In `derivatives_feed.py`. |
+| `okx_spot_imbalance` | OKX spot BTC/USDT order book bid-ask depth imbalance (-1 to +1). In `derivatives_feed.py`. |
+| `pcr_delta` | PCR 5-min rate of change. In `deribit_options_feed.py` via instance state. |
+| `skew_delta` | Skew 5-min rate of change. In `deribit_options_feed.py`. |
+| `deepseek_dir_prob` | DeepSeek probability BTC closes higher next candle. Added to prompt + parser. |
+| `cvd_price_divergence` | `cvd_normalized * sign(brti_momentum_15min)` — positive=confirming, negative=divergence. Computed in `fusion._regime_features()`. |
+| `recent_up_fraction` | Fraction of last 8 completed 15-min candles that closed up. Computed in `fusion._regime_features()`. Fixes bear-bias in trending regimes. |
+| Gate 4 shadow mode | Logs "would block" in paper mode, enforces on live. Was hardcoded True. Now shows rolling edge. |
+| Trending DOWN half-Kelly | Halves Kelly on DOWN bets in trending_up/trending_down — **bootstrap only** (auto-removes when regime.pkl exists). Based on Kronos-era data: -$1.17/trade (trending_up DOWN) and -$3.03/trade (trending_down DOWN). Re-evaluate after 50+ regime v2 trending trades. |
+| Service restart | `features_early` JSON blob (41-feature T+30s snapshot) now logging. Was deployed in session 38 but service not restarted. Now active. |
+
+**P&L audit (Kronos era, 716 trades):**
+- ranging: 486 trades, 53.7% WR, **-$0.08/trade** — nearly breakeven, DON'T penalize
+- high_uncertainty: 142 trades, 48.6% WR, -$0.59/trade — already 10:1 gated
+- trending_down: 34 trades, 44.1% WR, -$0.77/trade — DOWN bets worst (-$3.03/trade)
+- trending_up: 54 trades, 48.1% WR, -$0.97/trade — DOWN bets worst (-$1.17/trade)
+
+**Candle progress vs P&L (Kronos era):**
+- 0–5%: 97 trades, 54.6% WR, **+$0.21/trade** ← edge window
+- 5–10%: 34 trades, 55.9% WR, **+$0.23/trade** ← edge window
+- 10–15%: 9 trades, 33.3% WR, -$2.62/trade ← sharp decay
+- 15–20%: 7 trades, 28.6% WR, -$5.74/trade ← catastrophic
+- 20%+: 218 trades, 45.9% WR, -$0.69/trade ← pre-Gate-12 history
+
+Edge is ENTIRELY in the 0–90 second window. Gate 12 upper cap of 20% is too loose.
+
+**T+30s data accumulation (as of session end):**
+- `kalshi_early_mid` rows: ~65, accumulating at ~32/day (not 96/day — WS orderbook not always fresh at 3-7%)
+- `features_early` rows: 0 before restart, now logging after restart
+- ETA 200 rows: ~June 11-12 (4 days post-restart)
+
+---
+
+### NEXT SESSION — Three entry-timing improvements (implement in order)
+
+These are designed together. All three should be built and committed before deploying.
+
+---
+
+#### Layer 1: Gate 12 upper cap → 10% (data-driven)
+
+**Why:** 10-15% = -$2.62/trade, 15-20% = -$5.74/trade. Edge is gone by 90s. Current max cap of 20% in quiet markets is harmful.
+
+**File:** `btc_kalshi_system/execution/pretrade_checklist.py` — `RuleBasedProgressCap.get_cap()`
+
+**Change:** In `get_cap()`, remove the middle branch (high_vol OR wide_spread → 10%) since both cases now return 10%. Return 0.10 in all non-extreme conditions:
+
+```python
+def get_cap(self, volatility: float, spread: float, volume_ratio: float) -> float:
+    # Data: 10-15% progress = -$2.62/trade, 15-20% = -$5.74/trade — edge gone by 90s.
+    # Upper bound is 10% in all conditions; 5% only when both volatile AND wide spread.
+    high_vol    = volatility > self._HIGH_VOL
+    wide_spread = spread    > self._WIDE_SPREAD
+    if high_vol and wide_spread:
+        return 0.05
+    else:
+        return 0.10
+```
+
+**Also update Gate 12 comment** at line ~122 in `pretrade_checklist.py`:
+```
+# Thresholds: _HIGH_VOL=0.3%/5min, _WIDE_SPREAD=4¢. Rules: both→5%, else→10%.
+```
+
+**Tests to update:** `tests/execution/test_progress_cap_model.py`
+- `test_low_vol_tight_spread_allows_20_pct` → rename and change assert to `== 0.10`
+- `test_high_vol_tight_spread_gives_10_pct` → still 0.10, passes unchanged
+- `test_low_vol_wide_spread_gives_10_pct` → still 0.10, passes unchanged
+- Add: `test_quiet_market_cap_is_10_pct` confirming the new max
+
+User still wants gate_rejections tracked as usual — Gate 12 already logs to gate_rejections, no change needed there.
+
+---
+
+#### Layer 2A: Gate 12 minimum 3% progress floor
+
+**Why:** Trading at T=0 means Kalshi hasn't had 30s to reprice. The data shows 0-5% and 5-10% are both profitable, so there's no urgency to trade at T=0 specifically. Waiting for T=27s gives: (1) current-candle Kalshi drift available, (2) WS orderbook has repriced, (3) aligns with `features_early` training distribution.
+
+**File:** `btc_kalshi_system/execution/pretrade_checklist.py` — Gate 12 block
+
+**Change:** Add a minimum progress check ABOVE the current `if candle_progress > _cap:` check:
+
+```python
+# Gate 12 — Dynamic candle progress window (floor 3%, ceiling 5-10%)
+# Floor: wait for T+27s so Kalshi can reprice to the candle open (avg 2.71¢ move in 30s).
+# Ceiling: edge decays rapidly after 90s (10-15% = -$2.62/trade, 15-20% = -$5.74/trade).
+_PROGRESS_FLOOR = 0.03
+candle_progress = (signal.regime_features or {}).get("candle_progress", 0.0) or 0.0
+_volatility  = (signal.regime_features or {}).get("brti_volatility_1h", 0.0) or 0.0
+_spread      = (signal.market_context  or {}).get("kalshi_spread_normalized", 0.0) or 0.0
+_vol_ratio   = (signal.regime_features or {}).get("volume_ratio_1h", 1.0) or 1.0
+_cap = _PROGRESS_CAP_MODEL.get_cap(_volatility, _spread, _vol_ratio)
+if candle_progress < _PROGRESS_FLOOR:
+    return fail(12, f"Candle progress {candle_progress:.3f} below {_PROGRESS_FLOOR} floor — waiting for T+27s Kalshi reaction")
+if candle_progress > _cap:
+    return fail(12, (
+        f"Candle progress {candle_progress:.2f} exceeds dynamic cap {_cap:.2f} "
+        f"(vol={_volatility:.4f} spread={_spread:.3f})"
+    ))
+```
+
+**Tests:** Add to `tests/execution/test_pretrade_checklist.py`:
+```python
+def test_gate12_fires_when_progress_below_floor(checklist):
+    """Candle at 1% progress — too early, must wait for T+27s."""
+    signal = make_signal()
+    signal.regime_features["candle_progress"] = 0.01
+    r = checklist.run(**base_kwargs(signal))
+    assert r.failed_gate == 12
+    assert "floor" in r.failed_reason
+
+def test_gate12_allows_progress_at_floor(checklist):
+    """Candle at exactly 3% progress — minimum met, should pass Gate 12."""
+    signal = make_signal()
+    signal.regime_features["candle_progress"] = 0.03
+    r = checklist.run(**base_kwargs(signal))
+    assert r.failed_gate != 12  # Gate 12 passes
+```
+
+Note: `make_signal(regime_features={"candle_progress": 0.03, ...})` — check the test fixture to pass regime_features correctly.
+
+---
+
+#### Layer 3: DerivativesFeed 60s refresh cycle
+
+**Why:** Currently 300s (5 min). Kalshi trades in the first 90s of each candle. Our CVD, liquidations, and order flow data could be up to 5 min stale. At 60s, features are at most 60s old at any trade. API rate limits are trivially satisfied at 60s (OKX: 20 req/2s; all others similar).
+
+**Note on `oi_delta_pct`:** This is computed as `(curr_oi - prev_oi) / prev_oi` against the previous cycle's OI. At 60s instead of 300s, values will be ~5x smaller. This is a distribution shift from historical training data. Acceptable because: regime v2 is about to retrain at 672 rows, and all future training rows will use the 60s scale. XGBoost handles mixed-scale training data via tree splits.
+
+**Files:** `btc_kalshi_system/data/derivatives_feed.py`
+
+**Changes:**
+```python
+# Line 14-15: change constants
+_REFRESH_INTERVAL = 60    # was 300 — 1 min cycle for fresh CVD/liq/imbalance at trade time
+_FEATURES_TTL = 360       # was 1800 — 6x refresh interval (survives ~5 failed cycles)
+
+# Line 105: update sleep (refresh 10s before TTL instead of 60s before)
+await asyncio.sleep(_REFRESH_INTERVAL - 10 if success else _REFRESH_INTERVAL)
+# was: _REFRESH_INTERVAL - 60
+```
+
+**Tests:** No tests depend on the refresh interval constant directly. Run full suite after change to confirm no regressions. The `test_derivatives_feed_okx_stale.py` tests mock at method level and are unaffected.
+
+**DeribitOptionsFeed** (separate feed, `deribit_options_feed.py`): keep at 300s. Options PCR/skew don't change fast enough to benefit, and `pcr_delta`/`skew_delta` are computed as per-cycle deltas — changing the interval would shift their scale inconsistently with historical training data.
+
+---
+
+#### After all three: run full test suite
+
+```bash
+cd "/Users/ezrakornberg/Kronos V2" && python3 -m pytest --tb=short -q 2>&1 | tail -10
+```
+
+Expect 556+ passing. Then restart service:
+```bash
+launchctl kickstart -k gui/$(id -u)/com.kronos.v2
+```
+
+---
+
+#### T+30s Phase B — inference switch (data-gated, ~June 11-12)
+
+**Trigger:** `SELECT COUNT(*) FROM candle_features WHERE features_early IS NOT NULL AND features_stale=0` ≥ 200
+
+**What to build when data is ready:**
+
+1. **`scripts/train_regime.py`** — new flag `--use-early-features`:
+   - Load `features_early` JSON column as X instead of the 41 feature columns
+   - Parse: `X = pd.json_normalize(df["features_early"].apply(json.loads))`
+   - Labels still from `btc_direction`  
+   - Output to `models/regime_early.pkl`
+   - Same CV/holdout structure as current train
+
+2. **`main.py`** — inject current-candle drift before `get_signal()`:
+   - In `_process_market()`, after detecting candle is in 3-10% progress window:
+   - Read current WS orderbook mid: `current_mid = (bid + ask) / 200.0`
+   - Read `kalshi_open_mid` for this candle from `_open_snaps` (already stored)
+   - Compute: `current_drift = current_mid - kalshi_open_mid`
+   - Call: `self._fusion.set_kalshi_early_drift(current_drift)` BEFORE `get_signal()`
+   - This replaces prior-candle drift with current-candle drift at decision time
+
+3. **`fusion.py`** — `_REGIME_PAUSE_FLAG` already handles model switching. Load `regime_early.pkl` if it exists alongside `regime.pkl`.
+
+**Key distinction:** `kalshi_early_drift` as feature 33 currently = PREVIOUS candle's first-30s Kalshi drift (lagged context). After Phase B = CURRENT candle's first-30s drift (live signal). This is the structural edge: Kalshi moved 2.71¢ avg in the first 30s — knowing which direction BEFORE making the trade is the information advantage.
+
+**Baseline shifts** from `kalshi_open_mid` to `kalshi_early_mid` for go-live criteria.
+
+---
 
 ---
 
@@ -31,7 +228,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 #### Signal layer
 - **Regime v2 XGBoost** (`models/regime.pkl` — not yet deployed, bootstrap mode)
-  - **32 features** (was 29): CVD (normalized/velocity/acceleration), funding (rate/trend/proximity), OI delta, basis spread, BRTI volatility, momentum (5min/15min), range breakout, SR proximity, tape speed, large print direction, volume ratio, ATM IV, IV/RV spread, PCR OI, term structure slope, skew 25d, **kalshi_open_imbalance** (NEW), BTC 24h return, Kronos raw k5/k15, candle progress, hour sin/cos, **btc_spx_corr_8d** (NEW), **btc_qqq_corr_8d** (NEW)
+  - **33 features** (was 29→32→33): CVD (normalized/velocity/acceleration), funding (rate/trend/proximity), OI delta, basis spread, BRTI volatility, momentum (5min/15min), range breakout, SR proximity, tape speed, large print direction, volume ratio, ATM IV, IV/RV spread, PCR OI, term structure slope, skew 25d, **kalshi_open_imbalance** (session 35), BTC 24h return, Kronos raw k5/k15, candle progress, hour sin/cos, **btc_spx_corr_8d**, **btc_qqq_corr_8d** (session 35), **kalshi_early_drift** (session 38)
   - Training source: `candle_features` table — ALL 15-min candles regardless of whether a trade fired (no selection bias)
   - Label: `btc_direction = (close > open)` — clean ground truth
   - Walk-forward 3-fold CV with holdout guard; only deploys if candidate beats deployed model on same 100 rows
@@ -54,23 +251,32 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 | 8 | Kalshi consensus (confidence-tiered) | No |
 | 11 | Overconfidence guard | No |
 | 12 | **Dynamic candle progress cap** (RuleBasedProgressCap: 5/10/20%) — **NEW session 35** | After LogisticProgressCap trained (200+ regime v2 rows) |
-| 13 | Kelly hard cap ($8) | After Phase 3c calibrator |
-| 14 | Edge ceiling (20¢) | After Phase 3c calibrator |
+| 13 | Kelly hard cap ($8) | **Keep indefinitely** — blunt protection floor; revisit only after 3+ months live calibrated data |
+| 14 | Edge ceiling (20¢) | **Keep indefinitely** — blocks regime model's worst predictions; confirmed in session 37 backtest |
 
 #### Sizing layer
 - **KellySizer** — fractional Kelly on regime_prob (or kronos_cal in bootstrap)
-- **Phase 3c calibrator** (code complete, waiting for data) — maps `[regime_prob, regime_prob², deepseek_regime, signal_edge]` → calibrated_prob. `signal_edge = abs(regime_prob - market_price)`. Edge-aware so two trades at same regime_prob but different market pricing get different Kelly sizes.
-  - **Auto-fires at 200+ live regime_prob rows** (after regime v2 deploys). `auto_retrain_calibrator.py` counts `regime_prob IS NOT NULL` rows.
-  - In passthrough today: `combined = calibrator.transform(regime_prob)` = `regime_prob` — zero behavioral change until data arrives.
-  - On deploy: removes Gates 13 and 14 (Kelly cap + edge ceiling no longer needed once calibrated).
+- **Phase 3c calibrator** (code complete, waiting for data) — maps **7 inputs** → calibrated_prob:
+  - `regime_prob`, `regime_prob²` — raw signal + quadratic curve
+  - `deepseek_regime` — regime context (trending/ranging/uncertain)
+  - `signal_edge` = `abs(regime_prob - market_price)` — how far model is from Kalshi
+  - `disagreement` = `abs(regime_prob - kronos_raw_15min)` — compress when signals fight (session 38)
+  - `volatility` = `brti_volatility_1h` — high vol = stale features = compress (session 38)
+  - `spread` = `kalshi_spread_normalized` — wide spread = noisy edge = compress (session 38)
+  - Both `volatility` and `spread` now logged to `gate_rejections` for counterfactual training coverage.
+  - **Auto-fires at 500+ live regime_prob rows.** `auto_retrain_calibrator.py` counts `regime_prob IS NOT NULL` rows.
+  - In passthrough today: `combined = calibrator.transform(regime_prob, ...)` = `regime_prob` — zero behavioral change until data arrives.
+  - **Gates 13 and 14 are NOT removed on Phase 3c deploy.** They stay as a permanent size-protection floor. Revisit only after 3+ months of live calibrated data.
   - ETA: ~June 27 - July 1 (18-20 days after regime v2 deploys at ~10-11 trades/day).
 
 #### Data instrumentation (candle_features columns)
-- `btc_direction`, `features_stale`, `deribit_stale`, all **32** `_FEATURE_ORDER` features (includes kalshi_open_imbalance, btc_spx_corr_8d, btc_qqq_corr_8d)
-- `kalshi_open_mid/spread/depth/imbalance` — T+0 Kalshi snapshot — **imbalance NEW session 35**
+- `btc_direction`, `features_stale`, `deribit_stale`, all **33** `_FEATURE_ORDER` features (includes kalshi_open_imbalance, btc_spx_corr_8d, btc_qqq_corr_8d, **kalshi_early_drift**)
+- `kalshi_open_mid/spread/depth/imbalance` — T+0 Kalshi snapshot
 - `kalshi_early_mid/progress` — T+30s Kalshi snapshot (3-7% candle progress)
+- **`kalshi_early_drift`** — `kalshi_early_mid - kalshi_open_mid`; 30s market reaction; feature 33; injected into fusion via `set_kalshi_early_drift()` at candle close — **NEW session 38**
+- **`features_early`** — JSON of all 33 regime features at T+30s snap time; for future T+30s model training — **NEW session 38**
 - `kalshi_mid_candle_mid/spread/progress` — 40-60% candle snapshot
-- `would_exit` / `would_exit_price_cents` — paper exit signal at mid-candle — **NEW session 35**
+- `would_exit` / `would_exit_price_cents` — paper exit signal at mid-candle
 - `regime_prob` — regime model's prob_up at candle close (NULL in bootstrap, populates after deploy)
 
 #### Retrain automation
@@ -86,18 +292,23 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 ### Current metrics (session 35 end)
 
 **Training progress:**
-- ~**672 qualifying rows expected ~June 8-9** (was 518 at session 34 start, +~96/day)
-- All 530 tests passing
-- New features (`kalshi_open_imbalance`, `btc_spx_corr_8d`, `btc_qqq_corr_8d`) accumulating from session 35 deploy forward — historical rows get NULL (XGBoost treats as missing)
+- ~**672 qualifying rows expected ~June 8-9** (~539 as of session 38, +~96/day)
+- All 530 tests passing. 33 features total.
+- New features accumulating: `kalshi_open_imbalance` (session 35), `btc_spx_corr_8d/btc_qqq_corr_8d` (session 35), `kalshi_early_drift` (session 38, 48 rows backfilled). Historical rows get NULL for new features; XGBoost treats as missing.
+- **Kronos k15 edge confirmed: Brier 0.1981 vs Kalshi 0.2275 on 278 rows (13% advantage, 70.5% vs 59.4% accuracy).** Signal is real — losses are calibration/regime-filtering problem, not signal absence.
 
-**Regime v2 dry run (515 rows, session 34):**
-- CV Brier: 0.211 ± 0.027 | CV Accuracy: 70.7%
-- Holdout Brier: 0.116 | Holdout Accuracy: 83% (inflated by all-bear holdout)
-- Contextuality: gap=0.167 ✓
-- NOTE: Next retrain will use 32 features; historical NULL rows for the 3 new features are fine (XGBoost missing value handling)
+**Regime v2 dry run (539 rows, session 37 — 1-candle lag, honest):**
+- CV Brier: 0.3249 ± 0.0226 | CV Accuracy: 45% — correctly fires "DO NOT deploy" (needs more data)
+- Holdout Brier: 0.2790 | Holdout Accuracy: 59% (direction calls beating coin flip; Brier miscalibrated)
+- Contextuality: gap=-0.044 ✗ (model over-fading Kronos in trending — insufficient regime diversity at 539 rows)
+- NOTE: Previous session 34 metrics (CV 0.211, holdout 0.116, 83% acc) were inflated by same-candle leakage. Session 37 fixed: `build_xy` now returns features[N]→direction[N+1].
 
-**Kalshi edge test (252 rows, session 34):**
-- k15 Brier: **0.186** vs Kalshi open: **0.226** → **+17.9% advantage**
+**Backtest vs Kalshi (session 37, 1-candle lag, 162-row test):**
+- Model Brier 0.2819 vs **Kalshi T=0 0.2332** → model +0.049 worse. Gate 14 correct: >20¢ edge is model's worst bucket (Δ +0.099).
+- Model Brier 0.2795 vs **Kalshi T+30s 0.2461** → model +0.034 worse (N=43 — small sample).
+- < 10¢ edge shows slight model advantage vs T+30s Kalshi (Δ -0.017) — direction of eventual alpha.
+- `kalshi_open_mid` stored as **0–1 probability, NOT cents** — do not divide by 100.
+- Kalshi moves 2.71¢ on average in the first 30 seconds; 1-in-5 candles crosses 50¢ midline. T+30s Kalshi is a harder baseline than T=0.
 
 **Gate 12 dynamic cap (session 35):**
 - Thresholds are initial estimates: `_HIGH_VOL=0.003`, `_WIDE_SPREAD=0.04`
@@ -118,12 +329,13 @@ When `get_qualifying_count("trades.db") >= 672`, the cron will auto-retrain. Bef
 python3 scripts/train_regime.py --dry-run
 ```
 
-Deploy if ALL pass:
-- [ ] CV Brier < 0.22
-- [ ] Holdout accuracy > 65%
+Deploy if ALL pass (thresholds recalibrated for 1-candle lag — old 0.22/65% were leakage-inflated):
+- [ ] CV Brier < 0.28 (approaching Kalshi's ~0.23; coin flip = 0.25)
+- [ ] Holdout Brier < 0.27
+- [ ] Holdout accuracy > 54%
 - [ ] Top feature importance < 20%
 - [ ] CV fold 3 Brier < fold 1 Brier (model still improving with data)
-- [ ] Contextuality gap > 0.10 (or at least consistent across 2-3 runs)
+- [ ] Contextuality gap > 0.10
 
 Then save:
 ```bash
@@ -163,7 +375,7 @@ _signal_edge = abs(_regime_in_fusion - self._market_context.get("kalshi_mid_cent
 combined = calibrator.transform(_regime_in_fusion, regime=deepseek_regime, edge=_signal_edge)
 ```
 
-After Phase 3c deploys: **remove Gates 13 and 14**.
+After Phase 3c deploys: **keep Gates 13 and 14** as permanent size-protection floor. Revisit only after 3+ months of live calibrated data shows they are consistently leaving money on the table.
 
 ---
 
@@ -176,6 +388,28 @@ After Phase 3c deploys: **remove Gates 13 and 14**.
 | `raw_http_client.py` bug fix | Fixed: missing `action: "buy"` field + sending both price fields (should be exactly one) |
 | Disagreement neutralization removed | `fusion.py` — regime v2 signal used directly on Kronos disagreements. Was a regime v1 holdover; with Kronos embedded as features disagreements are informative, not noise. |
 | Cloud migration artifacts | `deploy/kronos-v2.service` (systemd), `deploy/crontab-linux.txt`, `deploy/MIGRATION.md` (7-phase checklist) |
+
+**Session 37 additions:**
+
+| What | Status |
+|---|---|
+| `train_regime.py` 1-candle lag fix | `build_xy` now returns features[N]→direction[N+1]. Same-candle training was leaking `brti_momentum_15min` (encodes candle's own return = the label). Deploy thresholds recalibrated: CV Brier < 0.28, holdout Brier < 0.27, holdout Acc > 54%. |
+| Regime v2 backtest vs Kalshi | At 539 rows (1-candle lag): model Brier 0.2851 vs Kalshi 0.2325. Model worse than Kalshi and slightly worse than coin flip. Expected at pre-training-minimum data volume. Gate 14 correctly blocks the model's worst predictions (>20¢ edge = Brier +0.10 vs Kalshi). |
+
+**Session 38 additions:**
+
+| What | Status |
+|---|---|
+| Calibrator upgraded to 7 inputs | Added `disagreement` (abs(regime_prob - k15)), `volatility` (brti_volatility_1h), `spread` (kalshi_spread_normalized). Both volatility and spread now also logged to `gate_rejections` for full training coverage. |
+| Gates 13/14 kept permanently | Not removed on Phase 3c deploy. Permanent size-protection floor. |
+| `kalshi_early_drift` (feature 33) | 30s Kalshi market reaction added as regime model feature. `fusion.set_kalshi_early_drift()` setter; injected at candle close. 48 rows backfilled. |
+| `features_early` JSON blob | Full 33-feature snapshot at T+30s snap time for future T+30s model training. Data gate: 200+ `kalshi_early_mid` rows (~June 20-25). |
+| P&L audit | -$198 on 715 trades. Kronos k15 has genuine edge (70.5% acc vs Kalshi 59.4%). Losses from miscalibration + ranging/uncertainty regimes. Gate 2 rejections (1883) are Kelly=0 blocks — correct, not gate misconfiguration. |
+| `kalshi_open_imbalance` depth bug fixed | `depth_bid/ask` was taking last-level qty (always 0) instead of summing all levels. 329 historical rows unrecoverable; all future rows will populate correctly. |
+| Regime window cap removed | `_WINDOW = None` in `auto_retrain_regime.py` — uses ALL qualifying candles, no rolling cap. Preserves cross-regime knowledge as it accumulates. |
+| Calibrator window widened | `_WINDOW = 300 → 1000` — was ~3 days at current trade rate; now ~10 days. More stable for LogisticRegression. |
+| Calibrator `_MIN_SAMPLES` raised | `100 → 150` — 7 inputs × 20 samples/feature = 140 minimum; 150 adds margin. |
+| Manual deploy hold flag | `models/regime_deploy_hold.flag` created. Blocks auto-deploy at 672 rows until manual `--dry-run` review. Remove with `rm models/regime_deploy_hold.flag` after review. |
 
 **System is code-complete.** Every remaining milestone is data-gated. No more build sessions needed before go-live.
 
@@ -190,7 +424,7 @@ After Phase 3c deploys: **remove Gates 13 and 14**.
 | **~June 8-9** | Regime v2 full train fires locally. Run `--dry-run`, deploy if checklist passes. |
 | **~June 10-11** | Migrate to cloud server (see `deploy/MIGRATION.md`). Confirm paper trades firing on server. |
 | **~June 15-18** | Go live from server: `PAPER_TRADING=false` in `.env` + `systemctl restart kronos-v2`. Criteria: Brier(regime_prob) < Brier(kalshi_open) on ≥20 rows AND paper P&L positive. |
-| **~June 27 - July 1** | Phase 3c calibrator auto-fires (200 regime_prob rows). Gates 13+14 removed automatically. |
+| **~June 27 - July 1** | Phase 3c calibrator auto-fires (500 regime_prob rows). Gates 13+14 stay — calibrator improves sizing, not gate thresholds. |
 
 #### SERVER MIGRATION — `deploy/MIGRATION.md`
 
@@ -226,19 +460,31 @@ journalctl -u kronos-v2 -f | grep "Order placed"
 ---
 
 #### IMMEDIATE (~June 8-9): Regime v2 full train
-- Cron auto-triggers at 672 rows. Run manually first:
-  ```bash
-  python3 scripts/train_regime.py --dry-run
-  ```
-- Deploy checklist (same as session 34):
-  - [ ] CV Brier < 0.22
-  - [ ] Holdout accuracy > 65%
-  - [ ] Top feature importance < 20%
-  - [ ] CV fold 3 Brier < fold 1 Brier
-  - [ ] Contextuality gap > 0.10
-- Save + restart: `python3 scripts/train_regime.py --db trades.db --out models/regime.pkl && launchctl kickstart -k gui/$(id -u)/com.kronos.v2`
-- After deploy: `regime_prob` populates, live Brier tracking activates, Phase 3c clock starts
-- All post-deploy milestones run **in parallel** — no sequential waiting required
+
+**The cron will fire but is BLOCKED by `models/regime_deploy_hold.flag`.** Run manually first:
+```bash
+python3 scripts/train_regime.py --dry-run
+```
+
+Review checklist — deploy if ALL pass (1-candle lag thresholds):
+- [ ] CV Brier < 0.28
+- [ ] Holdout Brier < 0.27
+- [ ] Holdout accuracy > 54%
+- [ ] Top feature importance < 20%
+- [ ] CV fold 3 Brier < fold 1 Brier
+- [ ] Contextuality gap > 0.10
+
+**Deploy even if checklist fails** — the cron won't auto-deploy (hold flag), but you should manually deploy anyway to start the regime_prob data flow. Gates 13/14 protect against bad trades.
+
+```bash
+# Review complete — allow auto-deploy going forward:
+rm models/regime_deploy_hold.flag
+# Deploy now:
+python3 scripts/train_regime.py --db trades.db --out models/regime.pkl
+launchctl kickstart -k gui/$(id -u)/com.kronos.v2
+```
+
+After deploy: `regime_prob` populates, live Brier tracking activates, Phase 3c clock starts. All post-deploy milestones run **in parallel**.
 
 #### GO-LIVE PLAN (milestones run in parallel after June 8-9 deploy)
 
@@ -247,7 +493,7 @@ journalctl -u kronos-v2 -f | grep "Order placed"
 | Day 1-2 | ≥20 regime_prob rows | First Brier reading from `regime_v2_monitor.py` |
 | Day 7 | ~70-80 rows, P&L trend visible | Assess: is edge confirmed + P&L positive? |
 | **Day 7-10** | Edge ✓ + P&L ✓ | **Flip `PAPER_TRADING=false`, restart** → go live |
-| Day 18-20 | 200 regime_prob rows | Phase 3c auto-fires, Gates 13+14 removed |
+| Day 18-20 | 500 regime_prob rows | Phase 3c auto-fires. Gates 13+14 **stay**. |
 
 **Go-live criteria (both must be true):**
 1. `Brier(regime_prob, btc_direction) < Brier(kalshi_open_mid, btc_direction)` on ≥20 rows
@@ -261,15 +507,60 @@ journalctl -u kronos-v2 -f | grep "Order placed"
 
 | What | Data needed | Query |
 |---|---|---|
-| Phase 3c auto-fires, Gates 13+14 removed | 200 regime_prob rows | `SELECT COUNT(*) FROM trades WHERE regime_prob IS NOT NULL AND outcome IS NOT NULL` |
+| Phase 3c auto-fires | 500 regime_prob rows | `SELECT COUNT(*) FROM trades WHERE regime_prob IS NOT NULL AND outcome IS NOT NULL` |
+| T+30s feature model | 200+ `kalshi_early_mid` rows | `SELECT COUNT(*) FROM candle_features WHERE kalshi_early_mid IS NOT NULL AND features_stale=0` |
+| Regime-stratified sampling | 1000+ rows spanning 2+ regime types (no regime > 85%) | `SELECT deepseek_regime, COUNT(*) FROM candle_features WHERE features_stale=0 AND btc_direction IS NOT NULL AND atm_iv IS NOT NULL GROUP BY deepseek_regime` |
 | LogisticProgressCap (upgrade Gate 12) | 200+ new-feature candle_features rows | `SELECT COUNT(*) FROM candle_features WHERE features_stale=0 AND kalshi_open_imbalance IS NOT NULL` |
 | Mid-candle exit LIVE | 50+ resolved would-exit candles, win_rate < 40% | `SELECT AVG(t.outcome), COUNT(*) FROM candle_features cf JOIN trades t ON t.timestamp >= cf.candle_ts AND t.timestamp < datetime(cf.candle_ts,'+900 seconds') WHERE cf.would_exit=1 AND t.outcome IS NOT NULL` |
 | Gate 12 threshold calibration | 100+ new-feature rows | percentile query in `RuleBasedProgressCap` docstring |
-| imbalance + macro corr feature importance | Next regime retrain | feature importances in dry-run output |
+| imbalance + macro corr feature importance | Next regime retrain (post depth fix) | feature importances in dry-run output |
 
 #### NOTHING BLOCKING — can build anytime
 - **Gate 4 (rolling edge circuit breaker)** — hardcoded `True` in paper mode. Enable with loose threshold to get signal quality data. No data dependency.
-- **`kalshi_early_mid` edge analysis** — 33 rows at session 34; run analysis once >100 rows: `SELECT AVG(btc_direction), kalshi_early_mid, COUNT(*) FROM candle_features WHERE kalshi_early_mid IS NOT NULL GROUP BY ROUND(kalshi_early_mid,1)`. If early Kalshi prices have predictive power, use as a Gate 8 input.
+- **`kalshi_early_mid` edge analysis** — 48 rows as of session 38; run analysis once >100 rows: `SELECT AVG(btc_direction), kalshi_early_mid, COUNT(*) FROM candle_features WHERE kalshi_early_mid IS NOT NULL GROUP BY ROUND(kalshi_early_mid,1)`. If early Kalshi prices have predictive power, use as a Gate 8 input.
+
+#### FUTURE IMPROVEMENT — T+30s feature model (data-gated, requires retrain)
+
+**What:** Add candle N+1's first-30-second features to the regime model. Currently the model sees only candle N's closing state. By T+30s, BTC has moved and CVD/tape speed have updated. Using those live features would let the model compete with Kalshi T+30s rather than Kalshi T=0.
+
+**Why it matters:** Kalshi moves 2.71¢ on average in the first 30s and crosses the 50¢ direction line in 1-in-5 candles. Our model is always predicting from stale-candle data while trading against a market that has already incorporated 30 seconds of live price action.
+
+**How:** At T+30s (when `kalshi_early_mid` is snapped), also log a second `features_early` snapshot from Redis. Add those as extra features (or replace the current features) in `_FEATURE_ORDER`. Retrain `train_regime.py` on the new feature set. The comparison baseline also shifts from `kalshi_open_mid` to `kalshi_early_mid`.
+
+**Data dependency:** Need 200+ rows with `kalshi_early_mid`. Currently 48 rows (~June 20-25).
+`SELECT COUNT(*) FROM candle_features WHERE kalshi_early_mid IS NOT NULL AND features_stale=0`
+
+#### FUTURE IMPROVEMENT — Regime-stratified sampling (data-gated, 1000+ diverse rows)
+
+**The problem:** A rolling window of any fixed size becomes single-regime during a sustained bear run. At 2000 bear rows, the model has forgotten what bull or ranging patterns look like. When the market shifts, the model re-learns from scratch.
+
+**The fix:** Supplement the recency-based training window with underrepresented regime samples from all historical data:
+
+```python
+TARGET_RECENT    = 1500   # last 1500 rows (primary signal)
+MIN_REGIME_FRAC  = 0.15   # each regime must be ≥15% of training set
+MAX_SUPPLEMENT   = 200    # max rows to pull from history per underrepresented regime
+
+# In train_regime.py after loading all qualifying rows:
+# 1. Take last 1500 rows as base (recency)
+# 2. Count each deepseek_regime type in the base
+# 3. For any regime below 15%: pull up to 200 rows from all historical data
+# 4. Append and deduplicate
+# 5. Train on combined set
+```
+
+**Why `_WINDOW=None` first:** Removing the hard cap is the prerequisite — the supplementation draws from ALL history, so you need all data available.
+
+**Data gate:** 1000+ qualifying rows spanning 2+ distinct regime types with ≥100 rows each. Check readiness:
+```sql
+SELECT deepseek_regime, COUNT(*) 
+FROM candle_features 
+WHERE features_stale=0 AND btc_direction IS NOT NULL AND atm_iv IS NOT NULL
+GROUP BY deepseek_regime;
+```
+When no single regime exceeds 85% of total rows, stratification has meaningful material.
+
+**Calibrator version:** Same logic — supplement the 1000-row window with older rows from underrepresented DeepSeek regimes in `gate_rejections`.
 
 ---
 
