@@ -827,11 +827,11 @@ def _down_bet_kwargs():
     return {**base_kwargs(), "best_ask_cents": 50, "best_bid_cents": 48}
 
 
-def test_trending_up_down_bet_gets_half_kelly(checklist):
-    """DOWN bets in trending_up receive half Kelly — bear-bias guard."""
+def test_trending_up_down_bet_gets_half_kelly_in_bootstrap(checklist):
+    """DOWN bets in trending_up receive half Kelly in bootstrap mode only."""
     ranging_sig = make_signal(calibrated_prob=0.30, deepseek_regime="ranging",    direction=0)
     trend_sig   = make_signal(calibrated_prob=0.30, deepseek_regime="trending_up", direction=0)
-    kw = _down_bet_kwargs()
+    kw = {**_down_bet_kwargs(), "is_bootstrap": True}
     full = checklist.run(**{**kw, "signal": ranging_sig})
     half = checklist.run(**{**kw, "signal": trend_sig})
     assert full.passed, f"Baseline failed: {full.failed_reason}"
@@ -839,23 +839,35 @@ def test_trending_up_down_bet_gets_half_kelly(checklist):
     assert half.kelly_dollars == pytest.approx(full.kelly_dollars * 0.5, rel=0.05)
 
 
-def test_trending_down_down_bet_gets_half_kelly(checklist):
-    """DOWN bets in trending_down also receive half Kelly — chasing-move guard."""
+def test_trending_down_down_bet_gets_half_kelly_in_bootstrap(checklist):
+    """DOWN bets in trending_down also receive half Kelly in bootstrap mode only."""
     ranging_sig = make_signal(calibrated_prob=0.30, deepseek_regime="ranging",      direction=0)
     trend_sig   = make_signal(calibrated_prob=0.30, deepseek_regime="trending_down", direction=0)
-    kw = _down_bet_kwargs()
+    kw = {**_down_bet_kwargs(), "is_bootstrap": True}
     full = checklist.run(**{**kw, "signal": ranging_sig})
     half = checklist.run(**{**kw, "signal": trend_sig})
     assert full.passed, f"Baseline failed: {full.failed_reason}"
     assert half.passed, f"Trending shrink failed gate: {half.failed_gate} — {half.failed_reason}"
     assert half.kelly_dollars == pytest.approx(full.kelly_dollars * 0.5, rel=0.05)
+
+
+def test_trending_down_bet_not_shrunk_when_regime_v2_deployed(checklist):
+    """Half-Kelly guard is inactive once regime v2 deploys (is_bootstrap=False)."""
+    ranging_sig = make_signal(calibrated_prob=0.30, deepseek_regime="ranging",    direction=0)
+    trend_sig   = make_signal(calibrated_prob=0.30, deepseek_regime="trending_up", direction=0)
+    kw = {**_down_bet_kwargs(), "is_bootstrap": False}
+    ranging_result = checklist.run(**{**kw, "signal": ranging_sig})
+    trend_result   = checklist.run(**{**kw, "signal": trend_sig})
+    assert ranging_result.passed
+    assert trend_result.passed
+    assert trend_result.kelly_dollars == pytest.approx(ranging_result.kelly_dollars, rel=0.01)
 
 
 def test_trending_up_up_bet_not_shrunk(checklist):
-    """UP bets in trending_up are NOT reduced — only DOWN direction is penalised."""
+    """UP bets in trending_up are NOT reduced — only bootstrap DOWN direction is penalised."""
     ranging_sig = make_signal(calibrated_prob=0.65, deepseek_regime="ranging",    direction=1)
     trend_sig   = make_signal(calibrated_prob=0.65, deepseek_regime="trending_up", direction=1)
-    kw = base_kwargs()
+    kw = {**base_kwargs(), "is_bootstrap": True}
     full   = checklist.run(**{**kw, "signal": ranging_sig})
     result = checklist.run(**{**kw, "signal": trend_sig})
     assert result.passed
@@ -863,17 +875,12 @@ def test_trending_up_up_bet_not_shrunk(checklist):
 
 
 def test_ranging_down_bet_not_shrunk(checklist):
-    """DOWN bets in ranging are NOT reduced — ranging is nearly breakeven at -$0.08/trade.
-
-    Verify by showing ranging Kelly > trending Kelly: the trending result is halved,
-    ranging is not. Both hit Gate 13's $8 cap at prob=0.30, so we compare them directly.
-    """
+    """DOWN bets in ranging are NOT reduced — ranging is nearly breakeven at -$0.08/trade."""
     ranging_sig = make_signal(calibrated_prob=0.30, deepseek_regime="ranging",    direction=0)
     trend_sig   = make_signal(calibrated_prob=0.30, deepseek_regime="trending_up", direction=0)
-    kw = _down_bet_kwargs()
+    kw = {**_down_bet_kwargs(), "is_bootstrap": True}
     ranging_result = checklist.run(**{**kw, "signal": ranging_sig})
     trend_result   = checklist.run(**{**kw, "signal": trend_sig})
     assert ranging_result.passed
     assert trend_result.passed
-    # Trending result is halved; ranging result is NOT — so ranging > trending
     assert ranging_result.kelly_dollars > trend_result.kelly_dollars
