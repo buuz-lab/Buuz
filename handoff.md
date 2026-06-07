@@ -4,13 +4,13 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 35/36 complete. System fully code-complete. Go-live plan: regime v2 deploys ~June 8-9 → all milestones accumulate in parallel → go live ~June 15-18 once edge confirmed + P&L positive. Phase 3c auto-fires ~June 27-July 1 (accumulates from paper trades, clock started at regime v2 deploy).
+**Current focus:** Session 35/36 complete. System fully code-complete. Full deployment plan: regime v2 deploys ~June 8-9 locally → migrate to cloud server ~June 10-11 → go live from server ~June 15-18. Phase 3c auto-fires ~June 27-July 1. All deploy artifacts in `deploy/`.
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-06 session 35/36: Disagreement neutralization removed — regime v2 signal used directly (Kronos already embedded as features). Go-live criteria simplified: edge validation + paper P&L positive, all running in parallel post-deploy. Target go-live ~June 15-18.**
+**As of 2026-06-06 session 35/36: Cloud migration prepared. systemd service, Linux cron jobs, and 7-phase migration checklist in `deploy/`. Target sequence: local regime v2 deploy June 8-9 → server migration June 10-11 → go live June 15-18.**
 
 ---
 
@@ -174,13 +174,56 @@ After Phase 3c deploys: **remove Gates 13 and 14**.
 | Phase 3c calibrator code | **Complete** — auto-fires at 200 regime_prob rows, no further code needed |
 | API order placement | **Confirmed working** — place + cancel tested on live Kalshi API |
 | `raw_http_client.py` bug fix | Fixed: missing `action: "buy"` field + sending both price fields (should be exactly one) |
-| Disagreement neutralization removed | `fusion.py` — regime v2 signal used directly on Kronos disagreements. Neutralization was a regime v1 holdover (circular label). With regime v2 + Kronos embedded as features, disagreements are the model overriding Kronos based on 32 features — informative, not noise. |
+| Disagreement neutralization removed | `fusion.py` — regime v2 signal used directly on Kronos disagreements. Was a regime v1 holdover; with Kronos embedded as features disagreements are informative, not noise. |
+| Cloud migration artifacts | `deploy/kronos-v2.service` (systemd), `deploy/crontab-linux.txt`, `deploy/MIGRATION.md` (7-phase checklist) |
 
 **System is code-complete.** Every remaining milestone is data-gated. No more build sessions needed before go-live.
 
 ---
 
 ### Next steps — data gates and what to build when
+
+#### FULL TIMELINE (everything in sequence)
+
+| Date | Action |
+|---|---|
+| **~June 8-9** | Regime v2 full train fires locally. Run `--dry-run`, deploy if checklist passes. |
+| **~June 10-11** | Migrate to cloud server (see `deploy/MIGRATION.md`). Confirm paper trades firing on server. |
+| **~June 15-18** | Go live from server: `PAPER_TRADING=false` in `.env` + `systemctl restart kronos-v2`. Criteria: Brier(regime_prob) < Brier(kalshi_open) on ≥20 rows AND paper P&L positive. |
+| **~June 27 - July 1** | Phase 3c calibrator auto-fires (200 regime_prob rows). Gates 13+14 removed automatically. |
+
+#### SERVER MIGRATION — `deploy/MIGRATION.md`
+
+**All artifacts in `deploy/`:**
+- `deploy/kronos-v2.service` — systemd unit, replaces `com.kronos.v2.plist`. Loads `.env` via `EnvironmentFile`, restarts on crash, logs to journald.
+- `deploy/crontab-linux.txt` — three cron jobs (calibrator/2h, regime retrain/6h, monitor/12h) with Linux paths.
+- `deploy/MIGRATION.md` — full 7-phase checklist.
+
+**Server spec:** Ubuntu 22.04, 2 vCPU / 4GB RAM (~€4-6/mo on Hetzner or DigitalOcean). No GPU needed — Kronos-small runs on CPU.
+
+**What's NOT in git (must transfer separately):**
+- `.env` — API keys (Kalshi, DeepSeek)
+- `keys/kalshi_private.key` — RSA private key
+- `trades.db` — live trade history
+- `models/` — trained regime model, calibrator
+
+Transfer via: `scp .env keys/ kronos@SERVER_IP:/opt/kronos-v2/`
+
+**Key differences from local:**
+- `caffeinate` gone (servers don't sleep)
+- macOS Python path → `venv/bin/python3`
+- Kronos model downloads from HuggingFace on first run (~500MB, once)
+- `journalctl -u kronos-v2 -f` replaces tailing log files
+
+**Go live from server:**
+```bash
+ssh kronos@SERVER_IP
+sed -i 's/PAPER_TRADING=true/PAPER_TRADING=false/' /opt/kronos-v2/.env
+systemctl restart kronos-v2
+journalctl -u kronos-v2 -f | grep "Order placed"
+```
+
+---
 
 #### IMMEDIATE (~June 8-9): Regime v2 full train
 - Cron auto-triggers at 672 rows. Run manually first:
