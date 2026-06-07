@@ -1,0 +1,33 @@
+[Unit]
+Description=Kronos V2 — BTC prediction-market trading system
+Documentation=https://github.com/buuz-lab/Buuz
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kronos
+Group=kronos
+WorkingDirectory=/opt/kronos-v2
+
+# Load secrets from .env — never committed to git
+EnvironmentFile=/opt/kronos-v2/.env
+
+ExecStart=/opt/kronos-v2/venv/bin/python3 main.py
+
+# Restart on any exit (crash, OOM, etc.). 15s delay matches the old ThrottleInterval.
+Restart=always
+RestartSec=15
+
+# Give the model time to load before systemd decides it failed
+TimeoutStartSec=120
+
+# Send stdout/stderr to journald — view with: journalctl -u kronos-v2 -f
+StandardOutput=journal
+StandardError=journal
+
+# Soft limits — Kronos model + Redis + asyncio stays well under 2GB
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

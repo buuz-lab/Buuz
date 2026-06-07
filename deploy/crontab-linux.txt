@@ -1,0 +1,12 @@
+# Kronos V2 cron jobs — install with: crontab deploy/crontab-linux.txt
+# (run as the kronos user, or substitute the correct python3 path)
+
+# Calibrator auto-retrain — every 2h
+# Phase 3c: fires when 200+ regime_prob rows exist (skips silently until then)
+0 */2 * * * cd /opt/kronos-v2 && source .env && /opt/kronos-v2/venv/bin/python3 scripts/auto_retrain_calibrator.py >> logs/auto_retrain_calibrator.log 2>&1
+
+# Regime model auto-retrain — every 6h
+0 */6 * * * cd /opt/kronos-v2 && source .env && /opt/kronos-v2/venv/bin/python3 scripts/auto_retrain_regime.py >> logs/auto_retrain_regime.log 2>&1
+
+# Regime v2 monitor — every 12h (health, drift, Kalshi edge trend)
+0 */12 * * * cd /opt/kronos-v2 && source .env && /opt/kronos-v2/venv/bin/python3 scripts/regime_v2_monitor.py >> logs/regime_v2_monitor.log 2>&1
