@@ -109,6 +109,81 @@ class StreamingCVDAccumulator:
         lt = lb + ls
         self._large_print = (lb - ls) / lt if lt > 0.0 else 0.0
 
+    # ── Message parsing ────────────────────────────────────────────────────────
+
+    def _parse_okx_message(self, raw: str) -> list[tuple]:
+        """Parse OKX WS trade message → list of (ts_ms, side, size, price) tuples."""
+        try:
+            msg = json.loads(raw)
+            data = msg.get("data")
+            if not data or not isinstance(data, list):
+                return []
+            ticks = []
+            for t in data:
+                if "px" not in t or "sz" not in t or "side" not in t or "ts" not in t:
+                    continue
+                ticks.append((int(t["ts"]), t["side"], float(t["sz"]), float(t["px"])))
+            return ticks
+        except Exception:
+            return []
+
+    def _parse_kraken_message(self, raw: str) -> list[tuple]:
+        """Parse Kraken WS v2 trade message → list of (ts_ms, side, size, price) tuples."""
+        try:
+            msg = json.loads(raw)
+            if msg.get("channel") != "trade" or msg.get("type") != "update":
+                return []
+            ticks = []
+            for t in msg.get("data", []):
+                ts_str = t["timestamp"].replace("Z", "+00:00")
+                ts_ms = int(datetime.fromisoformat(ts_str).timestamp() * 1000)
+                ticks.append((ts_ms, t["side"], float(t["qty"]), float(t["price"])))
+            return ticks
+        except Exception:
+            return []
+
+    # ── WebSocket run loop ─────────────────────────────────────────────────────
+
+    async def run(self) -> None:
+        """Maintain persistent WS connection; OKX primary, Kraken fallback after 3 failures."""
+        okx_failures = 0
+        while True:
+            use_kraken = okx_failures >= 3
+            try:
+                if use_kraken:
+                    await self._run_kraken()
+                    okx_failures = 0
+                else:
+                    await self._run_okx()
+                    okx_failures = 0
+            except Exception as exc:
+                if not use_kraken:
+                    okx_failures += 1
+                    backoff = min(2 ** okx_failures, 30)
+                    logger.warning(f"StreamingCVDAccumulator: OKX WS error (attempt {okx_failures}): {exc} — retry in {backoff}s")
+                    await asyncio.sleep(backoff)
+                else:
+                    logger.error(f"StreamingCVDAccumulator: Kraken WS also failed: {exc} — retry in 30s")
+                    await asyncio.sleep(30)
+
+    async def _run_okx(self) -> None:
+        sub = json.dumps({"op": "subscribe", "args": [{"channel": "trades", "instId": "BTC-USDT-SWAP"}]})
+        async with websockets.connect(self._OKX_WS_URL, ping_interval=20, ping_timeout=10) as ws:
+            await ws.send(sub)
+            logger.info("StreamingCVDAccumulator: OKX WS connected")
+            async for raw in ws:
+                for tick in self._parse_okx_message(raw):
+                    self._ingest_tick(tick)
+
+    async def _run_kraken(self) -> None:
+        sub = json.dumps({"method": "subscribe", "params": {"channel": "trade", "symbol": ["BTC/USD"]}})
+        async with websockets.connect(self._KRAKEN_WS_URL, ping_interval=20, ping_timeout=10) as ws:
+            await ws.send(sub)
+            logger.info("StreamingCVDAccumulator: Kraken WS connected (OKX fallback)")
+            async for raw in ws:
+                for tick in self._parse_kraken_message(raw):
+                    self._ingest_tick(tick)
+
 
 class DerivativesFeed:
     """
