@@ -188,11 +188,10 @@ class StreamingCVDAccumulator:
 
 
 class DerivativesFeed:
-    """
-    Pulls Binance perpetual-futures data via ccxt and writes six regime
-    features to Redis key "regime:features" with a 300-second TTL.
-
-    Refreshes every 5 minutes in an async loop.
+    """Fetches derivative market features from OKX/Bybit/Hyperliquid/Deribit/Kraken
+    and writes them to Redis key 'regime:features'. CVD is updated via a persistent
+    WebSocket trade stream; funding, OI, liquidations, and imbalance refresh every 15s
+    (slow features capped at 60s).
     """
 
     # Exchange preference order — first one that connects without a 403/geo-block wins.
@@ -246,23 +245,27 @@ class DerivativesFeed:
 
     async def _batch_loop(self) -> None:
         """Batch refresh loop: fast-tier features every cycle, slow-tier capped at 60s."""
-        while True:
-            if self._exchange is None:
-                await self._resolve_exchange()
-            success = False
-            try:
-                features = await self._fetch_features()
-                okx_partial = features.pop("_okx_partial", False)
-                self._write_features(features, okx_partial=okx_partial)
-                logger.info(f"DerivativesFeed: wrote regime:features — {features}")
-                success = True
-            except Exception as exc:
-                logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
-                if self._exchange is not None:
-                    await self._exchange.close()
-                self._exchange = None
-                await self._resolve_exchange()
-            await asyncio.sleep(_REFRESH_INTERVAL - 10 if success else _REFRESH_INTERVAL)
+        try:
+            while True:
+                if self._exchange is None:
+                    await self._resolve_exchange()
+                success = False
+                try:
+                    features = await self._fetch_features()
+                    okx_partial = features.pop("_okx_partial", False)
+                    self._write_features(features, okx_partial=okx_partial)
+                    logger.info(f"DerivativesFeed: wrote regime:features — {features}")
+                    success = True
+                except Exception as exc:
+                    logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
+                    if self._exchange is not None:
+                        await self._exchange.close()
+                    self._exchange = None
+                    await self._resolve_exchange()
+                await asyncio.sleep(_REFRESH_INTERVAL - 10 if success else _REFRESH_INTERVAL)
+        finally:
+            if self._exchange is not None:
+                await self._exchange.close()
 
     # ── Feature computation ────────────────────────────────────────────────────
 

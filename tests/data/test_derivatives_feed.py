@@ -16,7 +16,7 @@ def make_feed() -> DerivativesFeed:
     feed._exchange = MagicMock()
     feed._kraken_exchange = None
     feed._ccxt_async = MagicMock()
-    feed._prev_oi = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0}
+    feed._prev_oi = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0, "deribit": 0.0}
     return feed
 
 
