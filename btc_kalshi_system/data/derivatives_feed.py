@@ -7,7 +7,7 @@ import aiohttp
 import numpy as np
 import redis
 import websockets
-from datetime import datetime, timezone  # used in StreamingCVDAccumulator.run() — added Task 2
+from datetime import datetime
 from loguru import logger
 
 from config import COINGLASS_API_KEY, HYPERLIQUID_BASE_URL, KRAKEN_FUTURES_BASE_URL, REDIS_URL
@@ -135,6 +135,8 @@ class StreamingCVDAccumulator:
                 return []
             ticks = []
             for t in msg.get("data", []):
+                if "timestamp" not in t or "side" not in t or "qty" not in t or "price" not in t:
+                    continue
                 ts_str = t["timestamp"].replace("Z", "+00:00")
                 ts_ms = int(datetime.fromisoformat(ts_str).timestamp() * 1000)
                 ticks.append((ts_ms, t["side"], float(t["qty"]), float(t["price"])))

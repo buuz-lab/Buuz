@@ -1,3 +1,4 @@
+import json
 import time
 import pytest
 from btc_kalshi_system.data.derivatives_feed import StreamingCVDAccumulator
@@ -92,7 +93,6 @@ def test_cvd_empty_deque():
 
 
 def test_parse_okx_message_single_tick():
-    import json
     acc = StreamingCVDAccumulator()
     msg = json.dumps({
         "arg": {"channel": "trades", "instId": "BTC-USDT-SWAP"},
@@ -108,7 +108,6 @@ def test_parse_okx_message_single_tick():
 
 
 def test_parse_okx_message_ignores_non_trade_events():
-    import json
     acc = StreamingCVDAccumulator()
     msg = json.dumps({"event": "subscribe", "arg": {"channel": "trades"}})
     ticks = acc._parse_okx_message(msg)
@@ -116,7 +115,6 @@ def test_parse_okx_message_ignores_non_trade_events():
 
 
 def test_parse_kraken_message_single_tick():
-    import json
     acc = StreamingCVDAccumulator()
     msg = json.dumps({
         "channel": "trade",
@@ -134,8 +132,24 @@ def test_parse_kraken_message_single_tick():
 
 
 def test_parse_kraken_message_ignores_non_update_events():
-    import json
     acc = StreamingCVDAccumulator()
     msg = json.dumps({"channel": "trade", "type": "snapshot", "data": []})
     ticks = acc._parse_kraken_message(msg)
     assert ticks == []
+
+
+def test_parse_kraken_message_skips_malformed_tick():
+    """A tick missing a required field is skipped; valid ticks in same message still parse."""
+    acc = StreamingCVDAccumulator()
+    msg = json.dumps({
+        "channel": "trade",
+        "type": "update",
+        "data": [
+            {"side": "buy"},                                            # missing qty, price, timestamp
+            {"side": "sell", "qty": 0.5, "price": 94000.0,
+             "timestamp": "2023-11-14T12:00:00.000000Z"},               # valid
+        ]
+    })
+    ticks = acc._parse_kraken_message(msg)
+    assert len(ticks) == 1
+    assert ticks[0][1] == "sell"
