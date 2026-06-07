@@ -45,6 +45,9 @@ _FEATURE_COLS_FOR_DB = [
     "btc_24h_return", "kronos_raw_15min", "kronos_raw_5min",
     "kalshi_open_imbalance", "btc_spx_corr_8d", "btc_qqq_corr_8d",
     "kalshi_early_drift",
+    # Session 39
+    "liq_net_norm", "eth_direction_15min", "okx_spot_imbalance",
+    "pcr_delta", "skew_delta", "deepseek_dir_prob",
 ]
 
 
@@ -79,6 +82,13 @@ def _make_db(rows: list[dict]) -> str:
             r.get("btc_spx_corr_8d", 0.3),
             r.get("btc_qqq_corr_8d", 0.4),
             r.get("kalshi_early_drift", None),
+            # Session 39
+            r.get("liq_net_norm", 0.0),
+            r.get("eth_direction_15min", 0.5),
+            r.get("okx_spot_imbalance", 0.0),
+            r.get("pcr_delta", 0.0),
+            r.get("skew_delta", 0.0),
+            r.get("deepseek_dir_prob", 0.5),
         ]
         placeholders = ", ".join(["?"] * (4 + len(_FEATURE_COLS_FOR_DB)))
         col_names = "id, candle_ts, features_stale, btc_direction, " + ", ".join(_FEATURE_COLS_FOR_DB)

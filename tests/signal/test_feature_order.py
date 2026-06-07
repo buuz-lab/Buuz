@@ -101,7 +101,7 @@ def test_feature_order_all_three_match():
     """All three sources must be identical including ORDER (not just membership)."""
     fusion_keys = _get_fusion_feature_keys()
     assert _FEATURE_ORDER == _FEATURE_COLS == fusion_keys
-    assert len(_FEATURE_ORDER) == 33  # 27 market features + kronos_raw_15min + kronos_raw_5min + kalshi_open_imbalance + btc_spx_corr_8d + btc_qqq_corr_8d + kalshi_early_drift
+    assert len(_FEATURE_ORDER) == 39  # was 33; added liq_net_norm, eth_direction_15min, okx_spot_imbalance, pcr_delta, skew_delta, deepseek_dir_prob
 
 
 def test_feature_order_includes_kronos_features():

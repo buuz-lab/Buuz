@@ -279,6 +279,12 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # rather than prior-candle-close state, eliminating the structural T+30s Kalshi disadvantage.
     ("kalshi_early_drift",  "REAL DEFAULT NULL"),  # kalshi_early_mid - kalshi_open_mid: 30s market reaction
     ("features_early",      "TEXT DEFAULT NULL"),  # JSON of all regime features at T+30s snap time
+    ("liq_net_norm",         "REAL DEFAULT NULL"),
+    ("eth_direction_15min",  "REAL DEFAULT NULL"),
+    ("okx_spot_imbalance",   "REAL DEFAULT NULL"),
+    ("pcr_delta",            "REAL DEFAULT NULL"),
+    ("skew_delta",           "REAL DEFAULT NULL"),
+    ("deepseek_dir_prob",    "REAL DEFAULT NULL"),
 ]
 
 

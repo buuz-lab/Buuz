@@ -56,6 +56,13 @@ _FEATURE_ORDER = [
     # Only populated for candles where kalshi_early_mid AND kalshi_open_mid are both logged.
     # Historical rows default to NaN (XGBoost missing-value handling).
     "kalshi_early_drift",
+    # Session 39 — cascade momentum, cross-asset, order flow, options delta, LLM direction
+    "liq_net_norm",
+    "eth_direction_15min",
+    "okx_spot_imbalance",
+    "pcr_delta",
+    "skew_delta",
+    "deepseek_dir_prob",
 ]
 
 

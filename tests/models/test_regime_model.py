@@ -9,7 +9,7 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 def _synthetic_features(n: int = 200, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
-    X = rng.standard_normal((n, 33))  # 33 features: 27 market + kronos_raw_15min + kronos_raw_5min + kalshi_open_imbalance + btc_spx_corr_8d + btc_qqq_corr_8d + kalshi_early_drift
+    X = rng.standard_normal((n, 39))  # 39 features: 33 prior + liq_net_norm, eth_direction_15min, okx_spot_imbalance, pcr_delta, skew_delta, deepseek_dir_prob
     y = (X[:, 0] > 0).astype(int)  # label = sign of first feature
     return X, y
 
@@ -50,6 +50,12 @@ def _feature_dict(seed: int = 0) -> dict:
         "btc_spx_corr_8d":         float(rng.uniform(-1, 1)),
         "btc_qqq_corr_8d":         float(rng.uniform(-1, 1)),
         "kalshi_early_drift":      float(rng.uniform(-0.1, 0.1)),
+        "liq_net_norm":            float(rng.uniform(-1, 1)),
+        "eth_direction_15min":     float(rng.uniform(0, 1)),
+        "okx_spot_imbalance":      float(rng.uniform(-1, 1)),
+        "pcr_delta":               float(rng.uniform(-0.5, 0.5)),
+        "skew_delta":              float(rng.uniform(-5, 5)),
+        "deepseek_dir_prob":       float(rng.uniform(0, 1)),
     }
 
 

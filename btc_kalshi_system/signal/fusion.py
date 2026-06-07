@@ -118,6 +118,7 @@ class SignalFusionEngine:
         self._last_kronos_raw_5min: float | None = None
         self._last_kalshi_open_imbalance: float | None = None
         self._last_kalshi_early_drift: float | None = None
+        self._last_deepseek_dir_prob: float = 0.5   # 0.5 = no directional view yet
 
     def update_market_context(self, ctx: dict) -> None:
         self._market_context = ctx
@@ -158,6 +159,7 @@ class SignalFusionEngine:
             return None
 
         deepseek_regime = ds["regime"]
+        self._last_deepseek_dir_prob = float(ds.get("dir_prob_up", 0.5))
 
         if kronos_raw is None:
             # only used in tests — production always provides kronos_raw from _cached_kronos
@@ -533,5 +535,11 @@ class SignalFusionEngine:
             "btc_spx_corr_8d":          float(ctx.get("btc_spx_corr_8d") or 0.0),
             "btc_qqq_corr_8d":          float(ctx.get("btc_qqq_corr_8d") or 0.0),
             "kalshi_early_drift":       self._last_kalshi_early_drift,
+            "liq_net_norm":          float(ctx.get("liq_net_norm") or 0.0),
+            "eth_direction_15min":   float(ctx.get("eth_direction_15min") if ctx.get("eth_direction_15min") is not None else 0.5),
+            "okx_spot_imbalance":    float(ctx.get("okx_spot_imbalance") or 0.0),
+            "pcr_delta":             float(ctx.get("pcr_delta") or 0.0),
+            "skew_delta":            float(ctx.get("skew_delta") or 0.0),
+            "deepseek_dir_prob":     self._last_deepseek_dir_prob,
         }
         return features, stale, deribit_stale, okx_stale
