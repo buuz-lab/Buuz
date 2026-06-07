@@ -325,3 +325,85 @@ def test_regime_save_load_preserves_aware_flag():
         cal2 = Calibrator.load(path)
         assert cal2._regime_aware is True
         assert cal2.transform(0.7, regime="trending_up") == pytest.approx(expected, abs=1e-9)
+
+
+# ── Edge-aware calibrator (Phase 3c) ─────────────────────────────────────────
+
+def _edge_data(n: int = 400, seed: int = 99):
+    """Synthetic data where high-edge setups win more than low-edge ones at same raw_prob.
+
+    true_prob compresses raw toward 0.5 (so calibration beats passthrough) while
+    adding a meaningful edge contribution. At raw=0.75, edge=0.15 the true win rate
+    is ~0.59 > 0.5, so the direction guard passes and the calibrator deploys.
+    """
+    rng = np.random.default_rng(seed)
+    raw = rng.uniform(0.55, 0.85, n)
+    edge = rng.uniform(0.05, 0.30, n)
+    # Compressed toward 0.5 (factor 0.6) plus edge contribution
+    true_prob = np.clip(0.5 + 0.6 * (raw - 0.5) + 0.3 * (edge - 0.15), 0.0, 1.0)
+    outcomes = (rng.uniform(0, 1, n) < true_prob).astype(float)
+    return raw, edge, outcomes
+
+
+def test_edge_aware_flag_set_on_fit():
+    raw, edge, outcomes = _edge_data()
+    cal = Calibrator()
+    cal.fit(raw, outcomes, edges=edge)
+    assert cal._edge_aware is True
+
+
+def test_edge_aware_transform_differs_by_edge():
+    """High edge and low edge should produce different calibrated outputs."""
+    raw, edge, outcomes = _edge_data()
+    cal = Calibrator()
+    cal.fit(raw, outcomes, edges=edge)
+    if cal._passthrough:
+        pytest.skip("calibrator stayed passthrough on this data")
+    low  = cal.transform(0.70, edge=0.05)
+    high = cal.transform(0.70, edge=0.25)
+    assert low != high
+
+
+def test_edge_none_defaults_gracefully():
+    """transform() with edge=None when edge_aware should not raise."""
+    raw, edge, outcomes = _edge_data()
+    cal = Calibrator()
+    cal.fit(raw, outcomes, edges=edge)
+    result = cal.transform(0.70, edge=None)
+    assert 0.0 <= result <= 1.0
+
+
+def test_edge_and_regime_combined():
+    """Both regime and edge can be used together."""
+    raw, edge, outcomes = _edge_data()
+    regimes = np.array(["trending_up"] * len(raw))
+    cal = Calibrator()
+    cal.fit(raw, outcomes, regimes=regimes, edges=edge)
+    result = cal.transform(0.70, regime="trending_up", edge=0.15)
+    assert 0.0 <= result <= 1.0
+
+
+def test_edge_aware_save_load_roundtrip():
+    import tempfile, os
+    raw, edge, outcomes = _edge_data()
+    cal = Calibrator()
+    cal.fit(raw, outcomes, edges=edge)
+    if cal._passthrough:
+        pytest.skip("calibrator stayed passthrough on this data")
+    expected = cal.transform(0.70, edge=0.15)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "edge_cal.joblib")
+        cal.save(path)
+        cal2 = Calibrator.load(path)
+        assert cal2._edge_aware is True
+        assert cal2.transform(0.70, edge=0.15) == pytest.approx(expected, abs=1e-9)
+
+
+def test_non_edge_aware_ignores_edge_arg():
+    """Old calibrators (edge_aware=False) silently ignore edge argument."""
+    raw, outcomes = _synthetic_data(400)
+    cal = Calibrator()
+    cal.fit(raw, outcomes)
+    result_no_edge  = cal.transform(0.70)
+    result_with_edge = cal.transform(0.70, edge=0.20)
+    assert result_no_edge == pytest.approx(result_with_edge)
