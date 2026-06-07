@@ -60,6 +60,10 @@ def _make_system() -> "main.KronosV2":
     system._redis = MagicMock()
     system._drift_monitor = MagicMock()
     system._drift_monitor.is_drifting.return_value = False
+    system._edge_tracker = MagicMock()
+    system._edge_tracker.is_above_threshold.return_value = True
+    system._edge_tracker.current_edge.return_value = 0.01
+    system._edge_tracker.__len__ = MagicMock(return_value=50)
     system._dir_tracker = MagicMock()
     system._dir_tracker.get_win_rate.return_value = None
     system._regime = MagicMock()

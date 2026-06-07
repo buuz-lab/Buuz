@@ -916,8 +916,14 @@ class KronosV2:
 
         current_exposure = self._monitor.get_current_exposure()
         same_timeframe_open = self._monitor.has_timeframe_position(timeframe)
-        # In paper mode Gate 4 is always open — edge tracker hasn't accumulated yet
-        edge_above_threshold = True if config.PAPER_TRADING else self._edge_tracker.is_above_threshold()
+        _raw_edge_ok = self._edge_tracker.is_above_threshold()
+        if config.PAPER_TRADING and not _raw_edge_ok:
+            logger.warning(
+                f"Gate 4 SHADOW (paper): rolling edge below threshold "
+                f"(edge={self._edge_tracker.current_edge():.4f}, "
+                f"n={len(self._edge_tracker)}/50) — would block in live mode"
+            )
+        edge_above_threshold = True if config.PAPER_TRADING else _raw_edge_ok
 
         fresh_kalshi_mid1 = (best_bid_cents + best_ask_cents) / 200.0
         dir_win_rate = self._dir_tracker.get_win_rate(signal.direction)
