@@ -5,14 +5,16 @@ import time
 import aiohttp
 import numpy as np
 import redis
+import websockets
+from datetime import datetime, timezone
 from loguru import logger
 
 from config import COINGLASS_API_KEY, HYPERLIQUID_BASE_URL, KRAKEN_FUTURES_BASE_URL, REDIS_URL
 from btc_kalshi_system.data.fear_greed import fetch_fear_greed
 from btc_kalshi_system.data.macro_feed import MacroFeed
 
-_REFRESH_INTERVAL = 300   # 5 minutes
-_FEATURES_TTL = 1800      # 6x refresh interval — tolerates network timeouts stacking up
+_REFRESH_INTERVAL = 60    # 1 min cycle — CVD/liq/imbalance fresh at trade time (was 300)
+_FEATURES_TTL = 360       # 6x refresh interval — survives ~5 failed cycles (was 1800)
 _CCXT_TIMEOUT_MS = 10_000  # 10 s — fail fast on DNS timeouts rather than hanging
 _LKG_TTL = 86_400         # 24 hours — last-known-good survives multi-hour exchange outages
 _FUNDING_LOOKBACK_MS = 4 * 3600_000  # 4 hours in milliseconds
@@ -26,6 +28,85 @@ _OKX_LIQ_URL    = "https://www.okx.com/api/v5/public/liquidation-orders"
 _OKX_BOOKS_URL  = "https://www.okx.com/api/v5/market/books"
 _LIQ_WINDOW_MS  = 15 * 60 * 1000  # 15 minutes in ms
 _LIQ_NOISE_FLOOR = 10.0            # contracts — ignore if total below this
+_CVD_WINDOW_MS = 15 * 60 * 1000   # 15-minute rolling trade window
+_CVD_STALE_TIMEOUT = 120           # seconds of silence before marking stale
+_CVD_MIN_TICKS = 5                 # minimum deque length to leave cold-start
+
+
+class StreamingCVDAccumulator:
+    """Accumulates BTC perp trade ticks via WebSocket; exposes real-time CVD.
+
+    Deque entry format: (ts_ms: int, side: str, size: float, price: float)
+    """
+
+    _OKX_WS_URL    = "wss://ws.okx.com:8443/ws/v5/public"
+    _KRAKEN_WS_URL = "wss://ws.kraken.com/v2"
+
+    def __init__(self) -> None:
+        from collections import deque
+        self._trades: deque = deque()
+        self._cvd: float = 0.0
+        self._large_print: float = 0.0
+        self._last_price: float = 0.0
+        self._last_tick_at: float = 0.0
+
+    # ── Public properties ──────────────────────────────────────────────────────
+
+    @property
+    def cvd_normalized(self) -> float:
+        return self._cvd
+
+    @property
+    def large_print_direction(self) -> float:
+        return self._large_print
+
+    @property
+    def last_price(self) -> float:
+        return self._last_price
+
+    @property
+    def is_stale(self) -> bool:
+        if len(self._trades) < _CVD_MIN_TICKS:
+            return True
+        return (time.time() - self._last_tick_at) > _CVD_STALE_TIMEOUT
+
+    # ── Tick ingestion ─────────────────────────────────────────────────────────
+
+    def _ingest_tick(self, tick: tuple) -> None:
+        """Append tick, prune window, recompute derived values."""
+        self._trades.append(tick)
+        cutoff_ms = time.time() * 1000 - _CVD_WINDOW_MS
+        while self._trades and self._trades[0][0] < cutoff_ms:
+            self._trades.popleft()
+        self._last_price = tick[3]
+        self._last_tick_at = time.time()
+        self._recompute()
+
+    def _recompute(self) -> None:
+        trades = self._trades
+        if not trades:
+            self._cvd = 0.0
+            self._large_print = 0.0
+            return
+
+        # CVD
+        buy_vol  = sum(t[2] for t in trades if t[1] == "buy")
+        sell_vol = sum(t[2] for t in trades if t[1] == "sell")
+        total = buy_vol + sell_vol
+        self._cvd = (buy_vol - sell_vol) / total if total > 0.0 else 0.0
+
+        # Large print direction
+        sizes = [t[2] for t in trades]
+        avg_size = sum(sizes) / len(sizes)
+        threshold = 2 * avg_size
+        large = [t for t in trades if t[2] > threshold]
+        if not large:
+            self._large_print = 0.0
+            return
+        lb = sum(t[2] for t in large if t[1] == "buy")
+        ls = sum(t[2] for t in large if t[1] == "sell")
+        lt = lb + ls
+        self._large_print = (lb - ls) / lt if lt > 0.0 else 0.0
 
 
 class DerivativesFeed:
@@ -102,7 +183,7 @@ class DerivativesFeed:
                 # On success, refresh 60s early so the key (TTL=600s) is always
                 # renewed with headroom to spare even if the fetch runs long.
                 # On failure, wait the full interval before retrying.
-                await asyncio.sleep(_REFRESH_INTERVAL - 60 if success else _REFRESH_INTERVAL)
+                await asyncio.sleep(_REFRESH_INTERVAL - 10 if success else _REFRESH_INTERVAL)
         finally:
             if self._exchange is not None:
                 await self._exchange.close()
