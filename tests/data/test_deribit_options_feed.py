@@ -24,6 +24,8 @@ def make_feed() -> DeribitOptionsFeed:
     """DeribitOptionsFeed with fakeredis and no real HTTP."""
     feed = DeribitOptionsFeed.__new__(DeribitOptionsFeed)
     feed._redis = fakeredis.FakeRedis()
+    feed._prev_pcr_oi = 1.0
+    feed._prev_skew_25d = 0.0
     return feed
 
 
@@ -367,3 +369,63 @@ def test_options_features_ttl():
     feed._write_features(features)
     ttl = feed._redis.ttl("options:features")
     assert 590 <= ttl <= 600, f"Expected TTL ~600s, got {ttl}"
+
+
+# ── _good_instruments helper ──────────────────────────────────────────────────
+
+def _good_instruments():
+    """Minimal valid BTC options chain: one 7-day expiry with 4 strikes."""
+    expiry = datetime.now(timezone.utc) + timedelta(days=7)
+    expiry_str = expiry.strftime("%d%b%y").upper()
+    underlying = 95000.0
+    iv = 55.0
+    return [
+        {"instrument_name": f"BTC-{expiry_str}-94000-P", "mark_iv": iv + 2, "open_interest": 100, "underlying_price": underlying},
+        {"instrument_name": f"BTC-{expiry_str}-95000-C", "mark_iv": iv,     "open_interest": 150, "underlying_price": underlying},
+        {"instrument_name": f"BTC-{expiry_str}-95000-P", "mark_iv": iv + 1, "open_interest": 120, "underlying_price": underlying},
+        {"instrument_name": f"BTC-{expiry_str}-96000-C", "mark_iv": iv - 1, "open_interest":  80, "underlying_price": underlying},
+    ]
+
+
+# ── test_pcr_delta and test_skew_delta ────────────────────────────────────────
+
+def test_compute_features_includes_pcr_delta_and_skew_delta():
+    """After compute, both delta features are present in the returned dict."""
+    feed = DeribitOptionsFeed.__new__(DeribitOptionsFeed)
+    feed._redis = MagicMock()
+    feed._prev_pcr_oi = 1.0
+    feed._prev_skew_25d = 0.0
+    result = feed._compute_features(_good_instruments())
+    assert "pcr_delta" in result
+    assert "skew_delta" in result
+
+
+def test_pcr_delta_is_change_from_previous():
+    """pcr_delta = current_pcr_oi - prev_pcr_oi."""
+    feed = DeribitOptionsFeed.__new__(DeribitOptionsFeed)
+    feed._redis = MagicMock()
+    feed._prev_pcr_oi = 0.8
+    feed._prev_skew_25d = 0.0
+    result = feed._compute_features(_good_instruments())
+    assert result["pcr_delta"] == pytest.approx(result["pcr_oi"] - 0.8, abs=1e-6)
+
+
+def test_skew_delta_is_change_from_previous():
+    """skew_delta = current_skew_25d - prev_skew_25d."""
+    feed = DeribitOptionsFeed.__new__(DeribitOptionsFeed)
+    feed._redis = MagicMock()
+    feed._prev_pcr_oi = 1.0
+    feed._prev_skew_25d = 5.0
+    result = feed._compute_features(_good_instruments())
+    assert result["skew_delta"] == pytest.approx(result["skew_25d"] - 5.0, abs=1e-6)
+
+
+def test_prev_values_updated_after_compute():
+    """Instance state is updated to current values after each compute call."""
+    feed = DeribitOptionsFeed.__new__(DeribitOptionsFeed)
+    feed._redis = MagicMock()
+    feed._prev_pcr_oi = 1.0
+    feed._prev_skew_25d = 0.0
+    result = feed._compute_features(_good_instruments())
+    assert feed._prev_pcr_oi == pytest.approx(result["pcr_oi"])
+    assert feed._prev_skew_25d == pytest.approx(result["skew_25d"])

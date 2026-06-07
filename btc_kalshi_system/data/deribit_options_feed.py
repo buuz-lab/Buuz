@@ -42,6 +42,8 @@ class DeribitOptionsFeed:
 
     def __init__(self, redis_url: str = REDIS_URL) -> None:
         self._redis = redis.from_url(redis_url)
+        self._prev_pcr_oi: float = 1.0    # neutral default (ratio, 1.0 = balanced)
+        self._prev_skew_25d: float = 0.0  # neutral default
 
     # ── Public entry point ─────────────────────────────────────────────────────
 
@@ -79,7 +81,8 @@ class DeribitOptionsFeed:
             sorted_expiries = sorted(expiries.keys())
 
             if not sorted_expiries:
-                return {"atm_iv": None, "pcr_oi": 1.0, "term_structure_slope": 0.0, "skew_25d": 0.0}
+                return {"atm_iv": None, "pcr_oi": 1.0, "term_structure_slope": 0.0, "skew_25d": 0.0,
+                        "pcr_delta": 0.0, "skew_delta": 0.0}
 
             near_expiry = sorted_expiries[0]
             far_expiry = sorted_expiries[1] if len(sorted_expiries) >= 2 else None
@@ -88,7 +91,8 @@ class DeribitOptionsFeed:
 
             underlying_price = self._get_underlying_price(near_instruments)
             if underlying_price is None:
-                return {"atm_iv": None, "pcr_oi": 1.0, "term_structure_slope": 0.0, "skew_25d": 0.0}
+                return {"atm_iv": None, "pcr_oi": 1.0, "term_structure_slope": 0.0, "skew_25d": 0.0,
+                        "pcr_delta": 0.0, "skew_delta": 0.0}
 
             # atm_iv — near expiry
             near_iv = self._compute_atm_iv(near_instruments, underlying_price)
@@ -119,15 +123,23 @@ class DeribitOptionsFeed:
             else:
                 skew_25d = 0.0
 
+            pcr_delta = pcr_oi - self._prev_pcr_oi
+            skew_delta = skew_25d - self._prev_skew_25d
+            self._prev_pcr_oi = pcr_oi
+            self._prev_skew_25d = skew_25d
+
             return {
                 "atm_iv": near_iv,
                 "pcr_oi": pcr_oi,
                 "term_structure_slope": term_structure_slope,
                 "skew_25d": skew_25d,
+                "pcr_delta": pcr_delta,
+                "skew_delta": skew_delta,
             }
         except Exception as exc:
             logger.warning(f"DeribitOptionsFeed: feature computation failed — {exc}")
-            return {"atm_iv": None, "pcr_oi": 1.0, "term_structure_slope": 0.0, "skew_25d": 0.0}
+            return {"atm_iv": None, "pcr_oi": 1.0, "term_structure_slope": 0.0, "skew_25d": 0.0,
+                    "pcr_delta": 0.0, "skew_delta": 0.0}
 
     def _group_by_expiry(self, instruments: list) -> dict:
         """Group parsed instruments by expiry datetime. Skip expiries < 3 days out."""
