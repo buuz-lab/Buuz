@@ -28,8 +28,8 @@ def test_get_correlations_returns_both_keys():
             [300 + i for i in range(20)],
         )
         result = feed.get_correlations()
-    assert "btc_spx_corr_8h" in result
-    assert "btc_qqq_corr_8h" in result
+    assert "btc_spx_corr_8d" in result
+    assert "btc_qqq_corr_8d" in result
 
 
 def test_get_correlations_returns_float_values():
@@ -41,10 +41,10 @@ def test_get_correlations_returns_float_values():
             [300 + i * 0.5 for i in range(20)],
         )
         result = feed.get_correlations()
-    assert isinstance(result["btc_spx_corr_8h"], float)
-    assert isinstance(result["btc_qqq_corr_8h"], float)
-    assert -1.0 <= result["btc_spx_corr_8h"] <= 1.0
-    assert -1.0 <= result["btc_qqq_corr_8h"] <= 1.0
+    assert isinstance(result["btc_spx_corr_8d"], float)
+    assert isinstance(result["btc_qqq_corr_8d"], float)
+    assert -1.0 <= result["btc_spx_corr_8d"] <= 1.0
+    assert -1.0 <= result["btc_qqq_corr_8d"] <= 1.0
 
 
 def test_get_correlations_returns_zeros_on_yfinance_failure():
@@ -52,7 +52,7 @@ def test_get_correlations_returns_zeros_on_yfinance_failure():
     with patch("btc_kalshi_system.data.macro_feed.yf") as mock_yf:
         mock_yf.download.side_effect = Exception("network error")
         result = feed.get_correlations()
-    assert result == {"btc_spx_corr_8h": 0.0, "btc_qqq_corr_8h": 0.0}
+    assert result == {"btc_spx_corr_8d": 0.0, "btc_qqq_corr_8d": 0.0}
 
 
 def test_get_correlations_uses_cache_within_15_min():
