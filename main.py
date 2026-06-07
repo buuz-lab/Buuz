@@ -266,6 +266,9 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("kalshi_early_progress",    "REAL DEFAULT NULL"),  # actual progress when early snapshot taken
     ("volume_ratio_1h",          "REAL DEFAULT NULL"),  # hourly volume vs 30-day avg (regime feature)
     ("regime_prob",              "REAL DEFAULT NULL"),  # regime v2 prob_up at candle close (NULL until model deployed)
+    ("kalshi_open_imbalance", "REAL DEFAULT NULL"),
+    ("btc_spx_corr_8d",      "REAL DEFAULT NULL"),
+    ("btc_qqq_corr_8d",      "REAL DEFAULT NULL"),
 ]
 
 
@@ -765,6 +768,12 @@ class KronosV2:
         kalshi_spread_normalized = (best_ask_cents - best_bid_cents) / 100.0
         self._fusion.update_kalshi_spread(kalshi_spread_normalized)
         self._fusion.update_kalshi_mid(mid_cents)
+
+        # Inject Kalshi open imbalance so regime model can use it as a feature.
+        _imbal_snap = self._orderbook_feed.get_open_snapshot(ticker)
+        self._fusion.set_kalshi_imbalance(
+            _imbal_snap.get("depth_imbalance") if _imbal_snap else None
+        )
 
         # f. Read background MC cache — avoids 23s Kronos call on the critical path
         cached = self._cached_kronos

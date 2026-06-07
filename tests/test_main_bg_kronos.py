@@ -65,6 +65,8 @@ def _make_system() -> "main.KronosV2":
     system._regime = MagicMock()
     system._regime._clf = MagicMock()  # not None = trained, is_bootstrap=False
     system._last_deepseek_refresh = 0.0
+    system._orderbook_feed = MagicMock()
+    system._orderbook_feed.get_open_snapshot.return_value = None
 
     db = sqlite3.connect(":memory:")
     db.execute(main._CREATE_TRADES_TABLE)
