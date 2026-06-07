@@ -4,13 +4,13 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 35/36 complete. Phase 3c calibrator fully built (fires automatically at 200 live regime rows). API order placement confirmed working. 530 tests. System is code-complete — only data accumulation stands between current state and full go-live.
+**Current focus:** Session 35/36 complete. System fully code-complete. Go-live plan: regime v2 deploys ~June 8-9 → all milestones accumulate in parallel → go live ~June 15-18 once edge confirmed + P&L positive. Phase 3c auto-fires ~June 27-July 1 (accumulates from paper trades, clock started at regime v2 deploy).
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-06 session 35/36: Phase 3c calibrator code complete (auto-fires at 200 regime_prob rows, removes Gates 13+14). API order placement tested and fixed. Go-live critical path: regime v2 deploy ~June 8-9 → edge validation → Gate 2 shadow → ~June 20-25 go-live.**
+**As of 2026-06-06 session 35/36: Disagreement neutralization removed — regime v2 signal used directly (Kronos already embedded as features). Go-live criteria simplified: edge validation + paper P&L positive, all running in parallel post-deploy. Target go-live ~June 15-18.**
 
 ---
 
@@ -45,7 +45,7 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 | Gate | Function | Removable? |
 |---|---|---|
 | 1 | DeepSeek suppress | No |
-| 2 | Regime/Kronos direction agreement (shadow mode) | After Gate 2 validated (~50 shadow trades) |
+| 2 | Regime/Kronos direction agreement (shadow mode — logs only, never enforced) | Not required for go-live — regime v2 is the full signal, Kronos embedded as features. Disagreements are informative, not noise. Neutralization removed session 36. |
 | 3 | Thin edge in high_uncertainty | No |
 | 4 | Edge circuit breaker | No |
 | 5 | Regime-aware edge floor | No |
@@ -131,10 +131,11 @@ python3 scripts/train_regime.py --db trades.db --out models/regime.pkl
 launchctl kickstart -k gui/$(id -u)/com.kronos.v2
 ```
 
-After deploy:
-- `regime_prob` starts populating in `candle_features` — live Brier tracking activates
-- Monitor `regime_v2_monitor.py` for edge trend
-- Watch Gate 2 shadow disagreement rate for ~50 trades before enforcing
+After deploy (all milestones run in parallel — no sequential waiting):
+- `regime_prob` starts populating → live Brier tracking activates, Phase 3c clock starts
+- Monitor `regime_v2_monitor.py` for edge trend (first reading after ~20 regime_prob rows, ~Day 2)
+- Gate 2 logs disagreements in shadow mode — informational only, never needs enforcing
+- **Go-live criteria (target ~June 15-18):** Brier(regime_prob) < Brier(kalshi_open_mid) on ≥20 rows AND paper P&L positive trend over ~7 days. Both checked in parallel.
 - **Drawdown trigger**: >$30 loss in 3 days → `touch models/regime_paused.flag`
 
 ---
@@ -173,6 +174,7 @@ After Phase 3c deploys: **remove Gates 13 and 14**.
 | Phase 3c calibrator code | **Complete** — auto-fires at 200 regime_prob rows, no further code needed |
 | API order placement | **Confirmed working** — place + cancel tested on live Kalshi API |
 | `raw_http_client.py` bug fix | Fixed: missing `action: "buy"` field + sending both price fields (should be exactly one) |
+| Disagreement neutralization removed | `fusion.py` — regime v2 signal used directly on Kronos disagreements. Neutralization was a regime v1 holdover (circular label). With regime v2 + Kronos embedded as features, disagreements are the model overriding Kronos based on 32 features — informative, not noise. |
 
 **System is code-complete.** Every remaining milestone is data-gated. No more build sessions needed before go-live.
 
@@ -192,18 +194,35 @@ After Phase 3c deploys: **remove Gates 13 and 14**.
   - [ ] CV fold 3 Brier < fold 1 Brier
   - [ ] Contextuality gap > 0.10
 - Save + restart: `python3 scripts/train_regime.py --db trades.db --out models/regime.pkl && launchctl kickstart -k gui/$(id -u)/com.kronos.v2`
-- After deploy: `regime_prob` populates, Gate 2 shadow disagreement rate accumulates, live Brier tracking activates
+- After deploy: `regime_prob` populates, live Brier tracking activates, Phase 3c clock starts
+- All post-deploy milestones run **in parallel** — no sequential waiting required
 
-#### WAITING FOR DATA — gates and thresholds
+#### GO-LIVE PLAN (milestones run in parallel after June 8-9 deploy)
 
-| What | Wait for | How to check |
+| Day post-deploy | What accumulates | Action |
 |---|---|---|
-| **Enforce Gate 2** | ~50 shadow trades under regime v2 | `python3 scripts/regime_confidence_tracker.py` |
-| **Phase 3c calibrator auto-fires** ✅ code done | 200+ live regime_prob rows (~June 27 - July 1) | `SELECT COUNT(*) FROM trades WHERE regime_prob IS NOT NULL AND outcome IS NOT NULL` |
-| **LogisticProgressCap** (upgrade Gate 12) | 200+ new-feature candle_features rows | `SELECT COUNT(*) FROM candle_features WHERE features_stale=0 AND kalshi_open_imbalance IS NOT NULL` |
-| **Mid-candle exit LIVE** | 50+ resolved would-exit candles, win_rate < 40% | `SELECT AVG(t.outcome), COUNT(*) FROM candle_features cf JOIN trades t ON t.timestamp >= cf.candle_ts AND t.timestamp < datetime(cf.candle_ts,'+900 seconds') WHERE cf.would_exit=1 AND t.outcome IS NOT NULL` |
-| **Gate 12 threshold calibration** | 100+ new-feature candle_features rows | percentile query in `RuleBasedProgressCap` docstring |
-| **imbalance + macro corr feature importance** | Next regime retrain | Check dry-run feature importances |
+| Day 1-2 | ≥20 regime_prob rows | First Brier reading from `regime_v2_monitor.py` |
+| Day 7 | ~70-80 rows, P&L trend visible | Assess: is edge confirmed + P&L positive? |
+| **Day 7-10** | Edge ✓ + P&L ✓ | **Flip `PAPER_TRADING=false`, restart** → go live |
+| Day 18-20 | 200 regime_prob rows | Phase 3c auto-fires, Gates 13+14 removed |
+
+**Go-live criteria (both must be true):**
+1. `Brier(regime_prob, btc_direction) < Brier(kalshi_open_mid, btc_direction)` on ≥20 rows
+2. Paper P&L positive trend over ~7 days under regime v2
+
+**Gate 2:** Shadow mode logs disagreements but is never enforced. Regime v2 signal used directly — neutralization was removed session 36. No Gate 2 action needed.
+
+**Phase 3c note:** Accumulates from paper trades. Clock started at regime v2 deploy, not at go-live. Auto-fires ~18-20 days after June 8-9 = ~June 27 - July 1 regardless of when we go live.
+
+#### DATA-GATED (no code needed — just wait)
+
+| What | Data needed | Query |
+|---|---|---|
+| Phase 3c auto-fires, Gates 13+14 removed | 200 regime_prob rows | `SELECT COUNT(*) FROM trades WHERE regime_prob IS NOT NULL AND outcome IS NOT NULL` |
+| LogisticProgressCap (upgrade Gate 12) | 200+ new-feature candle_features rows | `SELECT COUNT(*) FROM candle_features WHERE features_stale=0 AND kalshi_open_imbalance IS NOT NULL` |
+| Mid-candle exit LIVE | 50+ resolved would-exit candles, win_rate < 40% | `SELECT AVG(t.outcome), COUNT(*) FROM candle_features cf JOIN trades t ON t.timestamp >= cf.candle_ts AND t.timestamp < datetime(cf.candle_ts,'+900 seconds') WHERE cf.would_exit=1 AND t.outcome IS NOT NULL` |
+| Gate 12 threshold calibration | 100+ new-feature rows | percentile query in `RuleBasedProgressCap` docstring |
+| imbalance + macro corr feature importance | Next regime retrain | feature importances in dry-run output |
 
 #### NOTHING BLOCKING — can build anytime
 - **Gate 4 (rolling edge circuit breaker)** — hardcoded `True` in paper mode. Enable with loose threshold to get signal quality data. No data dependency.
