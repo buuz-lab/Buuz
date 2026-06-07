@@ -400,7 +400,7 @@ def test_signal_carries_regime_features_dict():
     assert result is not None
     # All keys must be present; kronos_raw_*, kalshi_open_imbalance may be None until first cycle fires
     from btc_kalshi_system.models.regime_model import _FEATURE_ORDER
-    _NULLABLE_KEYS = {"kronos_raw_15min", "kronos_raw_5min", "kalshi_open_imbalance"}
+    _NULLABLE_KEYS = {"kronos_raw_15min", "kronos_raw_5min", "kalshi_open_imbalance", "kalshi_early_drift"}
     for key in _FEATURE_ORDER:
         assert key in result.regime_features, f"Missing key: {key}"
         if key not in _NULLABLE_KEYS:

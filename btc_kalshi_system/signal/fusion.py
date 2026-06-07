@@ -118,6 +118,7 @@ class SignalFusionEngine:
         self._last_kronos_raw_15min: float | None = None
         self._last_kronos_raw_5min: float | None = None
         self._last_kalshi_open_imbalance: float | None = None
+        self._last_kalshi_early_drift: float | None = None
 
     def update_market_context(self, ctx: dict) -> None:
         self._market_context = ctx
@@ -130,6 +131,9 @@ class SignalFusionEngine:
 
     def set_kalshi_imbalance(self, imbalance: float | None) -> None:
         self._last_kalshi_open_imbalance = imbalance
+
+    def set_kalshi_early_drift(self, drift: float | None) -> None:
+        self._last_kalshi_early_drift = drift
 
     def get_signal(
         self,
@@ -532,5 +536,6 @@ class SignalFusionEngine:
             "kalshi_open_imbalance":    self._last_kalshi_open_imbalance,
             "btc_spx_corr_8d":          float(ctx.get("btc_spx_corr_8d") or 0.0),
             "btc_qqq_corr_8d":          float(ctx.get("btc_qqq_corr_8d") or 0.0),
+            "kalshi_early_drift":       self._last_kalshi_early_drift,
         }
         return features, stale, deribit_stale, okx_stale

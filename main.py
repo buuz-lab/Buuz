@@ -275,6 +275,10 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("btc_qqq_corr_8d",      "REAL DEFAULT NULL"),
     ("would_exit",             "INTEGER DEFAULT 0"),
     ("would_exit_price_cents", "REAL DEFAULT NULL"),
+    # T+30s data (session 38) — enables future model that predicts from in-candle state
+    # rather than prior-candle-close state, eliminating the structural T+30s Kalshi disadvantage.
+    ("kalshi_early_drift",  "REAL DEFAULT NULL"),  # kalshi_early_mid - kalshi_open_mid: 30s market reaction
+    ("features_early",      "TEXT DEFAULT NULL"),  # JSON of all regime features at T+30s snap time
 ]
 
 
@@ -595,14 +599,17 @@ class KronosV2:
                     _snap_ticker = self._candle_ticker_map.get(_in_progress_key)
                     _snap_ob = self._orderbook_feed.get_orderbook(_snap_ticker) if _snap_ticker else None
 
-                    # Early snapshot at T+30s (3-7% progress) — exact Kalshi price at entry window
+                    # Early snapshot at T+30s (3-7% progress) — Kalshi price + regime features
+                    # for future T+30s model training.
                     if _in_progress_key not in self._early_candle_snaps and 0.03 <= _progress <= 0.07:
                         if _snap_ob:
                             _bid, _ask, _ = self._parse_orderbook(_snap_ob)
                             if _ask > 0:
+                                _early_features, _, _, _ = self._fusion.get_features_snapshot()
                                 self._early_candle_snaps[_in_progress_key] = {
-                                    "mid_prob": (_bid + _ask) / 200.0,
-                                    "progress": round(_progress, 3),
+                                    "mid_prob":      (_bid + _ask) / 200.0,
+                                    "progress":      round(_progress, 3),
+                                    "features_early": json.dumps(_early_features) if _early_features else None,
                                 }
 
                     # Mid-candle snapshot at ~50% progress (~7.5 min in)
@@ -660,6 +667,12 @@ class KronosV2:
                 _early_snap = self._early_candle_snaps.pop(_candle_key, None)
                 kalshi_early_mid      = _early_snap["mid_prob"]  if _early_snap else None
                 kalshi_early_progress = _early_snap["progress"]  if _early_snap else None
+                features_early        = _early_snap.get("features_early") if _early_snap else None
+                kalshi_early_drift    = (
+                    round(kalshi_early_mid - kalshi_open_mid, 4)
+                    if kalshi_early_mid is not None and kalshi_open_mid is not None
+                    else None
+                )
 
                 cols = list(_FEATURE_ORDER)
                 vals = [features.get(c) for c in cols]
@@ -670,8 +683,10 @@ class KronosV2:
                     "kalshi_mid_candle_mid, kalshi_mid_candle_spread, kalshi_mid_candle_progress, "
                     "kalshi_early_mid, kalshi_early_progress, regime_prob, "
                     "would_exit, would_exit_price_cents, "
+                    "kalshi_early_drift, features_early, "
                     + ", ".join(cols)
                 )
+                placeholders = ", ".join(["?"] * (18 + len(cols)))
                 self._db.execute(
                     f"INSERT OR IGNORE INTO candle_features ({col_names}) VALUES ({placeholders})",
                     [
@@ -691,10 +706,14 @@ class KronosV2:
                         regime_prob,
                         would_exit,
                         would_exit_price_cents,
+                        kalshi_early_drift,
+                        features_early,
                         *vals,
                     ],
                 )
                 self._db.commit()
+                # Inject T+30s drift into fusion so next candle's regime features include it.
+                self._fusion.set_kalshi_early_drift(kalshi_early_drift)
                 last_logged_ts = closed_ts
                 logger.info(f"CandleLogger: logged candle {closed_ts} direction={btc_direction}")
             except Exception as exc:

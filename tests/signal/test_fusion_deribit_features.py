@@ -21,6 +21,7 @@ _ALL_29_KEYS = [
     "btc_24h_return",
     "kronos_raw_15min", "kronos_raw_5min",
     "kalshi_open_imbalance", "btc_spx_corr_8d", "btc_qqq_corr_8d",
+    "kalshi_early_drift",
 ]
 
 
@@ -88,7 +89,7 @@ def test_regime_features_includes_all_28_keys():
     assert keys == _ALL_29_KEYS, (
         f"Key mismatch.\nExpected: {_ALL_29_KEYS}\nGot:      {keys}"
     )
-    assert len(keys) == 32
+    assert len(keys) == 33
 
 
 # ── test_deribit_stale flags ──────────────────────────────────────────────────

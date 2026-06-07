@@ -51,6 +51,11 @@ _FEATURE_ORDER = [
     # sourced from Redis via DerivativesFeed; default 0.0 when unavailable.
     "btc_spx_corr_8d",
     "btc_qqq_corr_8d",
+    # T+30s market reaction (session 38) — Kalshi mid price drift in first ~30s of candle.
+    # Positive = market repriced upward in the entry window; negative = downward.
+    # Only populated for candles where kalshi_early_mid AND kalshi_open_mid are both logged.
+    # Historical rows default to NaN (XGBoost missing-value handling).
+    "kalshi_early_drift",
 ]
 
 
