@@ -142,7 +142,7 @@ def test_features_written_to_redis_key_with_ttl():
     raw = feed._redis.get("regime:features")
     assert raw is not None
     ttl = feed._redis.ttl("regime:features")
-    assert 1790 <= ttl <= 1800
+    assert 110 <= ttl <= 120
 
 
 def test_features_contain_all_six_keys():
@@ -251,30 +251,21 @@ async def test_coinglass_returns_values_when_api_key_set():
 
 
 @pytest.mark.asyncio
-async def test_kraken_fallback_when_okx_trades_fail():
-    """When OKX fetch_trades raises, Kraken fallback is called and CVD/basis are non-zero."""
+async def test_kraken_exchange_lazy_init():
+    """_get_kraken_exchange() lazy-initializes and caches the Kraken ccxt instance."""
     feed = make_feed()
-    feed._exchange = AsyncMock()
-    feed._exchange.fetch_trades.side_effect = Exception("OKX unreachable")
-
-    # Fake Kraken exchange returning trades with a buy skew
-    kraken_trades = [
-        {"amount": 3.0, "side": "buy", "price": 67000.0},
-        {"amount": 1.0, "side": "sell", "price": 67000.0},
-    ]
+    feed._kraken_exchange = None
     mock_kraken = AsyncMock()
-    mock_kraken.fetch_trades.return_value = kraken_trades
     feed._ccxt_async.kraken.return_value = mock_kraken
 
-    # Seed BRTI so basis_spread_pct has a denominator
-    feed._redis.set("brti:resolution_estimate", "67000.0")
-
-    cvd, basis, large_print, _cvd_stale_flag = await feed._fetch_trades_data()
+    result = await feed._get_kraken_exchange()
 
     feed._ccxt_async.kraken.assert_called_once()
-    mock_kraken.fetch_trades.assert_called_once()
-    assert cvd == pytest.approx(0.5)   # (3-1)/(3+1)
-    assert basis == pytest.approx(0.0, abs=1e-6)
+    assert result is mock_kraken
+    # Second call should return the cached instance without re-calling ccxt
+    result2 = await feed._get_kraken_exchange()
+    assert result2 is mock_kraken
+    feed._ccxt_async.kraken.assert_called_once()  # still only once
 
 
 @pytest.mark.asyncio
@@ -500,20 +491,13 @@ def test_fetch_features_includes_macro_correlations(monkeypatch):
     from btc_kalshi_system.data.macro_feed import MacroFeed
     from unittest.mock import MagicMock
 
-    feed = make_feed()
+    feed = make_feed_with_mock_accumulator()
+    feed._last_slow_fetch = time.time()  # skip slow tier
 
-    # Stub out all the async fetch helpers to return zeros
-    async def _zero_funding(): return 0.0, 0.0, 0.0, False
-    async def _zero_trades(): return 0.0, 0.0, 0.0, True
-    async def _zero_volume(): return 1.0
+    # Stub out fast-tier helpers
     async def _zero_liq(): return 0.0
-    async def _zero_eth(): return 0.5
     async def _zero_imbalance(): return 0.0
-    monkeypatch.setattr(feed, "_fetch_funding_and_oi", _zero_funding)
-    monkeypatch.setattr(feed, "_fetch_trades_data", _zero_trades)
-    monkeypatch.setattr(feed, "_fetch_volume_ratio", _zero_volume)
     monkeypatch.setattr(feed, "_fetch_liquidations", _zero_liq)
-    monkeypatch.setattr(feed, "_fetch_eth_direction", _zero_eth)
     monkeypatch.setattr(feed, "_fetch_okx_spot_imbalance", _zero_imbalance)
     monkeypatch.setattr(feed, "_brti_volatility_1h", lambda: 0.0)
 
@@ -725,3 +709,88 @@ async def test_fetch_okx_spot_imbalance_returns_zero_on_api_failure():
     with patch("btc_kalshi_system.data.derivatives_feed.aiohttp.ClientSession", return_value=mock_session):
         result = await feed._fetch_okx_spot_imbalance()
     assert result == pytest.approx(0.0)
+
+
+# ── Slow-tier cache tests ──────────────────────────────────────────────────────
+
+def make_feed_with_mock_accumulator():
+    """Instantiate DerivativesFeed without calling __init__; inject mock accumulator."""
+    feed = DerivativesFeed.__new__(DerivativesFeed)
+    feed._redis = fakeredis.FakeRedis()
+    feed._macro_feed = MagicMock()
+    feed._macro_feed.get_correlations.return_value = {}
+    feed._exchange = MagicMock()
+    feed._exchange_name = "okx"
+    feed._prev_oi = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0, "deribit": 0.0}
+    feed._kraken_exchange = None
+    feed._last_slow_fetch = 0.0
+    feed._cached_funding_result = (0.001, 0.0, 0.0, False)
+    feed._cached_eth_dir = 0.5
+    feed._cached_volume_ratio = 1.0
+    acc = MagicMock()
+    acc.cvd_normalized = 0.3
+    acc.large_print_direction = 0.0
+    acc.last_price = 95000.0
+    acc.is_stale = False
+    feed._cvd_accumulator = acc
+    return feed
+
+
+async def test_slow_tier_not_refetched_within_60s():
+    """When _last_slow_fetch < 60s ago, funding/OI/ETH/volume are read from cache."""
+    feed = make_feed_with_mock_accumulator()
+    feed._last_slow_fetch = time.time()
+
+    feed._fetch_funding_and_oi = AsyncMock(return_value=(0.001, 0.0, 0.0, False))
+    feed._fetch_eth_direction   = AsyncMock(return_value=0.5)
+    feed._fetch_volume_ratio    = AsyncMock(return_value=1.0)
+    feed._fetch_liquidations       = AsyncMock(return_value=0.0)
+    feed._fetch_okx_spot_imbalance = AsyncMock(return_value=0.0)
+
+    await feed._fetch_features()
+
+    feed._fetch_funding_and_oi.assert_not_called()
+    feed._fetch_eth_direction.assert_not_called()
+    feed._fetch_volume_ratio.assert_not_called()
+
+
+async def test_slow_tier_refetched_after_60s():
+    """When _last_slow_fetch > 60s ago, funding/OI/ETH/volume are re-fetched."""
+    feed = make_feed_with_mock_accumulator()
+    feed._last_slow_fetch = time.time() - 61
+
+    feed._fetch_funding_and_oi = AsyncMock(return_value=(0.002, 0.001, 0.01, False))
+    feed._fetch_eth_direction   = AsyncMock(return_value=1.0)
+    feed._fetch_volume_ratio    = AsyncMock(return_value=1.5)
+    feed._fetch_liquidations       = AsyncMock(return_value=0.0)
+    feed._fetch_okx_spot_imbalance = AsyncMock(return_value=0.0)
+
+    await feed._fetch_features()
+
+    feed._fetch_funding_and_oi.assert_called_once()
+    feed._fetch_eth_direction.assert_called_once()
+    feed._fetch_volume_ratio.assert_called_once()
+
+
+async def test_cvd_read_from_accumulator_not_http():
+    """CVD comes from the accumulator (0.3); no HTTP trade fetch."""
+    feed = make_feed_with_mock_accumulator()
+    feed._last_slow_fetch = time.time()
+    feed._fetch_liquidations       = AsyncMock(return_value=0.0)
+    feed._fetch_okx_spot_imbalance = AsyncMock(return_value=0.0)
+
+    features = await feed._fetch_features()
+
+    assert features["cvd_normalized"] == pytest.approx(0.3)
+
+
+async def test_cvd_stale_flag_set_when_accumulator_stale():
+    """When accumulator.is_stale=True, features dict contains _cvd_stale=True."""
+    feed = make_feed_with_mock_accumulator()
+    feed._cvd_accumulator.is_stale = True
+    feed._last_slow_fetch = time.time()
+    feed._fetch_liquidations       = AsyncMock(return_value=0.0)
+    feed._fetch_okx_spot_imbalance = AsyncMock(return_value=0.0)
+
+    features = await feed._fetch_features()
+    assert features.get("_cvd_stale") is True

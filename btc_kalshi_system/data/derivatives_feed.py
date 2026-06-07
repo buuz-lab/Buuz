@@ -14,8 +14,8 @@ from config import COINGLASS_API_KEY, HYPERLIQUID_BASE_URL, KRAKEN_FUTURES_BASE_
 from btc_kalshi_system.data.fear_greed import fetch_fear_greed
 from btc_kalshi_system.data.macro_feed import MacroFeed
 
-_REFRESH_INTERVAL = 60    # 1 min cycle — CVD/liq/imbalance fresh at trade time (was 300)
-_FEATURES_TTL = 360       # 6x refresh interval — survives ~5 failed cycles (was 1800)
+_REFRESH_INTERVAL = 15    # fast tier every 15s; slow tier re-fetches at most once per 60s
+_FEATURES_TTL     = 120   # 8x the new interval — survives several failed cycles
 _CCXT_TIMEOUT_MS = 10_000  # 10 s — fail fast on DNS timeouts rather than hanging
 _LKG_TTL = 86_400         # 24 hours — last-known-good survives multi-hour exchange outages
 _FUNDING_LOOKBACK_MS = 4 * 3600_000  # 4 hours in milliseconds
@@ -205,10 +205,15 @@ class DerivativesFeed:
         self._redis = redis.from_url(redis_url)
         self._macro_feed = MacroFeed()
         self._ccxt_async = ccxt_async
-        self._exchange = None   # resolved lazily on first fetch
+        self._exchange = None
         self._exchange_name: str = ""
         self._prev_oi: dict[str, float] = {"okx": 0.0, "hyperliquid": 0.0, "kraken_futures": 0.0, "deribit": 0.0}
-        self._kraken_exchange = None  # lazy init for Kraken trade fallback
+        self._kraken_exchange = None  # kept for _fetch_volume_ratio fallback
+        self._cvd_accumulator = StreamingCVDAccumulator()
+        self._last_slow_fetch: float = 0.0
+        self._cached_funding_result: tuple = (0.0, 0.0, 0.0, False)
+        self._cached_eth_dir: float = 0.5
+        self._cached_volume_ratio: float = 1.0
 
     # ── Public entry point ─────────────────────────────────────────────────────
 
@@ -233,58 +238,70 @@ class DerivativesFeed:
         return False
 
     async def run(self) -> None:
-        """Refresh features every 5 minutes indefinitely."""
-        try:
-            # Best-effort startup resolve. Hyperliquid, Deribit, and Kraken Futures
-            # are independent REST sources that carry the feed even when no ccxt
-            # exchange (OKX/Bybit) is available — don't block startup on it.
-            await self._resolve_exchange()
+        await self._resolve_exchange()
+        await asyncio.gather(
+            self._batch_loop(),
+            self._cvd_accumulator.run(),
+        )
 
-            while True:
-                if self._exchange is None:
-                    await self._resolve_exchange()  # best-effort; proceed regardless
-
-                success = False
-                try:
-                    features = await self._fetch_features()
-                    okx_partial = features.pop("_okx_partial", False)
-                    self._write_features(features, okx_partial=okx_partial)
-                    logger.info(f"DerivativesFeed: wrote regime:features — {features}")
-                    success = True
-                except Exception as exc:
-                    logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
-                    if self._exchange is not None:
-                        await self._exchange.close()
-                    self._exchange = None
-                    await self._resolve_exchange()  # best-effort re-resolve after failure
-
-                # On success, refresh 60s early so the key (TTL=600s) is always
-                # renewed with headroom to spare even if the fetch runs long.
-                # On failure, wait the full interval before retrying.
-                await asyncio.sleep(_REFRESH_INTERVAL - 10 if success else _REFRESH_INTERVAL)
-        finally:
-            if self._exchange is not None:
-                await self._exchange.close()
+    async def _batch_loop(self) -> None:
+        """Batch refresh loop: fast-tier features every cycle, slow-tier capped at 60s."""
+        while True:
+            if self._exchange is None:
+                await self._resolve_exchange()
+            success = False
+            try:
+                features = await self._fetch_features()
+                okx_partial = features.pop("_okx_partial", False)
+                self._write_features(features, okx_partial=okx_partial)
+                logger.info(f"DerivativesFeed: wrote regime:features — {features}")
+                success = True
+            except Exception as exc:
+                logger.warning(f"DerivativesFeed: fetch failed ({self._exchange_name}): {exc}")
+                if self._exchange is not None:
+                    await self._exchange.close()
+                self._exchange = None
+                await self._resolve_exchange()
+            await asyncio.sleep(_REFRESH_INTERVAL - 10 if success else _REFRESH_INTERVAL)
 
     # ── Feature computation ────────────────────────────────────────────────────
 
     async def _fetch_features(self) -> dict:
-        results = await asyncio.gather(
-            self._fetch_funding_and_oi(),
-            self._fetch_trades_data(),
-            self._fetch_volume_ratio(),
+        _now = time.time()
+        _refetch_slow = (_now - self._last_slow_fetch) >= 60
+
+        # Fast tier — every cycle
+        liq_net_norm, okx_spot_imbalance = await asyncio.gather(
             self._fetch_liquidations(),
-            self._fetch_eth_direction(),
             self._fetch_okx_spot_imbalance(),
         )
-        curr_funding, trend, oi_delta, okx_partial = results[0]
-        cvd, basis, large_print, trades_available = results[1]
-        volume_ratio = results[2]
-        liq_net_norm = results[3]
-        eth_direction_15min = results[4]
-        okx_spot_imbalance = results[5]
+
+        # Slow tier — at most once per 60s
+        if _refetch_slow:
+            (curr_funding, trend, oi_delta, okx_partial), eth_dir, vol_ratio = await asyncio.gather(
+                self._fetch_funding_and_oi(),
+                self._fetch_eth_direction(),
+                self._fetch_volume_ratio(),
+            )
+            self._cached_funding_result = (curr_funding, trend, oi_delta, okx_partial)
+            self._cached_eth_dir = eth_dir
+            self._cached_volume_ratio = vol_ratio
+            self._last_slow_fetch = _now
+        else:
+            curr_funding, trend, oi_delta, okx_partial = self._cached_funding_result
+            eth_dir = self._cached_eth_dir
+            vol_ratio = self._cached_volume_ratio
+
+        # CVD from streaming accumulator — zero HTTP cost
+        cvd         = self._cvd_accumulator.cvd_normalized
+        large_print = self._cvd_accumulator.large_print_direction
+        _last_price = self._cvd_accumulator.last_price
+        brti        = self._get_brti_estimate()
+        basis       = ((_last_price - brti) / brti) if (brti and brti > 0.0 and _last_price > 0.0) else 0.0
+
         vol = self._brti_volatility_1h()
-        fg = fetch_fear_greed(self._redis)
+        fg  = fetch_fear_greed(self._redis)
+
         features: dict = {
             "funding_rate":          curr_funding,
             "funding_rate_trend":    trend,
@@ -293,20 +310,18 @@ class DerivativesFeed:
             "basis_spread_pct":      basis,
             "brti_volatility_1h":    vol,
             "large_print_direction": large_print,
-            "volume_ratio_1h":       volume_ratio,
+            "volume_ratio_1h":       vol_ratio,
             "fear_greed_value":      fg["value"] if fg else None,
             "fear_greed_label":      fg["label"] if fg else None,
             "liq_net_norm":          liq_net_norm,
-            "eth_direction_15min":   eth_direction_15min,
+            "eth_direction_15min":   eth_dir,
             "okx_spot_imbalance":    okx_spot_imbalance,
         }
         macro = self._macro_feed.get_correlations()
         features.update(macro)
         if okx_partial:
             features["_okx_partial"] = True
-        if not trades_available:
-            # CVD and large_print are zeros — key stays alive but row must be
-            # excluded from regime training. Fusion reads this and sets stale=True.
+        if self._cvd_accumulator.is_stale:
             features["_cvd_stale"] = True
         return features
 
@@ -494,39 +509,11 @@ class DerivativesFeed:
 
         return funding_8h, oi_delta
 
-    async def _fetch_trades_data(self) -> tuple[float, float, float, bool]:
-        """Returns (cvd_normalized, basis_spread_pct, large_print_direction, trades_available).
-
-        Tries OKX first, then Kraken. If both fail (e.g. exchange outage),
-        returns zeros with trades_available=False so the caller can mark the
-        feature snapshot as stale without letting the exception crash the loop.
-        """
-        try:
-            trades = await self._exchange.fetch_trades(_SYMBOL, limit=500)
-            return self._cvd_normalized(trades), self._basis_spread_pct(trades), self._large_print_direction(trades), True
-        except Exception as exc:
-            logger.warning(
-                f"DerivativesFeed: OKX trades fetch failed — using Kraken fallback ({exc})"
-            )
-        try:
-            cvd, basis, lp = await self._kraken_trades_data()
-            return cvd, basis, lp, True
-        except Exception as exc:
-            logger.warning(
-                f"DerivativesFeed: Kraken trades fallback also failed — CVD zeroed ({exc})"
-            )
-            return 0.0, 0.0, 0.0, False
-
     async def _get_kraken_exchange(self):
         """Lazy-initialize and return the Kraken ccxt exchange instance."""
         if self._kraken_exchange is None:
             self._kraken_exchange = self._ccxt_async.kraken({"enableRateLimit": True, "timeout": _CCXT_TIMEOUT_MS})
         return self._kraken_exchange
-
-    async def _kraken_trades_data(self) -> tuple[float, float, float]:
-        kraken = await self._get_kraken_exchange()
-        trades = await kraken.fetch_trades(_KRAKEN_SYMBOL, limit=500)
-        return self._cvd_normalized(trades), self._basis_spread_pct(trades), self._large_print_direction(trades)
 
     def _funding_rate_trend(self, history: list[dict]) -> float:
         """Funding rate change over the last _FUNDING_LOOKBACK_MS (4 hours).
