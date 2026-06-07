@@ -106,15 +106,15 @@ class KalshiRawClient:
     ) -> dict:
         if client_order_id is None:
             client_order_id = str(uuid.uuid4())
-        yes_price = price_cents if side == "yes" else 100 - price_cents
-        no_price = 100 - price_cents if side == "yes" else price_cents
+        # Kalshi requires exactly one price field — yes_price for YES side, no_price for NO side
+        price_field = "yes_price" if side == "yes" else "no_price"
         body = {
             "ticker": ticker,
+            "action": "buy",
             "side": side,
             "count": count,
             "type": order_type,
-            "yes_price": yes_price,
-            "no_price": no_price,
+            price_field: price_cents,
             "client_order_id": client_order_id,
         }
         return self._request("POST", "/trade-api/v2/portfolio/orders", body=body)
