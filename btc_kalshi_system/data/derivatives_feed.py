@@ -22,6 +22,10 @@ _COINGLASS_BASE = "https://open-api-v4.coinglass.com"
 _HYPERLIQUID_BASE = HYPERLIQUID_BASE_URL
 _KRAKEN_FUTURES_BASE = KRAKEN_FUTURES_BASE_URL
 _DERIBIT_BASE = "https://www.deribit.com/api/v2/public"
+_OKX_LIQ_URL    = "https://www.okx.com/api/v5/public/liquidation-orders"
+_OKX_BOOKS_URL  = "https://www.okx.com/api/v5/market/books"
+_LIQ_WINDOW_MS  = 15 * 60 * 1000  # 15 minutes in ms
+_LIQ_NOISE_FLOOR = 10.0            # contracts — ignore if total below this
 
 
 class DerivativesFeed:
@@ -110,10 +114,16 @@ class DerivativesFeed:
             self._fetch_funding_and_oi(),
             self._fetch_trades_data(),
             self._fetch_volume_ratio(),
+            self._fetch_liquidations(),
+            self._fetch_eth_direction(),
+            self._fetch_okx_spot_imbalance(),
         )
         curr_funding, trend, oi_delta, okx_partial = results[0]
         cvd, basis, large_print, trades_available = results[1]
         volume_ratio = results[2]
+        liq_net_norm = results[3]
+        eth_direction_15min = results[4]
+        okx_spot_imbalance = results[5]
         vol = self._brti_volatility_1h()
         fg = fetch_fear_greed(self._redis)
         features: dict = {
@@ -127,6 +137,9 @@ class DerivativesFeed:
             "volume_ratio_1h":       volume_ratio,
             "fear_greed_value":      fg["value"] if fg else None,
             "fear_greed_label":      fg["label"] if fg else None,
+            "liq_net_norm":          liq_net_norm,
+            "eth_direction_15min":   eth_direction_15min,
+            "okx_spot_imbalance":    okx_spot_imbalance,
         }
         macro = self._macro_feed.get_correlations()
         features.update(macro)
@@ -457,6 +470,85 @@ class DerivativesFeed:
             except Exception as exc:
                 logger.warning(f"DerivativesFeed: volume_ratio fetch failed for {symbol} — {exc}")
         return 1.0
+
+    async def _fetch_liquidations(self) -> float:
+        """OKX BTC-USDT-SWAP liquidations from the last 15 min.
+
+        Returns liq_net_norm = (short_liq_sz - long_liq_sz) / total_sz.
+        Positive = more shorts liquidated = upward cascade pressure.
+        Negative = more longs liquidated = downward cascade pressure.
+        Returns 0.0 when quiet (< 10 contracts total) or on any failure.
+        """
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            params = {
+                "instType": "SWAP",
+                "instId": "BTC-USDT-SWAP",
+                "state": "filled",
+                "limit": "100",
+            }
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(_OKX_LIQ_URL, params=params) as resp:
+                    data = await resp.json()
+            cutoff_ms = time.time() * 1000 - _LIQ_WINDOW_MS
+            short_sz = 0.0
+            long_sz = 0.0
+            for record in data.get("data", []):
+                for detail in record.get("details", []):
+                    ts = float(detail.get("ts", 0))
+                    if ts < cutoff_ms:
+                        continue
+                    sz = float(detail.get("sz", 0))
+                    if detail.get("side") == "buy":
+                        short_sz += sz
+                    else:
+                        long_sz += sz
+            total = short_sz + long_sz
+            if total < _LIQ_NOISE_FLOOR:
+                return 0.0
+            return (short_sz - long_sz) / total
+        except Exception as exc:
+            logger.debug(f"DerivativesFeed: liquidations fetch failed — {exc}")
+            return 0.0
+
+    async def _fetch_eth_direction(self) -> float:
+        """Previous closed ETH/USDT 15-min candle direction.
+
+        Returns 1.0 (up), 0.0 (down), or 0.5 (unknown / insufficient data).
+        Uses the ccxt exchange that is already resolved for funding/OI calls.
+        """
+        try:
+            ohlcv = await self._exchange.fetch_ohlcv("ETH/USDT:USDT", "15m", limit=3)
+            if len(ohlcv) < 2:
+                return 0.5
+            prev = ohlcv[-2]   # index -1 may be the currently-open candle
+            return 1.0 if prev[4] > prev[1] else 0.0   # close > open
+        except Exception as exc:
+            logger.debug(f"DerivativesFeed: ETH direction fetch failed — {exc}")
+            return 0.5
+
+    async def _fetch_okx_spot_imbalance(self) -> float:
+        """OKX spot BTC/USDT order book imbalance (top 5 levels).
+
+        Returns (bid_depth - ask_depth) / total_depth.
+        +1 = all bids (buy pressure), -1 = all asks (sell pressure), 0 = balanced.
+        """
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            params = {"instId": "BTC-USDT", "sz": "5"}
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(_OKX_BOOKS_URL, params=params) as resp:
+                    data = await resp.json()
+            book = data.get("data", [{}])[0]
+            bid_depth = sum(float(b[1]) for b in book.get("bids", []))
+            ask_depth = sum(float(a[1]) for a in book.get("asks", []))
+            total = bid_depth + ask_depth
+            if total < 1e-8:
+                return 0.0
+            return (bid_depth - ask_depth) / total
+        except Exception as exc:
+            logger.debug(f"DerivativesFeed: spot imbalance fetch failed — {exc}")
+            return 0.0
 
     # ── Redis write ────────────────────────────────────────────────────────────
 

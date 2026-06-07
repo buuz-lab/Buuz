@@ -506,9 +506,15 @@ def test_fetch_features_includes_macro_correlations(monkeypatch):
     async def _zero_funding(): return 0.0, 0.0, 0.0, False
     async def _zero_trades(): return 0.0, 0.0, 0.0, True
     async def _zero_volume(): return 1.0
+    async def _zero_liq(): return 0.0
+    async def _zero_eth(): return 0.5
+    async def _zero_imbalance(): return 0.0
     monkeypatch.setattr(feed, "_fetch_funding_and_oi", _zero_funding)
     monkeypatch.setattr(feed, "_fetch_trades_data", _zero_trades)
     monkeypatch.setattr(feed, "_fetch_volume_ratio", _zero_volume)
+    monkeypatch.setattr(feed, "_fetch_liquidations", _zero_liq)
+    monkeypatch.setattr(feed, "_fetch_eth_direction", _zero_eth)
+    monkeypatch.setattr(feed, "_fetch_okx_spot_imbalance", _zero_imbalance)
     monkeypatch.setattr(feed, "_brti_volatility_1h", lambda: 0.0)
 
     # Stub MacroFeed
@@ -521,3 +527,194 @@ def test_fetch_features_includes_macro_correlations(monkeypatch):
 
     assert features["btc_spx_corr_8d"] == 0.42
     assert features["btc_qqq_corr_8d"] == 0.38
+
+
+# ── Helper functions for new method tests ──────────────────────────────────────
+
+def _make_mock_session(mock_data: dict):
+    """Return a context-manager AsyncMock that yields mock_data as JSON."""
+    mock_resp = AsyncMock()
+    mock_resp.json = AsyncMock(return_value=mock_data)
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+    mock_session = AsyncMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    return mock_session
+
+
+async def _mock_liq_call(feed, mock_data: dict) -> float:
+    with patch("btc_kalshi_system.data.derivatives_feed.aiohttp.ClientSession", return_value=_make_mock_session(mock_data)):
+        return await feed._fetch_liquidations()
+
+
+async def _mock_books_call(feed, mock_data: dict) -> float:
+    with patch("btc_kalshi_system.data.derivatives_feed.aiohttp.ClientSession", return_value=_make_mock_session(mock_data)):
+        return await feed._fetch_okx_spot_imbalance()
+
+
+# ── _fetch_liquidations ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_liquidations_net_norm_short_heavy():
+    """More short liquidations → positive liq_net_norm."""
+    feed = make_feed()
+    now_ms = int(time.time() * 1000)
+    mock_data = {
+        "code": "0",
+        "data": [{
+            "instId": "BTC-USDT-SWAP",
+            "details": [
+                {"side": "buy",  "sz": "30", "bkPx": "95000", "ts": str(now_ms - 60_000)},
+                {"side": "buy",  "sz": "20", "bkPx": "95000", "ts": str(now_ms - 120_000)},
+                {"side": "sell", "sz": "10", "bkPx": "95000", "ts": str(now_ms - 60_000)},
+            ]
+        }]
+    }
+    result = await _mock_liq_call(feed, mock_data)
+    # short_sz=50, long_sz=10, net=40, total=60 → 40/60
+    assert result == pytest.approx(40 / 60, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_fetch_liquidations_below_noise_floor_returns_zero():
+    """Total < 10 contracts → return 0.0 (noise floor)."""
+    feed = make_feed()
+    now_ms = int(time.time() * 1000)
+    mock_data = {
+        "code": "0",
+        "data": [{
+            "instId": "BTC-USDT-SWAP",
+            "details": [
+                {"side": "buy",  "sz": "3", "bkPx": "95000", "ts": str(now_ms - 60_000)},
+                {"side": "sell", "sz": "2", "bkPx": "95000", "ts": str(now_ms - 60_000)},
+            ]
+        }]
+    }
+    result = await _mock_liq_call(feed, mock_data)
+    assert result == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_liquidations_old_entries_excluded():
+    """Liquidations older than 15 min are excluded."""
+    feed = make_feed()
+    now_ms = int(time.time() * 1000)
+    old_ms = now_ms - 16 * 60_000  # 16 min ago — outside window
+    mock_data = {
+        "code": "0",
+        "data": [{
+            "instId": "BTC-USDT-SWAP",
+            "details": [
+                {"side": "buy", "sz": "100", "bkPx": "95000", "ts": str(old_ms)},
+            ]
+        }]
+    }
+    result = await _mock_liq_call(feed, mock_data)
+    assert result == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_liquidations_returns_zero_on_api_failure():
+    """API failure → safe fallback 0.0."""
+    feed = make_feed()
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(side_effect=Exception("timeout"))
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    with patch("btc_kalshi_system.data.derivatives_feed.aiohttp.ClientSession", return_value=mock_session):
+        result = await feed._fetch_liquidations()
+    assert result == pytest.approx(0.0)
+
+
+# ── _fetch_eth_direction ───────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_eth_direction_up_when_close_above_open():
+    feed = make_feed()
+    ohlcv = [
+        [1_000_000_000, 3000.0, 3100.0, 2950.0, 3080.0, 100.0],  # closed candle, up
+        [1_000_000_900, 3080.0, 3150.0, 3050.0, 3120.0,  50.0],  # currently open
+    ]
+    feed._exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    result = await feed._fetch_eth_direction()
+    assert result == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_eth_direction_down_when_close_below_open():
+    feed = make_feed()
+    ohlcv = [
+        [1_000_000_000, 3000.0, 3100.0, 2900.0, 2950.0, 100.0],  # closed candle, down
+        [1_000_000_900, 2950.0, 3000.0, 2900.0, 2980.0,  50.0],
+    ]
+    feed._exchange.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+    result = await feed._fetch_eth_direction()
+    assert result == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_eth_direction_returns_half_on_insufficient_data():
+    feed = make_feed()
+    feed._exchange.fetch_ohlcv = AsyncMock(return_value=[[1_000_000_000, 3000.0, 3100.0, 2900.0, 3080.0, 100.0]])
+    result = await feed._fetch_eth_direction()
+    assert result == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_fetch_eth_direction_returns_half_on_failure():
+    feed = make_feed()
+    feed._exchange.fetch_ohlcv = AsyncMock(side_effect=Exception("network error"))
+    result = await feed._fetch_eth_direction()
+    assert result == pytest.approx(0.5)
+
+
+# ── _fetch_okx_spot_imbalance ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_fetch_okx_spot_imbalance_bid_heavy():
+    feed = make_feed()
+    mock_data = {
+        "code": "0",
+        "data": [{
+            "bids": [["95000", "3.0", "0", "1"]],
+            "asks": [["95100", "1.0", "0", "1"]],
+            "ts": "1234567890000",
+        }]
+    }
+    result = await _mock_books_call(feed, mock_data)
+    assert result == pytest.approx(0.5)   # (3-1)/(3+1)
+
+
+@pytest.mark.asyncio
+async def test_fetch_okx_spot_imbalance_ask_heavy():
+    feed = make_feed()
+    mock_data = {
+        "code": "0",
+        "data": [{
+            "bids": [["95000", "1.0", "0", "1"]],
+            "asks": [["95100", "3.0", "0", "1"]],
+            "ts": "1234567890000",
+        }]
+    }
+    result = await _mock_books_call(feed, mock_data)
+    assert result == pytest.approx(-0.5)  # (1-3)/(1+3)
+
+
+@pytest.mark.asyncio
+async def test_fetch_okx_spot_imbalance_returns_zero_on_empty_book():
+    feed = make_feed()
+    mock_data = {"code": "0", "data": [{"bids": [], "asks": [], "ts": "123"}]}
+    result = await _mock_books_call(feed, mock_data)
+    assert result == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_okx_spot_imbalance_returns_zero_on_api_failure():
+    feed = make_feed()
+    mock_session = AsyncMock()
+    mock_session.__aenter__ = AsyncMock(side_effect=Exception("timeout"))
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    with patch("btc_kalshi_system.data.derivatives_feed.aiohttp.ClientSession", return_value=mock_session):
+        result = await feed._fetch_okx_spot_imbalance()
+    assert result == pytest.approx(0.0)
