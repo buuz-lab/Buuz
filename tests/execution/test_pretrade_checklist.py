@@ -15,6 +15,7 @@ def make_signal(
     strike: float = 95000.0,
     direction: int = 1,
     regime_features: dict | None = None,
+    market_context: dict | None = None,
 ) -> TradingSignal:
     return TradingSignal(
         direction=direction,
@@ -28,6 +29,7 @@ def make_signal(
         strike=strike,
         timestamp=datetime.now(timezone.utc),
         regime_features=regime_features or {},
+        market_context=market_context or {},
     )
 
 
@@ -749,4 +751,67 @@ def test_gate8_high_uncertainty_same_signal_passes_in_neutral(checklist):
     kw["fresh_kalshi_mid"] = 0.44  # opposing=0.06 < 0.25 → passes in neutral
     r = checklist.run(**kw)
     assert r.failed_gate != 8
+
+
+# ── Gate 12: Dynamic candle progress cap ────────────────────────────────────
+
+def test_gate12_quiet_market_allows_18_pct_progress(checklist):
+    """Low vol + tight spread → cap=0.20, progress 18% passes Gate 12."""
+    signal = make_signal(
+        regime_features={
+            "candle_progress": 0.18,
+            "brti_volatility_1h": 0.001,
+            "volume_ratio_1h": 1.0,
+        },
+        market_context={"kalshi_spread_normalized": 0.02},
+    )
+    result = checklist.run(**base_kwargs(signal))
+    # Should NOT be rejected by Gate 12 (cap=0.20, progress=0.18 <= 0.20)
+    assert result.failed_gate != 12
+
+
+def test_gate12_volatile_market_rejects_8_pct_progress(checklist):
+    """High vol + wide spread → cap=0.05, progress 8% fails Gate 12."""
+    signal = make_signal(
+        regime_features={
+            "candle_progress": 0.08,
+            "brti_volatility_1h": 0.005,
+            "volume_ratio_1h": 1.0,
+        },
+        market_context={"kalshi_spread_normalized": 0.06},
+    )
+    result = checklist.run(**base_kwargs(signal))
+    assert result.failed_gate == 12
+    assert "dynamic cap 0.05" in result.failed_reason
+
+
+def test_gate12_mixed_conditions_cap_is_10_pct(checklist):
+    """High vol only (tight spread) → cap=0.10."""
+    signal = make_signal(
+        regime_features={
+            "candle_progress": 0.12,
+            "brti_volatility_1h": 0.005,
+            "volume_ratio_1h": 1.0,
+        },
+        market_context={"kalshi_spread_normalized": 0.02},
+    )
+    result = checklist.run(**base_kwargs(signal))
+    assert result.failed_gate == 12
+    assert "dynamic cap 0.10" in result.failed_reason
+
+
+def test_gate12_cap_logged_in_failed_reason(checklist):
+    """failed_reason includes cap value and inputs for analysis."""
+    signal = make_signal(
+        regime_features={
+            "candle_progress": 0.08,
+            "brti_volatility_1h": 0.005,
+            "volume_ratio_1h": 1.0,
+        },
+        market_context={"kalshi_spread_normalized": 0.06},
+    )
+    result = checklist.run(**base_kwargs(signal))
+    assert result.failed_gate == 12
+    assert "vol=" in result.failed_reason
+    assert "spread=" in result.failed_reason
 

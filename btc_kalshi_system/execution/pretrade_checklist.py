@@ -7,6 +7,37 @@ from btc_kalshi_system.execution.kelly import KellySizer
 from btc_kalshi_system.signal.fusion import TradingSignal
 
 
+class ProgressCapModel:
+    """Interface for dynamic candle-progress entry cap. Swap RuleBasedProgressCap
+    for a LogisticProgressCap once 200+ candle_features rows under regime v2 exist."""
+    def get_cap(self, volatility: float, spread: float, volume_ratio: float) -> float:
+        raise NotImplementedError
+
+
+class RuleBasedProgressCap(ProgressCapModel):
+    """Rule-based entry window cap based on BRTI volatility and Kalshi spread.
+
+    Thresholds calibrated after 100+ candle_features rows under regime v2.
+    Query: SELECT PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY brti_volatility_1h)
+           FROM candle_features WHERE features_stale=0 AND brti_volatility_1h IS NOT NULL;
+    """
+    _HIGH_VOL = 0.003     # ~0.3% per 5min — active market
+    _WIDE_SPREAD = 0.04   # >4¢ spread — thin or rapidly repricing
+
+    def get_cap(self, volatility: float, spread: float, volume_ratio: float) -> float:
+        high_vol    = volatility > self._HIGH_VOL
+        wide_spread = spread    > self._WIDE_SPREAD
+        if high_vol and wide_spread:
+            return 0.05
+        elif high_vol or wide_spread:
+            return 0.10
+        else:
+            return 0.20
+
+
+_PROGRESS_CAP_MODEL = RuleBasedProgressCap()
+
+
 @dataclass
 class ChecklistResult:
     passed: bool
@@ -85,14 +116,20 @@ class PreTradeChecklist:
         if signal.direction == 0 and trade_price_cents > _MAX_NO_TRADE_PRICE_CENTS:
             return fail(2, f"NO fill {trade_price_cents}¢ exceeds {_MAX_NO_TRADE_PRICE_CENTS}¢ max (market already bearish, 25% WR historically)")
 
-        # Gate 12 — Candle progress cap
-        # Only enter in the first 15% of the candle (~135s). After that, Kalshi has
-        # already priced in most of the move and regime v2's pre-candle features no
-        # longer have information advantage. Backtest: 216 trades after 15% progress
-        # lost -$174 combined; 119 early trades were nearly flat (+$2.64).
+        # Gate 12 — Dynamic candle progress cap
+        # Entry window depends on market conditions. Quiet markets (low vol + tight spread)
+        # allow entry up to 20% progress. Active/uncertain markets constrain entry earlier.
+        # Thresholds: _HIGH_VOL=0.3%/5min, _WIDE_SPREAD=4¢. Rules: both→5%, one→10%, none→20%.
         candle_progress = (signal.regime_features or {}).get("candle_progress", 0.0) or 0.0
-        if candle_progress > 0.15:
-            return fail(12, f"Candle progress {candle_progress:.2f} exceeds 0.15 — entry window closed")
+        _volatility  = (signal.regime_features or {}).get("brti_volatility_1h", 0.0) or 0.0
+        _spread      = (signal.market_context  or {}).get("kalshi_spread_normalized", 0.0) or 0.0
+        _vol_ratio   = (signal.regime_features or {}).get("volume_ratio_1h", 1.0) or 1.0
+        _cap = _PROGRESS_CAP_MODEL.get_cap(_volatility, _spread, _vol_ratio)
+        if candle_progress > _cap:
+            return fail(12, (
+                f"Candle progress {candle_progress:.2f} exceeds dynamic cap {_cap:.2f} "
+                f"(vol={_volatility:.4f} spread={_spread:.3f})"
+            ))
 
         # NOTE: Gate 11 uses signal.kronos_calibrated which equals kronos_raw while the
         # calibrator is in passthrough mode. Once the calibrator activates and compresses

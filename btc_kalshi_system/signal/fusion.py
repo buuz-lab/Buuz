@@ -78,6 +78,9 @@ class TradingSignal:
     # exact values that were (or would be) fed to RegimeModel.get_regime(); they
     # are persisted at trade-write time and form the training X matrix later.
     regime_features: dict = field(default_factory=dict)
+    # Snapshot of market context at signal-creation time (Kalshi spread, mid, OI, etc).
+    # Used by Gate 12 (dynamic candle progress cap) and other market-aware gates.
+    market_context: dict = field(default_factory=dict)
     # True if the upstream `regime:features` Redis key was missing/expired when
     # this signal was built. Stale rows are still tradeable in bootstrap mode
     # (regime features are unused), but they must be filtered out before training.
@@ -239,6 +242,7 @@ class SignalFusionEngine:
             strike=strike,
             timestamp=datetime.now(timezone.utc),
             regime_features=regime_features,
+            market_context=self._market_context.copy(),
             features_stale=features_stale,
             deribit_stale=deribit_stale,
             okx_stale=okx_stale,
