@@ -9,6 +9,7 @@ from loguru import logger
 
 from config import COINGLASS_API_KEY, HYPERLIQUID_BASE_URL, KRAKEN_FUTURES_BASE_URL, REDIS_URL
 from btc_kalshi_system.data.fear_greed import fetch_fear_greed
+from btc_kalshi_system.data.macro_feed import MacroFeed
 
 _REFRESH_INTERVAL = 300   # 5 minutes
 _FEATURES_TTL = 1800      # 6x refresh interval — tolerates network timeouts stacking up
@@ -39,6 +40,7 @@ class DerivativesFeed:
     def __init__(self, redis_url: str = REDIS_URL) -> None:
         import ccxt.async_support as ccxt_async
         self._redis = redis.from_url(redis_url)
+        self._macro_feed = MacroFeed()
         self._ccxt_async = ccxt_async
         self._exchange = None   # resolved lazily on first fetch
         self._exchange_name: str = ""
@@ -126,6 +128,8 @@ class DerivativesFeed:
             "fear_greed_value":      fg["value"] if fg else None,
             "fear_greed_label":      fg["label"] if fg else None,
         }
+        macro = self._macro_feed.get_correlations()
+        features.update(macro)
         if okx_partial:
             features["_okx_partial"] = True
         if not trades_available:

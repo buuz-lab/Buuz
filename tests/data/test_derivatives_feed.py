@@ -493,3 +493,31 @@ async def test_volume_ratio_falls_back_to_kraken_when_okx_fails():
 
     ratio = await feed._fetch_volume_ratio()
     assert ratio == pytest.approx(2.0)
+
+
+def test_fetch_features_includes_macro_correlations(monkeypatch):
+    """MacroFeed correlations are merged into the features dict."""
+    from btc_kalshi_system.data.macro_feed import MacroFeed
+    from unittest.mock import MagicMock
+
+    feed = make_feed()
+
+    # Stub out all the async fetch helpers to return zeros
+    async def _zero_funding(): return 0.0, 0.0, 0.0, False
+    async def _zero_trades(): return 0.0, 0.0, 0.0, True
+    async def _zero_volume(): return 1.0
+    monkeypatch.setattr(feed, "_fetch_funding_and_oi", _zero_funding)
+    monkeypatch.setattr(feed, "_fetch_trades_data", _zero_trades)
+    monkeypatch.setattr(feed, "_fetch_volume_ratio", _zero_volume)
+    monkeypatch.setattr(feed, "_brti_volatility_1h", lambda: 0.0)
+
+    # Stub MacroFeed
+    mock_macro = MagicMock(spec=MacroFeed)
+    mock_macro.get_correlations.return_value = {"btc_spx_corr_8d": 0.42, "btc_qqq_corr_8d": 0.38}
+    feed._macro_feed = mock_macro
+
+    import asyncio
+    features = asyncio.get_event_loop().run_until_complete(feed._fetch_features())
+
+    assert features["btc_spx_corr_8d"] == 0.42
+    assert features["btc_qqq_corr_8d"] == 0.38
