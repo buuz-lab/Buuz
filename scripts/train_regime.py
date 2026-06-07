@@ -115,11 +115,17 @@ def load_dataset(db_path: str, max_rows: int | None = None) -> list[tuple]:
 
 
 def build_xy(rows: list[tuple]) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (X, y) where y = btc_direction (1=up, 0=down)."""
+    """Returns (X, y) with 1-candle lag: features[N] → direction[N+1].
+
+    This matches runtime behaviour where the model sees features at candle N's
+    close and predicts candle N+1's direction.  Using same-candle labels inflates
+    accuracy because features like brti_momentum_15min encode the candle's own
+    return — the exact quantity being predicted.
+    """
     arr = np.array(rows, dtype=object)
     n_features = len(_FEATURE_COLS)
-    X = arr[:, :n_features].astype(np.float64)
-    y = arr[:, n_features].astype(int)
+    X = arr[:-1, :n_features].astype(np.float64)   # features from candle N
+    y = arr[1:,  n_features].astype(int)            # direction of candle N+1
     return X, y
 
 
@@ -153,10 +159,12 @@ def main() -> None:
             f"Need ≥{args.min_rows} qualifying candle rows to train; have {n_total}.\n"
             f"At ~96 candles/day, that's ~{max(0, args.min_rows - n_total) // 96 + 1} more day(s)."
         )
-    if n_total <= args.test_size + 50:
+    # After 1-candle lag we have n_total-1 (X, y) pairs.
+    n_pairs = n_total - 1
+    if n_pairs <= args.test_size + 50:
         sys.exit(
-            f"Not enough rows for both train (>50) and test ({args.test_size}). "
-            "Increase --min-rows or wait for more data."
+            f"Not enough lagged pairs for both train (>50) and test ({args.test_size}): "
+            f"have {n_pairs}. Increase --min-rows or wait for more data."
         )
 
     X, y = build_xy(rows)
