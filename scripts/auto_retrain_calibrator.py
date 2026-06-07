@@ -42,7 +42,12 @@ _MARKER_PATH = "models/calibrator_last_trained.json"
 _ROW_TRIGGER_DELTA = 50            # retrain when +50 new regime_prob rows since last train
 _TIME_TRIGGER_DAYS = 7             # retrain if 7 days elapsed since last train
 _MIN_ROWS = 500                    # refuse to retrain below this — enough rows for regime diversity
-_WINDOW = 300                      # rolling window passed to train_calibrator.py
+_WINDOW = 1000                     # rolling window: ~10 days at current trade rate (~100/day).
+                                   # Was 300 (~3 days) — too noisy and zero regime diversity.
+                                   # 1000 rows: stable enough for LogisticRegression to fit
+                                   # signal compression without overfitting a single 3-day period.
+                                   # When regime-stratified sampling ships, supplement with
+                                   # underrepresented-regime rows from all history.
 _EMERGENCY_BRIER_THRESHOLD = 0.25  # worse than near-coin-flip → emergency retrain
 
 

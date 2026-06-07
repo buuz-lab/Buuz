@@ -286,7 +286,7 @@ def test_constants_are_sane():
     assert _ROW_TRIGGER_DELTA > 0
     assert _TIME_TRIGGER_DAYS > 0
     assert _MIN_ROWS >= 672
-    assert _WINDOW >= _MIN_ROWS
+    assert _WINDOW is None or _WINDOW >= _MIN_ROWS  # None = use all data
     assert _HOLDOUT_SIZE > 0
     assert _HOLDOUT_SIZE < _MIN_ROWS
 

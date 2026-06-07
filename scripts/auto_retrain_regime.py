@@ -44,7 +44,11 @@ _MARKER_PATH = "models/regime_last_trained.json"
 _ROW_TRIGGER_DELTA = 200   # retrain when +200 new candle rows since last train (~2 days)
 _TIME_TRIGGER_DAYS = 14    # retrain if 14 days elapsed since last train
 _MIN_ROWS = 672            # refuse to retrain below this (7 days × 96 candles/day)
-_WINDOW = 2000             # rolling window: last 2000 candles (~21 days)
+_WINDOW = None             # use ALL qualifying candles — no rolling cap.
+                           # A hard 2000-row cap discards older regime patterns permanently.
+                           # XGBoost trains on 10k rows in <10s; memory is not a concern.
+                           # When regime-stratified sampling ships, this stays None and the
+                           # stratifier handles balance across regimes.
 _HOLDOUT_SIZE = 100        # held-out rows for candidate vs deployed comparison
 
 _REGIME_SHIFT_WINDOW = 48  # candles to average for regime shift detection (~12 hours)
@@ -285,7 +289,7 @@ def main() -> None:
         sys.exit(1)
 
     # 6. Load dataset and split
-    rows = load_dataset(args.db, max_rows=_WINDOW)
+    rows = load_dataset(args.db, max_rows=_WINDOW)  # _WINDOW=None → all data
     n = len(rows)
     X, y = build_xy(rows)
 
