@@ -44,13 +44,11 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 _REGIME_PAUSE_FLAG = Path("models/regime_paused.flag")
 
-_KRONOS_WEIGHT = 0.4   # explicit Kronos anchor alongside regime signal.
-# Yes, Kronos is already a feature in regime v2 — but the model currently has a
-# contextuality failure (fades Kronos even in trending markets due to bear-only training
-# data). Explicitly blending 40% Kronos preserves the demonstrated 70.5% accuracy edge
-# while the regime model calibrates. Revisit once live Brier validates regime adds edge
-# on ≥50 rows: shift toward 0.0/1.0 at that point.
-_REGIME_WEIGHT = 0.6
+_KRONOS_WEIGHT = 0.0   # Kronos is anti-correlated at 1-candle lag (Brier 0.37, Acc 46%).
+# The apparent 70% same-candle accuracy was leakage (k15[N] vs direction[N] it was
+# computed from). Regime v2 correctly fades Kronos — that IS the right behavior.
+# Do NOT add explicit Kronos weight back unless 1-candle lag Brier improves to < 0.25.
+_REGIME_WEIGHT = 1.0
 _UNCERTAINTY_SHRINK = 0.5   # applied when DeepSeek signals high_uncertainty
 _RANGING_SHRINK = 0.7       # applied when DeepSeek signals ranging (noisy, not untradeable)
 _BOOTSTRAP_SHRINK = 0.8     # applied when RegimeModel is untrained (bootstrap phase)
@@ -206,7 +204,7 @@ class SignalFusionEngine:
             _disagreement  = abs(regime_prob - _k15_for_cal)
             _cal_vol       = float(regime_features.get("brti_volatility_1h") or 0.0)
             _cal_spread    = float(regime_features.get("kalshi_spread_normalized") or 0.0)
-            regime_component = self._calibrator.transform(
+            combined = self._calibrator.transform(
                 regime_prob,
                 regime=deepseek_regime,
                 edge=_signal_edge,
@@ -214,10 +212,6 @@ class SignalFusionEngine:
                 volatility=_cal_vol,
                 spread=_cal_spread,
             )
-            # Hybrid blend: Kronos anchor prevents regime model from fading good signals
-            # during its bear-only training phase. Shift toward 0.0/1.0 once live Brier
-            # confirms regime adds edge on ≥50 rows.
-            combined = _KRONOS_WEIGHT * kronos_cal + _REGIME_WEIGHT * regime_component
             if deepseek_regime == "high_uncertainty":
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
             elif deepseek_regime == "ranging":
