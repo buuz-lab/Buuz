@@ -269,6 +269,8 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("kalshi_open_imbalance", "REAL DEFAULT NULL"),
     ("btc_spx_corr_8d",      "REAL DEFAULT NULL"),
     ("btc_qqq_corr_8d",      "REAL DEFAULT NULL"),
+    ("would_exit",             "INTEGER DEFAULT 0"),
+    ("would_exit_price_cents", "REAL DEFAULT NULL"),
 ]
 
 
@@ -540,6 +542,33 @@ class KronosV2:
             except Exception as exc:
                 logger.error(f"WATCHDOG: Kronos cache check failed — {exc}")
 
+    _WOULD_EXIT_THRESHOLD = 0.15  # tune after 50+ resolved would-exit rows under regime v2
+
+    def _check_would_exit(self, ticker: str, mid_candle_mid: float) -> tuple[bool, float | None]:
+        """Paper exit check: would we have exited an open trade at this mid-candle price?
+
+        Returns (would_exit, price_cents). price_cents is the mid-candle YES price in cents,
+        or None when no exit would trigger.
+
+        Finds open trades for this ticker (outcome IS NULL). Each Kalshi 15-min
+        contract has a unique ticker, so this correctly scopes to the current candle.
+        """
+        rows = self._db.execute(
+            "SELECT direction, fill_price_cents FROM trades "
+            "WHERE ticker = ? AND outcome IS NULL",
+            [ticker],
+        ).fetchall()
+        for direction, fill_price_cents in rows:
+            if direction == 1:  # YES bet
+                yes_entry = fill_price_cents / 100.0
+                if mid_candle_mid < yes_entry - self._WOULD_EXIT_THRESHOLD:
+                    return True, mid_candle_mid * 100.0
+            else:  # NO bet; yes_entry = implied YES price at fill time
+                yes_entry = (100 - fill_price_cents) / 100.0
+                if mid_candle_mid > yes_entry + self._WOULD_EXIT_THRESHOLD:
+                    return True, mid_candle_mid * 100.0
+        return False, None
+
     async def _candle_logger_loop(self) -> None:
         """Logs regime features + BTC direction at every 15-min candle close."""
         last_logged_ts = None
@@ -582,6 +611,12 @@ class KronosV2:
                                     "spread":   (_ask - _bid) / 100.0,
                                     "progress": round(_progress, 3),
                                 }
+                                # Paper exit check: would we have exited at this price?
+                                _would_exit, _would_exit_price = self._check_would_exit(
+                                    _snap_ticker, (_bid + _ask) / 200.0
+                                )
+                                self._mid_candle_snaps[_in_progress_key]["would_exit"] = int(_would_exit)
+                                self._mid_candle_snaps[_in_progress_key]["would_exit_price_cents"] = _would_exit_price
                                 logger.debug(
                                     f"CandleLogger: mid-candle snapshot {_snap_ticker} "
                                     f"mid={(_bid+_ask)/200:.3f} progress={_progress:.2f}"
@@ -615,6 +650,8 @@ class KronosV2:
                 kalshi_mid_candle_mid      = _mid_snap["mid_prob"]  if _mid_snap else None
                 kalshi_mid_candle_spread   = _mid_snap["spread"]    if _mid_snap else None
                 kalshi_mid_candle_progress = _mid_snap["progress"]  if _mid_snap else None
+                would_exit             = _mid_snap.get("would_exit", 0)           if _mid_snap else 0
+                would_exit_price_cents = _mid_snap.get("would_exit_price_cents")  if _mid_snap else None
 
                 _early_snap = self._early_candle_snaps.pop(_candle_key, None)
                 kalshi_early_mid      = _early_snap["mid_prob"]  if _early_snap else None
@@ -622,12 +659,13 @@ class KronosV2:
 
                 cols = list(_FEATURE_ORDER)
                 vals = [features.get(c) for c in cols]
-                placeholders = ", ".join(["?"] * (14 + len(cols)))
+                placeholders = ", ".join(["?"] * (16 + len(cols)))
                 col_names = (
                     "candle_ts, btc_direction, logged_at, features_stale, deribit_stale, "
                     "kalshi_open_mid, kalshi_open_spread, kalshi_open_depth, "
                     "kalshi_mid_candle_mid, kalshi_mid_candle_spread, kalshi_mid_candle_progress, "
                     "kalshi_early_mid, kalshi_early_progress, regime_prob, "
+                    "would_exit, would_exit_price_cents, "
                     + ", ".join(cols)
                 )
                 self._db.execute(
@@ -647,6 +685,8 @@ class KronosV2:
                         kalshi_early_mid,
                         kalshi_early_progress,
                         regime_prob,
+                        would_exit,
+                        would_exit_price_cents,
                         *vals,
                     ],
                 )
@@ -1669,6 +1709,9 @@ class KronosV2:
             except Exception as exc:
                 logger.warning(f"Failed to resolve gate rejection {rejection_id}: {exc}")
 
+
+# Alias used by tests (KronosV2System is the canonical test-facing name).
+KronosV2System = KronosV2
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
