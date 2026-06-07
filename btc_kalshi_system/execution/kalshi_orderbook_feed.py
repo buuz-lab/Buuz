@@ -178,11 +178,17 @@ class KalshiOrderbookFeed:
     def get_open_snapshot(self, ticker: str) -> dict | None:
         """Return the first orderbook snapshot captured for this ticker, or None.
 
-        Keys: mid_prob (float, 0-1), spread (float, 0-1), depth_bid, depth_ask, ts.
+        Keys: mid_prob (float, 0-1), spread (float, 0-1), depth_bid, depth_ask,
+        depth_imbalance (float -1 to +1, or None when total depth is 0), ts.
         Safe to call from any thread after the contract has opened.
         """
         with self._lock:
-            return self._open_snapshots.get(ticker)
+            snap = self._open_snapshots.get(ticker)
+            if snap is None:
+                return None
+            total = snap["depth_bid"] + snap["depth_ask"]
+            imbalance = (snap["depth_bid"] - snap["depth_ask"]) / total if total > 0 else None
+            return {**snap, "depth_imbalance": imbalance}
 
     def set_open_snapshot(self, ticker: str, bid_cents: int, ask_cents: int) -> None:
         """Write opening snapshot from a live orderbook read (fallback to _handle capture).

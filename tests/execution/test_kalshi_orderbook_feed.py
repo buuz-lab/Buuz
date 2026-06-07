@@ -353,3 +353,46 @@ class TestReconnectState:
             call.kwargs["market_ticker"] for call in mock_af.subscribe.call_args_list
         }
         assert subscribed_tickers == {"KXBTC-A", "KXBTC-B"}
+
+
+# ── get_open_snapshot ─────────────────────────────────────────────────────────
+
+
+def test_get_open_snapshot_includes_depth_imbalance():
+    """depth_imbalance is returned as (bid-ask)/(bid+ask) when depth is non-zero."""
+    feed = make_feed()
+    # Snapshot via WS path already has depth_bid and depth_ask
+    with feed._lock:
+        feed._open_snapshots["KXBTC-25Jun2026-99500"] = {
+            "mid_prob": 0.50, "spread": 0.02,
+            "depth_bid": 300.0, "depth_ask": 100.0, "ts": 1.0,
+        }
+    snap = feed.get_open_snapshot("KXBTC-25Jun2026-99500")
+    assert "depth_imbalance" in snap
+    expected = (300.0 - 100.0) / (300.0 + 100.0)  # 0.5
+    assert abs(snap["depth_imbalance"] - expected) < 1e-9
+
+
+def test_get_open_snapshot_imbalance_none_when_zero_depth():
+    """depth_imbalance is None when total depth is 0 (REST fallback path)."""
+    feed = make_feed()
+    with feed._lock:
+        feed._open_snapshots["KXBTC-25Jun2026-99500"] = {
+            "mid_prob": 0.50, "spread": 0.02,
+            "depth_bid": 0.0, "depth_ask": 0.0, "ts": 1.0,
+        }
+    snap = feed.get_open_snapshot("KXBTC-25Jun2026-99500")
+    assert snap["depth_imbalance"] is None
+
+
+def test_get_open_snapshot_imbalance_range():
+    """depth_imbalance is always in [-1, 1]."""
+    feed = make_feed()
+    with feed._lock:
+        feed._open_snapshots["KXBTC-25Jun2026-99500"] = {
+            "mid_prob": 0.50, "spread": 0.02,
+            "depth_bid": 1000.0, "depth_ask": 0.0, "ts": 1.0,
+        }
+    snap = feed.get_open_snapshot("KXBTC-25Jun2026-99500")
+    # All bids, no asks → imbalance = +1.0
+    assert snap["depth_imbalance"] == 1.0
