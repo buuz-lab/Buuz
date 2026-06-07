@@ -598,21 +598,28 @@ async def test_fetch_liquidations_below_noise_floor_returns_zero():
 
 @pytest.mark.asyncio
 async def test_fetch_liquidations_old_entries_excluded():
-    """Liquidations older than 15 min are excluded."""
+    """Liquidations older than 15 min are excluded; recent ones still counted."""
     feed = make_feed()
     now_ms = int(time.time() * 1000)
-    old_ms = now_ms - 16 * 60_000  # 16 min ago — outside window
+    old_ms = now_ms - 16 * 60_000   # 16 min ago — outside 15-min window
+    recent_ms = now_ms - 60_000      # 1 min ago — inside window
+
     mock_data = {
         "code": "0",
         "data": [{
             "instId": "BTC-USDT-SWAP",
             "details": [
-                {"side": "buy", "sz": "100", "bkPx": "95000", "ts": str(old_ms)},
+                # Old entry — must be excluded
+                {"side": "buy", "sz": "50", "bkPx": "95000", "ts": str(old_ms)},
+                # Recent entry — must be included
+                {"side": "sell", "sz": "20", "bkPx": "95000", "ts": str(recent_ms)},
             ]
         }]
     }
     result = await _mock_liq_call(feed, mock_data)
-    assert result == pytest.approx(0.0)
+    # Only recent_ms sell entry qualifies: short_sz=0, long_sz=20, total=20
+    # liq_net_norm = (0 - 20) / 20 = -1.0
+    assert result == pytest.approx(-1.0)
 
 
 @pytest.mark.asyncio

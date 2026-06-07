@@ -521,7 +521,7 @@ class DerivativesFeed:
             ohlcv = await self._exchange.fetch_ohlcv("ETH/USDT:USDT", "15m", limit=3)
             if len(ohlcv) < 2:
                 return 0.5
-            prev = ohlcv[-2]   # index -1 may be the currently-open candle
+            prev = ohlcv[-2]   # -1 may be the currently-open candle; assumes exchange includes live candle in response
             return 1.0 if prev[4] > prev[1] else 0.0   # close > open
         except Exception as exc:
             logger.debug(f"DerivativesFeed: ETH direction fetch failed — {exc}")
