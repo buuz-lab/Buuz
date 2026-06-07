@@ -87,7 +87,7 @@ def _ds_result(
 
 def make_engine(
     kronos_raw: float = 0.65,
-    kronos_cal: float = 0.65,
+    kronos_cal: float | None = None,  # defaults to kronos_raw when not set
     regime_prob: float = 0.70,
     regime_direction: int = 1,
     deepseek_result: dict | None = None,
@@ -99,8 +99,12 @@ def make_engine(
 
     feature_store = _make_feature_store_mock()
 
+    _kronos_cal = kronos_cal if kronos_cal is not None else kronos_raw
     kronos_engine = MagicMock()
-    kronos_engine.run_monte_carlo.return_value = kronos_raw
+    # When regime model is trained, fusion uses kronos_raw_15min as the Kronos component
+    # (falling back to run_monte_carlo when None). Tests don't pass kronos_raw_15min to
+    # get_signal, so set MC return to kronos_cal (k15 in regime mode) or kronos_raw (bootstrap).
+    kronos_engine.run_monte_carlo.return_value = kronos_raw if raise_not_trained else _kronos_cal
 
     # Phase 3c: calibrator transforms regime_prob (not k15_raw).
     # Passthrough behaviour: transform(x) = x — reflects calibrator before first training.
@@ -430,14 +434,15 @@ def test_signal_features_stale_false_when_market_context_populated():
 
 def test_gate2_shadow_mode_does_not_block(monkeypatch):
     """When REGIME_GATE2_ENFORCING=False, Kronos/regime disagreements must NOT
-    return None — the trade proceeds using regime_prob directly (no neutralization)."""
+    return None — the trade proceeds with the hybrid blend."""
     monkeypatch.setattr(config, "REGIME_GATE2_ENFORCING", False)
     # Kronos up (0.70), regime down (0.30 / direction=0) — disagreement
     engine = make_engine(kronos_raw=0.70, regime_prob=0.30, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    # Regime v2 is the full signal — no neutralization, combined = regime_prob = 0.30
-    assert result.calibrated_prob == pytest.approx(0.30)
+    # Hybrid blend: Kronos anchors the combined signal toward Kronos direction
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.30
+    assert result.calibrated_prob == pytest.approx(expected)
 
 
 def test_gate2_enforce_mode_blocks(monkeypatch):
@@ -460,37 +465,40 @@ def test_gate2_shadow_mode_does_not_affect_agreement(monkeypatch):
 # ── Disagreement neutralization (Task 3, session 23) ─────────────────────────
 
 def test_regime_signal_used_directly_on_disagreement_bullish_kronos():
-    """k15_raw=0.70 (bullish), regime_prob=0.20 (bearish) → regime v2 wins, combined=0.20.
-    No neutralization — regime already factored Kronos into its prediction."""
+    """k15_raw=0.70 (bullish), regime_prob=0.20 (bearish) → hybrid blend, Kronos anchors up."""
     engine = make_engine(kronos_raw=0.70, regime_prob=0.20, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    assert result.calibrated_prob == pytest.approx(0.20)
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.20
+    assert result.calibrated_prob == pytest.approx(expected)
     assert result.regime_prob == pytest.approx(0.20)
 
 
 def test_regime_signal_used_directly_on_disagreement_bearish_kronos():
-    """k15_raw=0.30 (bearish), regime_prob=0.80 (bullish) → regime v2 wins, combined=0.80."""
+    """k15_raw=0.30 (bearish), regime_prob=0.80 (bullish) → hybrid blend."""
     engine = make_engine(kronos_raw=0.30, regime_prob=0.80, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    assert result.calibrated_prob == pytest.approx(0.80)
+    expected = _KRONOS_WEIGHT * 0.30 + _REGIME_WEIGHT * 0.80
+    assert result.calibrated_prob == pytest.approx(expected)
 
 
 def test_regime_signal_used_directly_on_agreement_bullish():
-    """Both bullish — regime_prob used directly, same as disagreement case."""
+    """Both bullish — hybrid blend amplifies the signal."""
     engine = make_engine(kronos_raw=0.70, regime_prob=0.65, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    assert result.calibrated_prob == pytest.approx(0.65)
+    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.65
+    assert result.calibrated_prob == pytest.approx(expected)
 
 
 def test_regime_signal_used_directly_on_agreement_bearish():
-    """Both bearish — regime_prob used directly."""
+    """Both bearish — hybrid blend."""
     engine = make_engine(kronos_raw=0.35, regime_prob=0.20, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    assert result.calibrated_prob == pytest.approx(0.20)
+    expected = _KRONOS_WEIGHT * 0.35 + _REGIME_WEIGHT * 0.20
+    assert result.calibrated_prob == pytest.approx(expected)
 
 
 # ── Regime pause flag ─────────────────────────────────────────────────────────

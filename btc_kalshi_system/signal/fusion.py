@@ -44,12 +44,13 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 _REGIME_PAUSE_FLAG = Path("models/regime_paused.flag")
 
-_KRONOS_WEIGHT = 0.0   # regime v2 deployment: Kronos already embedded as features
-# Reduced from 0.4 → 0.2 (session 23): regime model v1 has circular label
-# (direction==outcome; kalshi_implied_prob is #1 feature at 19%). On bullish days,
-# model fires bearish and contaminates fusion. Restore to 0.4 after regime v2 retrains
-# with BTC-direction label. See handoff.md — Phase 1b.
-_REGIME_WEIGHT = 1.0   # regime v2 deployment: full weight
+_KRONOS_WEIGHT = 0.4   # explicit Kronos anchor alongside regime signal.
+# Yes, Kronos is already a feature in regime v2 — but the model currently has a
+# contextuality failure (fades Kronos even in trending markets due to bear-only training
+# data). Explicitly blending 40% Kronos preserves the demonstrated 70.5% accuracy edge
+# while the regime model calibrates. Revisit once live Brier validates regime adds edge
+# on ≥50 rows: shift toward 0.0/1.0 at that point.
+_REGIME_WEIGHT = 0.6
 _UNCERTAINTY_SHRINK = 0.5   # applied when DeepSeek signals high_uncertainty
 _RANGING_SHRINK = 0.7       # applied when DeepSeek signals ranging (noisy, not untradeable)
 _BOOTSTRAP_SHRINK = 0.8     # applied when RegimeModel is untrained (bootstrap phase)
@@ -200,15 +201,12 @@ class SignalFusionEngine:
                 if config.REGIME_GATE2_ENFORCING:
                     return None
 
-            # Phase 3c: regime v2 is the full signal — Kronos is already embedded as features.
-            # Regime disagreements with Kronos are informative (regime is overriding Kronos
-            # based on 32 features including k15_raw). No neutralization needed.
             _signal_edge   = abs(regime_prob - self._market_context.get("kalshi_mid_cents", 50.0) / 100.0)
             _k15_for_cal   = self._last_kronos_raw_15min if self._last_kronos_raw_15min is not None else 0.5
             _disagreement  = abs(regime_prob - _k15_for_cal)
             _cal_vol       = float(regime_features.get("brti_volatility_1h") or 0.0)
             _cal_spread    = float(regime_features.get("kalshi_spread_normalized") or 0.0)
-            combined = self._calibrator.transform(
+            regime_component = self._calibrator.transform(
                 regime_prob,
                 regime=deepseek_regime,
                 edge=_signal_edge,
@@ -216,6 +214,10 @@ class SignalFusionEngine:
                 volatility=_cal_vol,
                 spread=_cal_spread,
             )
+            # Hybrid blend: Kronos anchor prevents regime model from fading good signals
+            # during its bear-only training phase. Shift toward 0.0/1.0 once live Brier
+            # confirms regime adds edge on ≥50 rows.
+            combined = _KRONOS_WEIGHT * kronos_cal + _REGIME_WEIGHT * regime_component
             if deepseek_regime == "high_uncertainty":
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
             elif deepseek_regime == "ranging":
