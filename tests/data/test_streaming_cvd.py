@@ -1,4 +1,3 @@
-import json
 import time
 import pytest
 from btc_kalshi_system.data.derivatives_feed import StreamingCVDAccumulator

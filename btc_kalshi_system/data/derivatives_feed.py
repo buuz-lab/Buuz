@@ -1,12 +1,13 @@
 import asyncio
 import json
 import time
+from collections import deque
 
 import aiohttp
 import numpy as np
 import redis
 import websockets
-from datetime import datetime, timezone
+from datetime import datetime, timezone  # used in StreamingCVDAccumulator.run() — added Task 2
 from loguru import logger
 
 from config import COINGLASS_API_KEY, HYPERLIQUID_BASE_URL, KRAKEN_FUTURES_BASE_URL, REDIS_URL
@@ -43,7 +44,6 @@ class StreamingCVDAccumulator:
     _KRAKEN_WS_URL = "wss://ws.kraken.com/v2"
 
     def __init__(self) -> None:
-        from collections import deque
         self._trades: deque = deque()
         self._cvd: float = 0.0
         self._large_print: float = 0.0
@@ -72,14 +72,15 @@ class StreamingCVDAccumulator:
 
     # ── Tick ingestion ─────────────────────────────────────────────────────────
 
-    def _ingest_tick(self, tick: tuple) -> None:
+    def _ingest_tick(self, tick: tuple[int, str, float, float]) -> None:
         """Append tick, prune window, recompute derived values."""
         self._trades.append(tick)
-        cutoff_ms = time.time() * 1000 - _CVD_WINDOW_MS
+        now = time.time()
+        cutoff_ms = now * 1000 - _CVD_WINDOW_MS
         while self._trades and self._trades[0][0] < cutoff_ms:
             self._trades.popleft()
         self._last_price = tick[3]
-        self._last_tick_at = time.time()
+        self._last_tick_at = now
         self._recompute()
 
     def _recompute(self) -> None:
