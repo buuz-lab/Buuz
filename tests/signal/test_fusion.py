@@ -430,15 +430,14 @@ def test_signal_features_stale_false_when_market_context_populated():
 
 def test_gate2_shadow_mode_does_not_block(monkeypatch):
     """When REGIME_GATE2_ENFORCING=False, Kronos/regime disagreements must NOT
-    return None — the trade proceeds and the disagreement is just logged."""
+    return None — the trade proceeds using regime_prob directly (no neutralization)."""
     monkeypatch.setattr(config, "REGIME_GATE2_ENFORCING", False)
     # Kronos up (0.70), regime down (0.30 / direction=0) — disagreement
-    engine = make_engine(kronos_cal=0.70, regime_prob=0.30, regime_direction=0)
+    engine = make_engine(kronos_raw=0.70, regime_prob=0.30, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    # Regime neutralized on disagreement → _regime_in_fusion=0.5
-    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.50
-    assert result.calibrated_prob == pytest.approx(expected)
+    # Regime v2 is the full signal — no neutralization, combined = regime_prob = 0.30
+    assert result.calibrated_prob == pytest.approx(0.30)
 
 
 def test_gate2_enforce_mode_blocks(monkeypatch):
@@ -460,46 +459,38 @@ def test_gate2_shadow_mode_does_not_affect_agreement(monkeypatch):
 
 # ── Disagreement neutralization (Task 3, session 23) ─────────────────────────
 
-def test_disagreement_neutralization_bullish_kronos_bearish_regime():
-    """kronos_cal=0.70 (bullish), regime_prob=0.20 (bearish) → disagree.
-    Neutralization: _regime_in_fusion=0.5, not the raw regime_prob."""
-    engine = make_engine(kronos_cal=0.70, regime_prob=0.20, regime_direction=0)
+def test_regime_signal_used_directly_on_disagreement_bullish_kronos():
+    """k15_raw=0.70 (bullish), regime_prob=0.20 (bearish) → regime v2 wins, combined=0.20.
+    No neutralization — regime already factored Kronos into its prediction."""
+    engine = make_engine(kronos_raw=0.70, regime_prob=0.20, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = _KRONOS_WEIGHT * 0.70 + _REGIME_WEIGHT * 0.50
-    assert result.calibrated_prob == pytest.approx(expected)
-    # Raw regime_prob is stored on the signal unchanged (not the neutralized value)
+    assert result.calibrated_prob == pytest.approx(0.20)
     assert result.regime_prob == pytest.approx(0.20)
 
 
-def test_disagreement_neutralization_bearish_kronos_bullish_regime():
-    """k15_raw=0.30 (bearish), regime_prob=0.80 (bullish) → disagree.
-    Neutralization: _regime_in_fusion=0.5, not the raw regime_prob."""
+def test_regime_signal_used_directly_on_disagreement_bearish_kronos():
+    """k15_raw=0.30 (bearish), regime_prob=0.80 (bullish) → regime v2 wins, combined=0.80."""
     engine = make_engine(kronos_raw=0.30, regime_prob=0.80, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = _REGIME_WEIGHT * 0.50  # _KRONOS_WEIGHT=0 so only regime contribution
-    assert result.calibrated_prob == pytest.approx(expected)
+    assert result.calibrated_prob == pytest.approx(0.80)
 
 
-def test_disagreement_neutralization_does_not_fire_on_agreement_bullish():
-    """k15_raw=0.70, regime_prob=0.65 — both bullish (both > 0.5) → no neutralization,
-    regime_prob used directly."""
+def test_regime_signal_used_directly_on_agreement_bullish():
+    """Both bullish — regime_prob used directly, same as disagreement case."""
     engine = make_engine(kronos_raw=0.70, regime_prob=0.65, regime_direction=1)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = _REGIME_WEIGHT * 0.65  # _KRONOS_WEIGHT=0 so only regime contribution
-    assert result.calibrated_prob == pytest.approx(expected)
+    assert result.calibrated_prob == pytest.approx(0.65)
 
 
-def test_disagreement_neutralization_does_not_fire_on_agreement_bearish():
-    """k15_raw=0.35, regime_prob=0.20 — both bearish (both < 0.5) → no neutralization,
-    regime_prob used directly."""
+def test_regime_signal_used_directly_on_agreement_bearish():
+    """Both bearish — regime_prob used directly."""
     engine = make_engine(kronos_raw=0.35, regime_prob=0.20, regime_direction=0)
     result = engine.get_signal("5min", 76000.0)
     assert result is not None
-    expected = _REGIME_WEIGHT * 0.20  # _KRONOS_WEIGHT=0 so only regime contribution
-    assert result.calibrated_prob == pytest.approx(expected)
+    assert result.calibrated_prob == pytest.approx(0.20)
 
 
 # ── Regime pause flag ─────────────────────────────────────────────────────────

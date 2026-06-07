@@ -196,22 +196,11 @@ class SignalFusionEngine:
                 if config.REGIME_GATE2_ENFORCING:
                     return None
 
-            # Disagreement neutralization (session 23): when regime opposes Kronos direction,
-            # treat regime as neutral (0.5) to prevent downward drag on the combined signal.
-            # Regime v1 has circular label — disagreements are noise, not information. On
-            # agreement days regime contribution is fully preserved. Remove after regime v2
-            # deploys with btc_direction label. See handoff.md — Phase 1b.
-            _kronos_bullish = kronos_cal > 0.5
-            _regime_bullish = regime_prob > 0.5
-            if _kronos_bullish != _regime_bullish:
-                _regime_in_fusion = 0.5
-            else:
-                _regime_in_fusion = regime_prob
-            # Phase 3c: calibrate regime_prob with signal_edge context.
-            # signal_edge = how far regime_prob is from the market price — a measure of conviction.
-            # Same edge used by Gate 5 and logged to trades.signal_edge.
-            _signal_edge = abs(_regime_in_fusion - self._market_context.get("kalshi_mid_cents", 50.0) / 100.0)
-            combined = self._calibrator.transform(_regime_in_fusion, regime=deepseek_regime, edge=_signal_edge)
+            # Phase 3c: regime v2 is the full signal — Kronos is already embedded as features.
+            # Regime disagreements with Kronos are informative (regime is overriding Kronos
+            # based on 32 features including k15_raw). No neutralization needed.
+            _signal_edge = abs(regime_prob - self._market_context.get("kalshi_mid_cents", 50.0) / 100.0)
+            combined = self._calibrator.transform(regime_prob, regime=deepseek_regime, edge=_signal_edge)
             if deepseek_regime == "high_uncertainty":
                 combined = 0.5 + (combined - 0.5) * _UNCERTAINTY_SHRINK
             elif deepseek_regime == "ranging":
