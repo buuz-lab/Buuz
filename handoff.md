@@ -4,13 +4,13 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 43 complete. k15_kalshi_alignment + k15_delta fully shipped: added to _FEATURE_ORDER (session 42), fusion.py inference (session 42), and now DB schema + backfill + test fixtures (session 43). 41 features total. 599 tests passing. Regime v2 auto-deploying tonight (641→672 rows). Next: mid-candle model data gate ~June 10.
+**Current focus:** Session 43 complete. SHAP coherence + calibration curve fully shipped: `shap_utils.py`, weighted coherence in `get_regime()`, propagated through `TradingSignal` → `gate_rejections` + `candle_features`, calibration sanity replaces contextuality check in `train_regime.py`, monitor Section 5 live, `shap_coherence` as 8th calibrator input for Phase 3c. 612 tests passing. Regime v2 auto-deploying tonight.
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-08 session 43: k15_kalshi_alignment + k15_delta live end-to-end — inference (fusion), training (candle_features), backfill (437 alignment rows, 773 delta rows). 599 tests passing. Regime v2 auto-deploying tonight.**
+**As of 2026-06-08 session 43 (final): SHAP coherence pipeline complete end-to-end. Rigid contextuality check replaced with real calibration gradient check. Phase 3c foundation wired. 612 tests passing.**
 
 ---
 
@@ -542,6 +542,19 @@ After Phase 3c deploys: **keep Gates 13 and 14** as permanent size-protection fl
 | Test fixtures updated | `test_regime_model.py` `_feature_dict()`, `test_fusion.py` `_NULLABLE_KEYS`, `test_auto_retrain_regime.py` `_FEATURE_COLS_FOR_DB` + `_make_db()` — all updated for 41-feature _FEATURE_ORDER. |
 | Feature count: **41** | 39 (session 42) + k15_kalshi_alignment + k15_delta = 41. Test assertions updated across 3 test files. |
 | 599 tests passing | Up from 593. |
+
+**Session 43 additions (SHAP coherence):**
+
+| What | Status |
+|---|---|
+| `btc_kalshi_system/models/shap_utils.py` | **NEW** — `compute_coherence` (weighted: sum\|agree\|/sum\|all\|), `compute_baseline_snapshot`. XGBoost native pred_contribs, no external library. |
+| `regime_model.get_regime()` | Returns 4th key `shap_coherence` alongside prob_up/direction/confidence |
+| `TradingSignal.shap_coherence` | New field; set from regime_result in `get_signal()`; None in bootstrap mode |
+| `main.py` schema + logging | `shap_coherence REAL DEFAULT NULL` in `candle_features` + `gate_rejections`; logged at candle close + gate rejection time |
+| `train_regime.py` calibration sanity | Replaces rigid k15=0.85 contextuality probe. 3-tier check (Low/Med/High \|p-0.5\|). Saves `regime_shap_baseline.json` after each train. |
+| `regime_v2_monitor.py` Section 5 | 5a: Brier by confidence tier vs Kalshi. 5b: top-10 features by mean abs SHAP. |
+| `calibrator.py` + `train_calibrator.py` | `shap_coherence` as 8th optional calibrator input. `nan_to_num(nan=0.5)` default. Phase 3c picks it up automatically. |
+| 612 tests passing | Up from 599. |
 
 **System is code-complete.** Every remaining milestone is data-gated. One build item left: `auto_retrain_mid_candle.py` (needed before mid-candle model drifts after initial train).
 
