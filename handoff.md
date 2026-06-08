@@ -457,7 +457,7 @@ After deploy (all milestones run in parallel — no sequential waiting):
 - `regime_prob` starts populating → live Brier tracking activates, Phase 3c clock starts
 - Monitor `regime_v2_monitor.py` for edge trend (first reading after ~20 regime_prob rows, ~Day 2)
 - Gate 2 logs disagreements in shadow mode — informational only, never needs enforcing
-- **Go-live criteria (target ~June 15-18):** Brier(regime_prob) < Brier(kalshi_open_mid) on ≥20 rows AND paper P&L positive trend over ~7 days. Both checked in parallel.
+- **Go-live target: ~July 2026.** 20 candle rows is the minimum for the Brier comparison to be non-garbage, not the decision point. Real go-live needs weeks of evidence: Brier consistently beating Kalshi across varying market conditions, paper P&L positive trend, warm-starts showing improvement. Don't treat 20 rows as a trigger.
 - **Drawdown trigger**: >$30 loss in 3 days → `touch models/regime_paused.flag`
 
 ---
@@ -569,7 +569,7 @@ After Phase 3c deploys: **keep Gates 13 and 14** as permanent size-protection fl
 | **~June 8-9 (tonight)** | Regime v2 auto-deploys at 672 rows. Hold flag removed. No action needed. |
 | **~June 10** | Mid-candle model data gate (~200 rows). Run `train_mid_candle.py --dry-run`, train, restart → Gates 12+15 activate. Build `auto_retrain_mid_candle.py`. |
 | **~June 10-11** | Migrate to cloud server (see `deploy/MIGRATION.md`). Confirm paper trades firing on server. |
-| **~June 15-18** | Go live from server: `PAPER_TRADING=false` in `.env` + `systemctl restart kronos-v2`. Criteria: Brier(regime_prob) < Brier(kalshi_open) on ≥20 rows AND paper P&L positive. |
+| **~July 2026** | Go live: `PAPER_TRADING=false`. Criteria: weeks of Brier(regime_prob) < Brier(kalshi_open) across varying conditions + paper P&L positive trend. 20 rows = first reading, not decision point. |
 | **~June 27 - July 1** | Phase 3c calibrator auto-fires (500 regime_prob rows). Gates 13+14 stay — calibrator improves sizing, not gate thresholds. |
 
 #### SERVER MIGRATION — `deploy/MIGRATION.md`
@@ -623,13 +623,13 @@ ls -la models/regime.pkl models/regime_last_trained.json
 
 | Day post-deploy | What accumulates | Action |
 |---|---|---|
-| Day 1-2 | ≥20 regime_prob rows | First Brier reading from `regime_v2_monitor.py` |
-| Day 7 | ~70-80 rows, P&L trend visible | Assess: is edge confirmed + P&L positive? |
-| **Day 7-10** | Edge ✓ + P&L ✓ | **Flip `PAPER_TRADING=false`, restart** → go live |
+| Day 1-2 | ≥20 regime_prob rows | First Brier reading — informational only, not a decision point |
+| Day 7 | ~70-80 rows, P&L trend visible | Early signal quality read — still too early to decide |
 | Day 18-20 | 500 regime_prob rows | Phase 3c auto-fires. Gates 13+14 **stay**. |
+| **~July 2026** | Weeks of consistent edge across conditions | Go live: flip `PAPER_TRADING=false` |
 
-**Go-live criteria (both must be true):**
-1. `Brier(regime_prob, btc_direction) < Brier(kalshi_open_mid, btc_direction)` on ≥20 rows
+**Go-live criteria (all must be true across weeks, not days):**
+1. `Brier(regime_prob, btc_direction) < Brier(kalshi_open_mid, btc_direction)` consistently on 100+ rows
 2. Paper P&L positive trend over ~7 days under regime v2
 
 **Gate 2:** Shadow mode logs disagreements but is never enforced. Regime v2 signal used directly — neutralization was removed session 36. No Gate 2 action needed.
