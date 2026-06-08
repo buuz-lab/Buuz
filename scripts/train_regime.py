@@ -90,6 +90,9 @@ def parse_args() -> argparse.Namespace:
                    help="Report metrics but do NOT write the model file.")
     p.add_argument("--force", action="store_true",
                    help="Skip the low-variance feature gate and train anyway.")
+    p.add_argument("--warm-start", action="store_true",
+                   help="Continue training from existing regime.pkl (+25 trees). "
+                        "Falls back to cold start if no model found.")
     return p.parse_args()
 
 
@@ -198,8 +201,17 @@ def main() -> None:
             sys.exit(1)
         print("--force passed — proceeding despite low-variance features.")
 
+    warm_start_model = None
+    if args.warm_start:
+        try:
+            warm_start_model = RegimeModel.load(args.out)
+            n_existing = warm_start_model._clf.get_booster().num_boosted_rounds()
+            print(f"Warm-start: loaded {args.out} ({n_existing} trees → +25)")
+        except FileNotFoundError:
+            print(f"Warm-start: no model at {args.out} — cold start (100 trees)")
+
     model = RegimeModel()
-    model.train(X_train, y_train, **extra_kwargs)
+    model.train(X_train, y_train, warm_start_from=warm_start_model, **extra_kwargs)
 
     # ── Walk-forward CV (evaluation only) ────────────────────────────────────
     n_cv = n_total - args.test_size
