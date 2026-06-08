@@ -297,12 +297,26 @@ class DerivativesFeed:
         )
 
         # Slow tier — at most once per 60s
+        # Hard 30s wall-clock timeout guards against ccxt fetch_ohlcv(limit=721)
+        # hanging when OKX REST is flaky — individual ccxt timeouts apply per-request
+        # but not to total wall time when pagination or retries occur.
         if _refetch_slow:
-            (curr_funding, trend, oi_delta, okx_partial), eth_dir, vol_ratio = await asyncio.gather(
-                self._fetch_funding_and_oi(),
-                self._fetch_eth_direction(),
-                self._fetch_volume_ratio(),
-            )
+            try:
+                (curr_funding, trend, oi_delta, okx_partial), eth_dir, vol_ratio = (
+                    await asyncio.wait_for(
+                        asyncio.gather(
+                            self._fetch_funding_and_oi(),
+                            self._fetch_eth_direction(),
+                            self._fetch_volume_ratio(),
+                        ),
+                        timeout=30,
+                    )
+                )
+            except asyncio.TimeoutError:
+                logger.warning("DerivativesFeed: slow-tier fetch timed out after 30s — using cached values")
+                curr_funding, trend, oi_delta, okx_partial = self._cached_funding_result
+                eth_dir = self._cached_eth_dir
+                vol_ratio = self._cached_volume_ratio
             self._cached_funding_result = (curr_funding, trend, oi_delta, okx_partial)
             self._cached_eth_dir = eth_dir
             self._cached_volume_ratio = vol_ratio
