@@ -407,3 +407,33 @@ def test_non_edge_aware_ignores_edge_arg():
     result_no_edge  = cal.transform(0.70)
     result_with_edge = cal.transform(0.70, edge=0.20)
     assert result_no_edge == pytest.approx(result_with_edge)
+
+
+def test_shap_coherence_aware_flag_set_on_fit():
+    cal = Calibrator()
+    raw, outcomes = _compressed_data(n=300)
+    coherences = np.full(300, 0.75)
+    cal.fit(raw, outcomes, shap_coherences=coherences)
+    assert cal._shap_coherence_aware is True
+
+
+def test_shap_coherence_aware_false_without_coherences():
+    cal = Calibrator()
+    raw, outcomes = _compressed_data(n=300)
+    cal.fit(raw, outcomes)
+    assert cal._shap_coherence_aware is False
+
+
+def test_shap_coherence_save_load_preserves_flag():
+    import tempfile, os
+    cal = Calibrator()
+    raw, outcomes = _compressed_data(n=300)
+    cal.fit(raw, outcomes, shap_coherences=np.full(300, 0.75))
+    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+        path = f.name
+    try:
+        cal.save(path)
+        loaded = Calibrator.load(path)
+        assert loaded._shap_coherence_aware == cal._shap_coherence_aware
+    finally:
+        os.unlink(path)

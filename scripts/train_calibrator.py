@@ -64,14 +64,17 @@ def main() -> None:
 
     _UNION_QUERY = """
         SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome,
-               kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized FROM (
+               kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized,
+               shap_coherence FROM (
             SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp,
-                   kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized
+                   kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized,
+                   NULL AS shap_coherence
             FROM trades
             WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
             UNION ALL
             SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp,
-                   kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized
+                   kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized,
+                   shap_coherence
             FROM gate_rejections
             WHERE outcome IS NOT NULL AND shadow = 0
               AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
@@ -119,6 +122,8 @@ def main() -> None:
     disagreements = np.abs(regime_probs - np.where(np.isnan(kronos_k15), regime_probs, kronos_k15))
     volatilities  = np.nan_to_num(volatilities,  nan=0.0)
     spreads       = np.nan_to_num(spreads,        nan=0.0)
+    shap_coherences_raw = np.array([r[8] if r[8] is not None else np.nan for r in rows], dtype=float)
+    shap_coherences = None if np.all(np.isnan(shap_coherences_raw)) else np.nan_to_num(shap_coherences_raw, nan=0.5)
 
     # Load existing calibrator for pre-retrain Brier comparison
     pre_brier: float | None = None
@@ -141,6 +146,7 @@ def main() -> None:
         disagreements=disagreements,
         volatilities=volatilities,
         spreads=spreads,
+        shap_coherences=shap_coherences,
     )
     post_brier = cal.brier_score(regime_probs, y_yes)
 

@@ -41,6 +41,7 @@ class Calibrator:
         self._disagreement_aware: bool = False
         self._volatility_aware: bool = False
         self._spread_aware: bool = False
+        self._shap_coherence_aware: bool = False
 
     @property
     def n_samples(self) -> int:
@@ -54,6 +55,7 @@ class Calibrator:
         disagreements: np.ndarray | None = None,
         volatilities: np.ndarray | None = None,
         spreads: np.ndarray | None = None,
+        shap_coherences: np.ndarray | None = None,
     ) -> np.ndarray:
         cols = [raw, raw ** 2]
         if regime_scores is not None:
@@ -66,6 +68,8 @@ class Calibrator:
             cols.append(volatilities)
         if spreads is not None:
             cols.append(spreads)
+        if shap_coherences is not None:
+            cols.append(shap_coherences)
         return np.column_stack(cols)
 
     def fit(
@@ -77,33 +81,37 @@ class Calibrator:
         disagreements: np.ndarray | None = None,
         volatilities: np.ndarray | None = None,
         spreads: np.ndarray | None = None,
+        shap_coherences: np.ndarray | None = None,
     ) -> "Calibrator":
         """
-        raw_probs     : model output probabilities (regime_prob for Phase 3c)
-        outcomes      : binary win/loss labels
-        regimes       : DeepSeek regime strings — regime-conditional calibration
-        edges         : abs(raw_prob - market_price) at trade time
-        disagreements : abs(regime_prob - kronos_raw_15min) — signal agreement check.
-                        When the two signals diverge, compress confidence more.
-        volatilities  : brti_volatility_1h — high vol = less reliable 15-min snapshot
-        spreads       : kalshi_spread_normalized — wide spread = noisier edge signal
+        raw_probs       : model output probabilities (regime_prob for Phase 3c)
+        outcomes        : binary win/loss labels
+        regimes         : DeepSeek regime strings — regime-conditional calibration
+        edges           : abs(raw_prob - market_price) at trade time
+        disagreements   : abs(regime_prob - kronos_raw_15min) — signal agreement check.
+                          When the two signals diverge, compress confidence more.
+        volatilities    : brti_volatility_1h — high vol = less reliable 15-min snapshot
+        spreads         : kalshi_spread_normalized — wide spread = noisier edge signal
+        shap_coherences : SHAP-based feature coherence score — low coherence = less reliable
         """
         raw_probs = np.asarray(raw_probs, dtype=float)
         outcomes = np.asarray(outcomes, dtype=float)
         n = len(raw_probs)
         self._n_samples = n
 
-        use_regime       = regimes       is not None and len(regimes)       == n
-        use_edge         = edges         is not None and len(edges)         == n
-        use_disagreement = disagreements is not None and len(disagreements) == n
-        use_volatility   = volatilities  is not None and len(volatilities)  == n
-        use_spread       = spreads       is not None and len(spreads)       == n
+        use_regime          = regimes        is not None and len(regimes)        == n
+        use_edge            = edges          is not None and len(edges)          == n
+        use_disagreement    = disagreements  is not None and len(disagreements)  == n
+        use_volatility      = volatilities   is not None and len(volatilities)   == n
+        use_spread          = spreads        is not None and len(spreads)        == n
+        use_shap_coherence  = shap_coherences is not None and len(shap_coherences) == n
 
-        regime_scores    = np.array([_encode_regime(r) for r in regimes], dtype=float) if use_regime else None
-        edge_arr         = np.asarray(edges,         dtype=float) if use_edge         else None
-        disagreement_arr = np.asarray(disagreements, dtype=float) if use_disagreement else None
-        volatility_arr   = np.asarray(volatilities,  dtype=float) if use_volatility   else None
-        spread_arr       = np.asarray(spreads,       dtype=float) if use_spread       else None
+        regime_scores       = np.array([_encode_regime(r) for r in regimes], dtype=float) if use_regime else None
+        edge_arr            = np.asarray(edges,          dtype=float) if use_edge            else None
+        disagreement_arr    = np.asarray(disagreements,  dtype=float) if use_disagreement    else None
+        volatility_arr      = np.asarray(volatilities,   dtype=float) if use_volatility      else None
+        spread_arr          = np.asarray(spreads,        dtype=float) if use_spread          else None
+        shap_coherence_arr  = np.asarray(shap_coherences, dtype=float) if use_shap_coherence else None
 
         n_holdout = max(20, n // 5)
         n_train = n - n_holdout
@@ -120,9 +128,10 @@ class Calibrator:
         dis_tr,    dis_ho        = _split(disagreement_arr)
         vol_tr,    vol_ho        = _split(volatility_arr)
         spr_tr,    spr_ho        = _split(spread_arr)
+        shc_tr,    shc_ho        = _split(shap_coherence_arr)
 
-        X_train   = self._build_X(raw_train,   reg_tr, edg_tr, dis_tr, vol_tr, spr_tr)
-        X_holdout = self._build_X(raw_holdout, reg_ho, edg_ho, dis_ho, vol_ho, spr_ho)
+        X_train   = self._build_X(raw_train,   reg_tr, edg_tr, dis_tr, vol_tr, spr_tr, shc_tr)
+        X_holdout = self._build_X(raw_holdout, reg_ho, edg_ho, dis_ho, vol_ho, spr_ho, shc_ho)
 
         new_model = LogisticRegression(max_iter=1000)
         new_model.fit(X_train, y_train)
@@ -143,8 +152,9 @@ class Calibrator:
             guard_edg = np.array([0.15])  if use_edge         else None
             guard_dis = np.array([0.0])   if use_disagreement else None  # full agreement
             guard_vol = np.array([0.0])   if use_volatility   else None  # calm market
-            guard_spr = np.array([0.0])   if use_spread       else None  # tight spread
-            guard_X = self._build_X(guard_raw, guard_reg, guard_edg, guard_dis, guard_vol, guard_spr)
+            guard_spr = np.array([0.0])   if use_spread          else None  # tight spread
+            guard_shc = np.array([0.5])   if use_shap_coherence  else None  # neutral coherence
+            guard_X = self._build_X(guard_raw, guard_reg, guard_edg, guard_dis, guard_vol, guard_spr, guard_shc)
             guard_val = float(np.clip(new_model.predict_proba(guard_X)[:, 1], 0.0, 1.0)[0])
             direction_ok = guard_val >= 0.5
             if not direction_ok:
@@ -156,11 +166,12 @@ class Calibrator:
                 self._model = new_model
                 self._passthrough = False
                 self._prev_brier = holdout_brier
-                self._regime_aware       = use_regime
-                self._edge_aware         = use_edge
-                self._disagreement_aware = use_disagreement
-                self._volatility_aware   = use_volatility
-                self._spread_aware       = use_spread
+                self._regime_aware          = use_regime
+                self._edge_aware            = use_edge
+                self._disagreement_aware    = use_disagreement
+                self._volatility_aware      = use_volatility
+                self._spread_aware          = use_spread
+                self._shap_coherence_aware  = use_shap_coherence
             else:
                 self._model = prev_model
                 self._passthrough = prev_passthrough
@@ -188,13 +199,16 @@ class Calibrator:
         disagreement: float | None = None,
         volatility: float | None = None,
         spread: float | None = None,
+        shap_coherence: float | None = None,
     ) -> float:
         """
-        edge         : abs(raw_prob - market_price) at inference time
-        disagreement : abs(regime_prob - kronos_raw_15min) — 0 = full agreement
-        volatility   : brti_volatility_1h at inference time
-        spread       : kalshi_spread_normalized at inference time
-        Missing values default to 0.0 (neutral/best-case context).
+        edge            : abs(raw_prob - market_price) at inference time
+        disagreement    : abs(regime_prob - kronos_raw_15min) — 0 = full agreement
+        volatility      : brti_volatility_1h at inference time
+        spread          : kalshi_spread_normalized at inference time
+        shap_coherence  : SHAP-based feature coherence score at inference time
+        Missing values default to 0.0 (neutral/best-case context), except
+        shap_coherence which defaults to 0.5 (neutral).
         """
         if self._passthrough or self._model is None:
             return float(raw_prob)
@@ -204,7 +218,8 @@ class Calibrator:
         dis = np.array([disagreement if disagreement is not None else 0.0]) if self._disagreement_aware else None
         vol = np.array([volatility   if volatility   is not None else 0.0]) if self._volatility_aware   else None
         spr = np.array([spread       if spread       is not None else 0.0]) if self._spread_aware       else None
-        X = self._build_X(raw, reg, edg, dis, vol, spr)
+        shc = np.array([shap_coherence if shap_coherence is not None else 0.5]) if self._shap_coherence_aware else None
+        X = self._build_X(raw, reg, edg, dis, vol, spr, shc)
         return float(np.clip(self._model.predict_proba(X)[0, 1], 0.0, 1.0))
 
     def brier_score(self, raw_probs: np.ndarray, outcomes: np.ndarray) -> float:
@@ -224,7 +239,8 @@ class Calibrator:
             "edge_aware":         self._edge_aware,
             "disagreement_aware": self._disagreement_aware,
             "volatility_aware":   self._volatility_aware,
-            "spread_aware":       self._spread_aware,
+            "spread_aware":           self._spread_aware,
+            "shap_coherence_aware":   self._shap_coherence_aware,
         }, path)
 
     @classmethod
@@ -241,5 +257,6 @@ class Calibrator:
         obj._edge_aware         = state.get("edge_aware",         False)
         obj._disagreement_aware = state.get("disagreement_aware", False)
         obj._volatility_aware   = state.get("volatility_aware",   False)
-        obj._spread_aware       = state.get("spread_aware",       False)
+        obj._spread_aware           = state.get("spread_aware",           False)
+        obj._shap_coherence_aware   = state.get("shap_coherence_aware",   False)
         return obj
