@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 from typing import Optional
 
 import redis
@@ -52,6 +53,7 @@ class PreTradeChecklist:
     def __init__(self, kelly_sizer: KellySizer) -> None:
         self._kelly = kelly_sizer
         self._redis = redis.from_url(config.REDIS_URL)
+        self._mid_candle_model_loaded: bool = False
 
     def run(
         self,
@@ -67,6 +69,7 @@ class PreTradeChecklist:
         is_drifting: bool = False,
         direction_win_rate: Optional[float] = None,
         is_bootstrap: bool = False,
+        current_candle_ts: Optional[str] = None,
     ) -> ChecklistResult:
         def fail(gate: int, reason: str, kalshi_mid: Optional[float] = None) -> ChecklistResult:
             return ChecklistResult(
@@ -116,23 +119,29 @@ class PreTradeChecklist:
         if signal.direction == 0 and trade_price_cents > _MAX_NO_TRADE_PRICE_CENTS:
             return fail(2, f"NO fill {trade_price_cents}¢ exceeds {_MAX_NO_TRADE_PRICE_CENTS}¢ max (market already bearish, 25% WR historically)")
 
-        # Gate 12 — Dynamic candle progress window (floor 3%, ceiling 5-10%)
+        # Gate 12 — Dynamic candle progress window (floor 3%, ceiling 5-10%; mid-window bypass at 40-60%)
         # Floor: wait for T+27s so Kalshi can reprice to the candle open (avg 2.71¢ move in 30s).
         # Ceiling: edge decays rapidly after 90s (10-15% = -$2.62/trade, 15-20% = -$5.74/trade).
         # Thresholds: _HIGH_VOL=0.3%/5min, _WIDE_SPREAD=4¢. Rules: both→5%, else→10%.
+        # Mid-window (40-60%): allowed only when mid_candle_model is loaded; Gate 15 confirms direction.
         _PROGRESS_FLOOR = 0.03
         candle_progress = (signal.regime_features or {}).get("candle_progress", 0.0) or 0.0
         _volatility  = (signal.regime_features or {}).get("brti_volatility_1h", 0.0) or 0.0
         _spread      = (signal.market_context  or {}).get("kalshi_spread_normalized", 0.0) or 0.0
         _vol_ratio   = (signal.regime_features or {}).get("volume_ratio_1h", 1.0) or 1.0
         _cap = _PROGRESS_CAP_MODEL.get_cap(_volatility, _spread, _vol_ratio)
-        if candle_progress < _PROGRESS_FLOOR:
-            return fail(12, f"Candle progress {candle_progress:.3f} below {_PROGRESS_FLOOR} floor — waiting for T+27s Kalshi reaction")
-        if candle_progress > _cap:
-            return fail(12, (
-                f"Candle progress {candle_progress:.2f} exceeds dynamic cap {_cap:.2f} "
-                f"(vol={_volatility:.4f} spread={_spread:.3f})"
-            ))
+        _IN_MID_WINDOW = 0.40 <= candle_progress <= 0.60
+        if not _IN_MID_WINDOW:
+            if candle_progress < _PROGRESS_FLOOR:
+                return fail(12, f"Candle progress {candle_progress:.3f} below {_PROGRESS_FLOOR} floor — waiting for T+27s Kalshi reaction")
+            if candle_progress > _cap:
+                return fail(12, (
+                    f"Candle progress {candle_progress:.2f} exceeds dynamic cap {_cap:.2f} "
+                    f"(vol={_volatility:.4f} spread={_spread:.3f})"
+                ))
+        elif not self._mid_candle_model_loaded:
+            return fail(12, "Mid-candle window (40-60%) requires model — not loaded yet")
+        # else: mid-window + model loaded → fall through to Gate 15
 
         # NOTE: Gate 11 uses signal.kronos_calibrated which equals kronos_raw while the
         # calibrator is in passthrough mode. Once the calibrator activates and compresses
