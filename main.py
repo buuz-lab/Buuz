@@ -323,6 +323,8 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("oi_delta_at_midcandle",     "REAL DEFAULT NULL"),
     ("k5_candle_ts",              "TEXT DEFAULT NULL"),
     ("mid_candle_model_prob",     "REAL DEFAULT NULL"),
+    ("k15_kalshi_alignment",  "REAL DEFAULT NULL"),
+    ("k15_delta",             "REAL DEFAULT NULL"),
 ]
 
 
@@ -452,6 +454,27 @@ class KronosV2:
             except sqlite3.OperationalError:
                 pass
         self._db.execute(_CREATE_EXPERIMENT_TRADES_TABLE)
+        self._db.commit()
+
+        # One-time backfill for k15_kalshi_alignment and k15_delta on historical rows.
+        self._db.execute("""
+            UPDATE candle_features
+            SET k15_kalshi_alignment = ROUND((kronos_raw_15min - 0.5) * (kalshi_open_mid - 0.5), 4)
+            WHERE kronos_raw_15min IS NOT NULL
+              AND kalshi_open_mid IS NOT NULL
+              AND k15_kalshi_alignment IS NULL
+        """)
+        self._db.execute("""
+            UPDATE candle_features
+            SET k15_delta = ROUND(kronos_raw_15min - (
+                SELECT prev.kronos_raw_15min FROM candle_features prev
+                WHERE prev.candle_ts < candle_features.candle_ts
+                  AND prev.kronos_raw_15min IS NOT NULL
+                ORDER BY prev.candle_ts DESC LIMIT 1
+            ), 4)
+            WHERE kronos_raw_15min IS NOT NULL
+              AND k15_delta IS NULL
+        """)
         self._db.commit()
 
         # K15 paper experiment — $100 budget, persisted across restarts.

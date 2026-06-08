@@ -57,6 +57,8 @@ def _feature_dict(seed: int = 0) -> dict:
         "deepseek_dir_prob":       float(rng.uniform(0, 1)),
         "cvd_price_divergence":    float(rng.uniform(-1, 1)),
         "recent_up_fraction":      float(rng.uniform(0, 1)),
+        "k15_kalshi_alignment":    float(rng.uniform(-0.25, 0.25)),
+        "k15_delta":               float(rng.uniform(-0.3, 0.3)),
     }
 
 
