@@ -4,13 +4,13 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 41 complete. Mid-candle data collection live — 16 new alpha features captured at 40-60% candle progress (CVD rate, BRTI velocity, k5/k15 delta, divergence signals). `MidCandleModel` class + `train_mid_candle.py` built. KronosV2 restarted to apply schema migrations. Data gate: ~200 qualifying rows (~2.5 days). Live integration (Gate 15 + model scoring at snapshot time) deferred until data gate is hit.
+**Current focus:** Session 42 complete. Gate 15 + mid-candle integration fully wired (scoring live, Redis write, DB column, Gate 12 mid-window bypass, Gate 15 candle_ts validation) — inert until `models/mid_candle.pkl` exists (~200 rows, ~June 10). Regime v2 deploy imminent: hold flag removed, 641/672 qualifying rows, auto-deploy fires tonight. Regime warm-start shipped: row trigger 200→50 (~12h cadence), +25 trees for ROW/REGIME-SHIFT, cold-start for TIME-BASED. 593 tests passing.
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-07 session 41: Mid-candle alpha feature collection live. `MidCandleModel` + `train_mid_candle.py` built. KronosV2 restarted — 16 new `candle_features` columns now accumulating at each 40-60% snapshot. Gate 15 and live scoring deferred until 200+ qualifying rows.**
+**As of 2026-06-08 session 42: Gate 15 + mid-candle integration wired end-to-end. Regime v2 auto-deploy unblocked (hold flag removed, ~8h from threshold). Warm-start + faster row trigger shipped. 593 tests passing.**
 
 ---
 
@@ -52,94 +52,59 @@ Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min
 
 ---
 
-### NEXT SESSION — Mid-candle model live integration (data-gated, ~200 rows ≈ 2.5 days)
+### What was built — session 42
+
+| What | Status |
+|---|---|
+| Gate 12 mid-window bypass | `pretrade_checklist.py`. Progress 40-60% bypasses the normal cap when `_mid_candle_model_loaded=True`. Blocks with explicit "not loaded yet" message when model absent. |
+| Gate 15 — mid-candle direction filter | `pretrade_checklist.py`. Fires only in 40-60% window. Reads `mid_candle:prob` from Redis; validates `candle_ts` before using score (cross-candle contamination guard). Blocks YES if prob < 0.38, NO if prob > 0.62. |
+| `MidCandleModel` load at startup | `main.py __init__`. Try/except on `config.MID_CANDLE_MODEL_PATH`; sets `self._checklist._mid_candle_model_loaded = True` on success. |
+| Snapshot scoring + Redis write | `main.py _candle_logger_loop`. After snapshot dict built: scores with model if loaded, writes `{"prob": float, "candle_ts": str}` to `mid_candle:prob` (ex=600s). |
+| `mid_candle_model_prob` column | Schema migration + INSERT in `candle_features`. Persists model score at snapshot time. |
+| `current_candle_ts` threading | `main.py`. `_open_dt` initialized before try block; `_current_candle_ts` derived after; passed to both `checklist.run()` calls so Gate 15 can validate Redis key age. |
+| `fusion._regime_features()` fix | Removed `kalshi_open_imbalance` and `kalshi_early_drift` from returned dict — were removed from `_FEATURE_ORDER` in session 41 but still returned. Tests updated (feature count 41→39). |
+| Regime warm-start | `RegimeModel.train(warm_start_from=...)`. Warm: +25 trees; cold: 100 trees. `auto_retrain_regime.py`: ROW-BASED and REGIME-SHIFT triggers warm-start from deployed model; TIME-BASED and FORCE cold-start (tree count reset). `train_regime.py --warm-start` flag added. |
+| Row trigger 200→50 | `auto_retrain_regime.py _ROW_TRIGGER_DELTA`. Retrains every ~12h instead of every 2 days. First warm-start retrain fires ~12h after regime v2 initial deploy. |
+| Regime deploy hold flag removed | `models/regime_deploy_hold.flag` deleted. Auto-retrain cron will deploy at 672 qualifying rows (~tonight at 641+96/day). |
+| 593 tests passing | Up from 585. |
+
+---
+
+### NEXT SESSION — Mid-candle model train + activate (~June 10)
+
+Gates 12 and 15 are fully wired. The only remaining steps are train and restart.
 
 **Data gate check:**
 ```sql
 SELECT COUNT(*) FROM candle_features
 WHERE btc_direction IS NOT NULL
   AND cvd_since_open IS NOT NULL
-  AND kalshi_mid_candle_mid IS NOT NULL;
+  AND kalshi_mid_candle_mid IS NOT NULL
+  AND tick_count_since_open > 200;
 ```
-Target: ≥200. At ~77 qualifying snaps/day (not all candles hit the 40-60% window), ~2.5 days from restart.
+Target: ≥200. At ~77 qualifying snaps/day, ~June 10.
 
-**Step 1 — Preview training data (no model written):**
+**Step 1 — Preview training data:**
 ```bash
 python3 scripts/train_mid_candle.py --dry-run
 ```
-Check: NaN coverage per feature (should be <20% for core features), Brier < 0.25, tails outperform middle.
+Check: NaN coverage per feature (<20% for core features), Brier < 0.25, tails outperform middle 60%.
 
 **Step 2 — Train and save:**
 ```bash
 python3 scripts/train_mid_candle.py --db trades.db --out models/mid_candle.pkl
 ```
 
-**Step 3 — Add to `main.py`:**
-
-In `__init__`:
-```python
-try:
-    self._mid_candle_model = MidCandleModel.load(config.MID_CANDLE_MODEL_PATH)
-    logger.info(f"MidCandleModel loaded from {config.MID_CANDLE_MODEL_PATH}")
-except FileNotFoundError:
-    self._mid_candle_model = None
+**Step 3 — Restart:**
+```bash
+launchctl kickstart -k gui/$(id -u)/com.kronos.v2
 ```
 
-In `_candle_logger_loop` right after building `self._mid_candle_snaps[key]`:
-```python
-_mid_candle_prob = None
-if self._mid_candle_model is not None:
-    try:
-        _mid_candle_prob = self._mid_candle_model.predict(
-            self._mid_candle_snaps[_in_progress_key]
-        )["prob_up"]
-    except Exception:
-        pass
-self._mid_candle_snaps[_in_progress_key]["mid_candle_prob"] = _mid_candle_prob
-# Write to Redis for main loop to read at trade time:
-if _mid_candle_prob is not None:
-    self._redis.set(
-        "mid_candle:prob",
-        json.dumps({"prob": _mid_candle_prob, "candle_ts": _in_progress_key}),
-        ex=600,
-    )
-```
+On restart, `main.py __init__` loads `models/mid_candle.pkl`, sets `_mid_candle_model_loaded=True`, and Gates 12+15 activate automatically. No code changes needed.
 
-Add `mid_candle_model_prob REAL DEFAULT NULL` to `_CANDLE_FEATURES_COLUMN_MIGRATIONS` and to the INSERT.
+**Deploy gate for Gate 15:** Only activate (i.e., train the pkl) after verifying the high-confidence profitability check passes on ≥2 consecutive dry-runs (tails consistently outperform middle 60%). Model scoring is already logging to `mid_candle_model_prob` in `candle_features` for analysis once pkl exists.
 
-**Step 4 — Gate 15 in `PreTradeChecklist`:**
-
-Gate 15 only fires when candle progress is in the 40-60% window AND the model is loaded:
-```python
-# Gate 15 — Mid-candle model confirmation (40-60% window only)
-if 0.40 <= candle_progress <= 0.60:
-    _mc_raw = self._redis_client.get("mid_candle:prob")
-    if _mc_raw:
-        _mc = json.loads(_mc_raw)
-        _mc_prob = _mc.get("prob")
-        if _mc_prob is not None:
-            if signal.direction == 1 and _mc_prob < 0.38:
-                return fail(15, f"Mid-candle model bearish ({_mc_prob:.2f}) vs YES entry")
-            if signal.direction == 0 and _mc_prob > 0.62:
-                return fail(15, f"Mid-candle model bullish ({_mc_prob:.2f}) vs NO entry")
-```
-
-**Step 5 — Gate 12 second window:**
-
-Gate 12 currently blocks all entries after 10% progress. For mid-candle entries to reach Gate 15, add a second allowed window:
-```python
-# Allow a second entry window at 40-60% when mid-candle model is loaded
-_MID_CANDLE_WINDOW = (0.40, 0.60)
-if (_MID_CANDLE_WINDOW[0] <= candle_progress <= _MID_CANDLE_WINDOW[1]
-        and self._mid_candle_model_loaded):
-    pass  # skip the progress cap check for this window
-elif candle_progress > _cap:
-    return fail(12, ...)
-```
-
-**Step 6 — Auto-retrain:** `scripts/auto_retrain_mid_candle.py` — same pattern as `auto_retrain_regime.py`. Trigger: +50 qualifying rows since last train. Min rows: 200.
-
-**Deploy gate for Gate 15:** Only add Gate 15 after verifying the high-confidence profitability check passes on ≥2 consecutive retrains (tails consistently outperform middle 60%). The model scoring (Step 3) can go live immediately — it's read-only and logged for analysis.
+**Auto-retrain (still to build):** `scripts/auto_retrain_mid_candle.py` — same pattern as `auto_retrain_regime.py`. Trigger: +50 qualifying rows since last train. Min rows: 200. Not yet built — needed before model drifts.
 
 ---
 
@@ -466,15 +431,15 @@ launchctl kickstart -k gui/$(id -u)/com.kronos.v2
 
 ---
 
-### Deploy checklist for ~June 8-9
+### Deploy checklist for ~June 8-9 — HOLD FLAG REMOVED, AUTO-DEPLOYING
 
-When `get_qualifying_count("trades.db") >= 672`, the cron will auto-retrain. Before letting the cron fire, run manually first:
+Cron will auto-deploy at 672 rows. No manual intervention needed. Checklist is for reference only if you want to review a dry-run after deploy:
 
 ```bash
 python3 scripts/train_regime.py --dry-run
 ```
 
-Deploy if ALL pass (thresholds recalibrated for 1-candle lag — old 0.22/65% were leakage-inflated):
+Thresholds (1-candle lag — contextuality gap is informational only, not a hard gate):
 - [ ] CV Brier < 0.28 (approaching Kalshi's ~0.23; coin flip = 0.25)
 - [ ] Holdout Brier < 0.27
 - [ ] Holdout accuracy > 54%
@@ -556,7 +521,18 @@ After Phase 3c deploys: **keep Gates 13 and 14** as permanent size-protection fl
 | Calibrator `_MIN_SAMPLES` raised | `100 → 150` — 7 inputs × 20 samples/feature = 140 minimum; 150 adds margin. |
 | Manual deploy hold flag | `models/regime_deploy_hold.flag` created. Blocks auto-deploy at 672 rows until manual `--dry-run` review. Remove with `rm models/regime_deploy_hold.flag` after review. |
 
-**System is code-complete.** Every remaining milestone is data-gated. No more build sessions needed before go-live.
+**Session 42 additions:**
+
+| What | Status |
+|---|---|
+| Gate 12 mid-window + Gate 15 wired | See "What was built — session 42" above. |
+| `fusion._regime_features()` fix | Removed `kalshi_open_imbalance` + `kalshi_early_drift` from returned dict (were in _FEATURE_ORDER removal from session 41 but still returned). 39 features now. |
+| Regime warm-start | `RegimeModel.train(warm_start_from=...)`. ROW/REGIME-SHIFT: +25 trees. TIME-BASED/FORCE: cold 100 trees. |
+| Row trigger 200→50 | `_ROW_TRIGGER_DELTA` in `auto_retrain_regime.py`. Retrains every ~12h. |
+| `train_regime.py --warm-start` | Manual warm-start flag. Loads existing pkl, adds 25 trees. |
+| Regime deploy hold flag removed | Auto-deploy unblocked. 641 rows as of session 42, firing tonight. |
+
+**System is code-complete.** Every remaining milestone is data-gated. One build item left: `auto_retrain_mid_candle.py` (needed before mid-candle model drifts after initial train).
 
 ---
 
@@ -566,7 +542,8 @@ After Phase 3c deploys: **keep Gates 13 and 14** as permanent size-protection fl
 
 | Date | Action |
 |---|---|
-| **~June 8-9** | Regime v2 full train fires locally. Run `--dry-run`, deploy if checklist passes. |
+| **~June 8-9 (tonight)** | Regime v2 auto-deploys at 672 rows. Hold flag removed. No action needed. |
+| **~June 10** | Mid-candle model data gate (~200 rows). Run `train_mid_candle.py --dry-run`, train, restart → Gates 12+15 activate. Build `auto_retrain_mid_candle.py`. |
 | **~June 10-11** | Migrate to cloud server (see `deploy/MIGRATION.md`). Confirm paper trades firing on server. |
 | **~June 15-18** | Go live from server: `PAPER_TRADING=false` in `.env` + `systemctl restart kronos-v2`. Criteria: Brier(regime_prob) < Brier(kalshi_open) on ≥20 rows AND paper P&L positive. |
 | **~June 27 - July 1** | Phase 3c calibrator auto-fires (500 regime_prob rows). Gates 13+14 stay — calibrator improves sizing, not gate thresholds. |
@@ -604,32 +581,19 @@ journalctl -u kronos-v2 -f | grep "Order placed"
 
 ---
 
-#### IMMEDIATE (~June 8-9): Regime v2 full train
+#### IMMEDIATE (~June 8-9): Regime v2 full train — AUTO-DEPLOYING
 
-**The cron will fire but is BLOCKED by `models/regime_deploy_hold.flag`.** Run manually first:
+**Hold flag removed. 641 qualifying rows as of session 42, threshold is 672.** The cron will auto-deploy when it fires next after hitting 672 (expect tonight or tomorrow morning). No manual action needed.
+
+After deploy:
+- `regime_prob` starts populating → live Brier tracking activates, Phase 3c clock starts
+- First warm-start retrain fires ~12h later (+25 trees on top of initial 100)
+- All post-deploy milestones run **in parallel**
+
+If you want to check the deploy happened:
 ```bash
-python3 scripts/train_regime.py --dry-run
+ls -la models/regime.pkl models/regime_last_trained.json
 ```
-
-Review checklist — deploy if ALL pass (1-candle lag thresholds):
-- [ ] CV Brier < 0.28
-- [ ] Holdout Brier < 0.27
-- [ ] Holdout accuracy > 54%
-- [ ] Top feature importance < 20%
-- [ ] CV fold 3 Brier < fold 1 Brier
-- [ ] Contextuality gap > 0.10
-
-**Deploy even if checklist fails** — the cron won't auto-deploy (hold flag), but you should manually deploy anyway to start the regime_prob data flow. Gates 13/14 protect against bad trades.
-
-```bash
-# Review complete — allow auto-deploy going forward:
-rm models/regime_deploy_hold.flag
-# Deploy now:
-python3 scripts/train_regime.py --db trades.db --out models/regime.pkl
-launchctl kickstart -k gui/$(id -u)/com.kronos.v2
-```
-
-After deploy: `regime_prob` populates, live Brier tracking activates, Phase 3c clock starts. All post-deploy milestones run **in parallel**.
 
 #### GO-LIVE PLAN (milestones run in parallel after June 8-9 deploy)
 
