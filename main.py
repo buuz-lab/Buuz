@@ -558,20 +558,32 @@ class KronosV2:
                     current_ts = df.index[-1]
                     if current_ts != last_candle_ts:
                         last_candle_ts = current_ts
-                        strike = await asyncio.to_thread(self._get_15min_reference_price)
+                        try:
+                            strike = await asyncio.wait_for(
+                                asyncio.to_thread(self._get_15min_reference_price),
+                                timeout=15.0,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("KronosBG: reference price fetch timed out — skipping candle")
+                            last_candle_ts = None  # retry on next iteration
+                            await asyncio.sleep(10)
+                            continue
                         try:
                             # k5 and k15 run in parallel — each uses its own KronosEngine
                             # instance (self._kronos / self._kronos_k15) so their PyTorch
                             # model states never share memory during concurrent forward().
-                            k5_result, k15_result = await asyncio.gather(
-                                asyncio.to_thread(
-                                    self._kronos.run_monte_carlo, self._store, 100, strike
+                            k5_result, k15_result = await asyncio.wait_for(
+                                asyncio.gather(
+                                    asyncio.to_thread(
+                                        self._kronos.run_monte_carlo, self._store, 100, strike
+                                    ),
+                                    asyncio.to_thread(
+                                        self._kronos_k15.run_monte_carlo, self._store, 100, strike,
+                                        candle_freq="15min",
+                                    ),
+                                    return_exceptions=True,
                                 ),
-                                asyncio.to_thread(
-                                    self._kronos_k15.run_monte_carlo, self._store, 100, strike,
-                                    candle_freq="15min",
-                                ),
-                                return_exceptions=True,
+                                timeout=90.0,
                             )
                             if isinstance(k5_result, Exception):
                                 raise k5_result
@@ -595,6 +607,9 @@ class KronosV2:
                                 f"KronosBG: prob={prob:.4f} prob_15min={_k15_str} "
                                 f"strike={strike:.2f} candle={current_ts}"
                             )
+                        except asyncio.TimeoutError:
+                            logger.error("KronosBG: MC timed out after 90s — skipping candle, will retry next")
+                            last_candle_ts = None  # force retry on next candle
                         except ValueError as exc:
                             logger.warning(f"KronosBG: insufficient OHLCV data — {exc}")
                         except Exception as exc:
