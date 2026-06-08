@@ -240,6 +240,7 @@ _GATE_REJECTIONS_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     # can train on the full feature set including gate_rejections counterfactuals.
     ("brti_volatility_1h",      "REAL DEFAULT NULL"),
     ("kalshi_spread_normalized", "REAL DEFAULT NULL"),
+    ("shap_coherence",          "REAL DEFAULT NULL"),
 ]
 
 
@@ -325,6 +326,7 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("mid_candle_model_prob",     "REAL DEFAULT NULL"),
     ("k15_kalshi_alignment",  "REAL DEFAULT NULL"),
     ("k15_delta",             "REAL DEFAULT NULL"),
+    ("shap_coherence",            "REAL DEFAULT NULL"),
 ]
 
 
@@ -864,7 +866,7 @@ class KronosV2:
                     continue
                 closed_candle = df15.iloc[-2]
                 btc_direction = 1 if closed_candle["close"] > closed_candle["open"] else 0
-                features, features_stale, deribit_stale, regime_prob = self._fusion.get_features_snapshot()
+                features, features_stale, deribit_stale, regime_prob, shap_coherence = self._fusion.get_features_snapshot()
 
                 # Look up Kalshi opening snapshot for the closed candle.
                 _candle_key = closed_ts.to_pydatetime().astimezone(timezone.utc).replace(
@@ -935,9 +937,10 @@ class KronosV2:
                     "cvd_brti_divergence, kalshi_brti_alignment, "
                     "k5_at_midcandle, k15_at_midcandle, k5_k15_delta_at_midcandle, "
                     "spread_change, oi_delta_at_midcandle, k5_candle_ts, mid_candle_model_prob, "
+                    "shap_coherence, "
                     + ", ".join(cols)
                 )
-                placeholders = ", ".join(["?"] * (36 + len(cols)))
+                placeholders = ", ".join(["?"] * (37 + len(cols)))
                 self._db.execute(
                     f"INSERT OR IGNORE INTO candle_features ({col_names}) VALUES ({placeholders})",
                     [
@@ -977,6 +980,7 @@ class KronosV2:
                         oi_delta_at_midcandle,
                         k5_candle_ts,
                         mid_candle_model_prob,
+                        shap_coherence,
                         *vals,
                     ],
                 )
@@ -1339,8 +1343,8 @@ class KronosV2:
                         kalshi_mid_cents, features, kalshi_mid_at_block, would_be_fill_cents,
                         kronos_raw_15min, kronos_raw, k15_calibrated_prob, candle_progress,
                         k15_post_open, regime_prob, signal_edge,
-                        brti_volatility_1h, kalshi_spread_normalized)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        brti_volatility_1h, kalshi_spread_normalized, shap_coherence)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         str(uuid.uuid4()),
                         time.time(),
@@ -1364,6 +1368,7 @@ class KronosV2:
                         _signal_edge,
                         _rf.get("brti_volatility_1h"),
                         _rf.get("kalshi_spread_normalized"),
+                        signal.shap_coherence,
                     ),
                 )
                 self._db.commit()

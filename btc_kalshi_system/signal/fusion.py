@@ -92,6 +92,9 @@ class TradingSignal:
     # regime:features expired and LKG was used (_lkg). Parallel to deribit_stale.
     # Independent from features_stale — do NOT combine them.
     okx_stale: bool = False
+    # SHAP directional coherence at signal time — weighted fraction of SHAP mass
+    # pointing same direction as prediction. None in bootstrap mode (model not trained).
+    shap_coherence: float | None = None
 
 
 class SignalFusionEngine:
@@ -184,12 +187,15 @@ class SignalFusionEngine:
         # at inference time and (later) as the training row for this trade.
         regime_features, features_stale, deribit_stale, okx_stale = self._regime_features()
 
+        regime_shap_coherence: float | None = None
+
         try:
             if _REGIME_PAUSE_FLAG.exists():
                 raise NotTrainedError("regime model paused — drawdown protection active")
             regime_result = self._regime.get_regime(regime_features)
             regime_prob = regime_result["prob_up"]
             regime_direction = regime_result["direction"]
+            regime_shap_coherence = regime_result.get("shap_coherence")
 
             # Gate 2: Kronos and regime must agree.
             # In shadow mode (config.REGIME_GATE2_ENFORCING=False) we log the
@@ -257,22 +263,25 @@ class SignalFusionEngine:
             features_stale=features_stale,
             deribit_stale=deribit_stale,
             okx_stale=okx_stale,
+            shap_coherence=regime_shap_coherence,
         )
 
-    def get_features_snapshot(self) -> tuple[dict, bool, bool, float | None]:
+    def get_features_snapshot(self) -> tuple[dict, bool, bool, float | None, float | None]:
         """
-        Returns (features_dict, features_stale, deribit_stale, regime_prob).
-        regime_prob is the model's prob_up on the current features, or None when
-        not trained or paused. Safe to call from a background loop.
+        Returns (features_dict, features_stale, deribit_stale, regime_prob, shap_coherence).
+        regime_prob and shap_coherence are None when model not trained or paused.
         """
         features, features_stale, deribit_stale, _okx_stale = self._regime_features()
         regime_prob: float | None = None
+        shap_coherence: float | None = None
         if not _REGIME_PAUSE_FLAG.exists():
             try:
-                regime_prob = self._regime.get_regime(features)["prob_up"]
+                regime_result = self._regime.get_regime(features)
+                regime_prob = regime_result["prob_up"]
+                shap_coherence = regime_result["shap_coherence"]
             except NotTrainedError:
                 pass
-        return features, features_stale, deribit_stale, regime_prob
+        return features, features_stale, deribit_stale, regime_prob, shap_coherence
 
     def _regime_features(self) -> tuple[dict, bool, bool, bool]:
         """
