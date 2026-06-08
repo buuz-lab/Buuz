@@ -9,8 +9,10 @@ import pytest
 from btc_kalshi_system.signal.fusion import SignalFusionEngine
 
 
-_ALL_29_KEYS = [
-    # kalshi_implied_prob and kalshi_spread_normalized excluded — see regime_model.py
+_ALL_39_KEYS = [
+    # kalshi_implied_prob, kalshi_spread_normalized, kalshi_open_imbalance, and
+    # kalshi_early_drift intentionally excluded — regime model must be independent
+    # of Kalshi to avoid circularity with Gates 5/8 — see regime_model.py
     "funding_rate", "funding_rate_trend", "oi_delta_pct", "cvd_normalized",
     "basis_spread_pct", "brti_volatility_1h", "cvd_velocity", "cvd_acceleration",
     "brti_momentum_5min", "brti_momentum_15min", "candle_progress",
@@ -20,8 +22,7 @@ _ALL_29_KEYS = [
     "atm_iv", "iv_rv_spread", "pcr_oi", "term_structure_slope", "skew_25d",
     "btc_24h_return",
     "kronos_raw_15min", "kronos_raw_5min",
-    "kalshi_open_imbalance", "btc_spx_corr_8d", "btc_qqq_corr_8d",
-    "kalshi_early_drift",
+    "btc_spx_corr_8d", "btc_qqq_corr_8d",
     # Session 39 — cascade momentum, cross-asset, order flow, options delta, LLM direction
     "liq_net_norm", "eth_direction_15min", "okx_spot_imbalance",
     "pcr_delta", "skew_delta", "deepseek_dir_prob",
@@ -91,10 +92,10 @@ def test_regime_features_includes_all_28_keys():
     engine = _make_engine(_base_ctx())
     features, stale, deribit_stale, _ = engine._regime_features()
     keys = list(features.keys())
-    assert keys == _ALL_29_KEYS, (
-        f"Key mismatch.\nExpected: {_ALL_29_KEYS}\nGot:      {keys}"
+    assert keys == _ALL_39_KEYS, (
+        f"Key mismatch.\nExpected: {_ALL_39_KEYS}\nGot:      {keys}"
     )
-    assert len(keys) == 41
+    assert len(keys) == 39
 
 
 # ── test_deribit_stale flags ──────────────────────────────────────────────────

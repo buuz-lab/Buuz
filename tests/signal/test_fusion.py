@@ -524,24 +524,25 @@ def test_pause_flag_absent_uses_regime_normally(tmp_path):
 
 # ── Kalshi imbalance cache ────────────────────────────────────────────────────
 
-def test_set_kalshi_imbalance_updates_regime_features():
-    """set_kalshi_imbalance() causes kalshi_open_imbalance to appear in _regime_features."""
+def test_set_kalshi_imbalance_caches_value():
+    """set_kalshi_imbalance() caches the value internally (not returned in _regime_features)."""
     engine = make_engine()
     engine.set_kalshi_imbalance(0.42)
-    features, _, _, _ = engine._regime_features()
-    assert features.get("kalshi_open_imbalance") == 0.42
+    # kalshi_open_imbalance intentionally excluded from _regime_features to avoid
+    # circularity with Gates 5/8. Verify the internal cache works.
+    assert engine._last_kalshi_open_imbalance == 0.42
 
 
-def test_set_kalshi_imbalance_none_passes_through():
-    """None imbalance (REST fallback) is passed through as None."""
+def test_set_kalshi_imbalance_none_caches():
+    """None imbalance (REST fallback) is cached as None."""
     engine = make_engine()
     engine.set_kalshi_imbalance(None)
-    features, _, _, _ = engine._regime_features()
-    assert features.get("kalshi_open_imbalance") is None
+    assert engine._last_kalshi_open_imbalance is None
 
 
 def test_kalshi_imbalance_defaults_to_none_before_set():
     """Before set_kalshi_imbalance() is called, value is None."""
     engine = make_engine()
-    features, _, _, _ = engine._regime_features()
-    assert features.get("kalshi_open_imbalance") is None
+    # kalshi_open_imbalance intentionally excluded from _regime_features to avoid
+    # circularity. Verify internal cache is initialized to None.
+    assert engine._last_kalshi_open_imbalance is None

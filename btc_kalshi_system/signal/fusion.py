@@ -519,8 +519,10 @@ class SignalFusionEngine:
         except Exception:
             recent_up_fraction = 0.5
 
-        # kalshi_implied_prob and kalshi_spread_normalized intentionally excluded —
-        # regime model must be independent of Kalshi to avoid circularity with Gates 5/8.
+        # kalshi_implied_prob, kalshi_spread_normalized, kalshi_open_imbalance, and
+        # kalshi_early_drift intentionally excluded — regime model must be independent
+        # of Kalshi to avoid circularity with Gates 5/8. These are still logged to
+        # candle_features for other use cases.
         features = {
             "funding_rate":             funding_rate,
             "funding_rate_trend":       funding_rate_trend,
@@ -553,10 +555,8 @@ class SignalFusionEngine:
             # XGBoost treats None→NaN as missing; candle logger stores None as SQL NULL.
             "kronos_raw_15min":         self._last_kronos_raw_15min,
             "kronos_raw_5min":          self._last_kronos_raw_5min,
-            "kalshi_open_imbalance":    self._last_kalshi_open_imbalance,
             "btc_spx_corr_8d":          float(ctx.get("btc_spx_corr_8d") or 0.0),
             "btc_qqq_corr_8d":          float(ctx.get("btc_qqq_corr_8d") or 0.0),
-            "kalshi_early_drift":       self._last_kalshi_early_drift,
             "liq_net_norm":          float(ctx.get("liq_net_norm") or 0.0),
             "eth_direction_15min":   float(ctx.get("eth_direction_15min") if ctx.get("eth_direction_15min") is not None else 0.5),
             "okx_spot_imbalance":    float(ctx.get("okx_spot_imbalance") or 0.0),

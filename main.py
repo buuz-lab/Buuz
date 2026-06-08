@@ -27,6 +27,7 @@ from btc_kalshi_system.execution.router import KalshiClientRouter
 from btc_kalshi_system.models.calibrator import Calibrator
 from btc_kalshi_system.models.deepseek_parser import DeepSeekContextParser
 from btc_kalshi_system.models.kronos_engine import KronosEngine
+from btc_kalshi_system.models.mid_candle_model import MidCandleModel
 from btc_kalshi_system.models.regime_model import RegimeModel, _FEATURE_ORDER
 from btc_kalshi_system.portfolio.circuit_breaker import CircuitBreaker
 from btc_kalshi_system.portfolio.monitor import OpenPosition, PortfolioMonitor
@@ -305,6 +306,7 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("spread_change",             "REAL DEFAULT NULL"),
     ("oi_delta_at_midcandle",     "REAL DEFAULT NULL"),
     ("k5_candle_ts",              "TEXT DEFAULT NULL"),
+    ("mid_candle_model_prob",     "REAL DEFAULT NULL"),
 ]
 
 
@@ -357,6 +359,12 @@ class KronosV2:
         self._stratified_edge = StratifiedEdgeTracker()
         self._kelly = KellySizer()
         self._checklist = PreTradeChecklist(self._kelly)
+        try:
+            self._mid_candle_model = MidCandleModel.load(config.MID_CANDLE_MODEL_PATH)
+            self._checklist._mid_candle_model_loaded = True
+            logger.info(f"MidCandleModel loaded from {config.MID_CANDLE_MODEL_PATH}")
+        except FileNotFoundError:
+            self._mid_candle_model = None
         self._orderbook_feed = KalshiOrderbookFeed(
             api_key_id=config.KALSHI_API_KEY_ID,
             private_key_path=config.KALSHI_PRIVATE_KEY_PATH,
@@ -762,6 +770,21 @@ class KronosV2:
                                     "oi_delta_at_midcandle":     _oi_delta_mid,
                                     "k5_candle_ts":              _k5_candle_ts,
                                 }
+                                _mid_candle_prob = None
+                                if self._mid_candle_model is not None:
+                                    try:
+                                        _mid_candle_prob = self._mid_candle_model.predict(
+                                            self._mid_candle_snaps[_in_progress_key]
+                                        )["prob_up"]
+                                    except Exception:
+                                        pass
+                                self._mid_candle_snaps[_in_progress_key]["mid_candle_prob"] = _mid_candle_prob
+                                if _mid_candle_prob is not None:
+                                    self._redis.set(
+                                        "mid_candle:prob",
+                                        json.dumps({"prob": _mid_candle_prob, "candle_ts": _in_progress_key}),
+                                        ex=600,
+                                    )
                                 logger.debug(
                                     f"CandleLogger: mid-candle snapshot {_snap_ticker} "
                                     f"mid={_mid_prob:.3f} progress={_progress:.2f} "
@@ -815,6 +838,7 @@ class KronosV2:
                 k5_k15_delta_at_midcandle = _mid_snap.get("k5_k15_delta_at_midcandle") if _mid_snap else None
                 oi_delta_at_midcandle     = _mid_snap.get("oi_delta_at_midcandle")     if _mid_snap else None
                 k5_candle_ts              = _mid_snap.get("k5_candle_ts")              if _mid_snap else None
+                mid_candle_model_prob     = _mid_snap.get("mid_candle_prob")           if _mid_snap else None
                 self._candle_open_brti.pop(_candle_key, None)
                 spread_change = (
                     round(kalshi_mid_candle_spread - kalshi_open_spread, 4)
@@ -846,10 +870,10 @@ class KronosV2:
                     "kalshi_drift_cents, kalshi_velocity, "
                     "cvd_brti_divergence, kalshi_brti_alignment, "
                     "k5_at_midcandle, k15_at_midcandle, k5_k15_delta_at_midcandle, "
-                    "spread_change, oi_delta_at_midcandle, k5_candle_ts, "
+                    "spread_change, oi_delta_at_midcandle, k5_candle_ts, mid_candle_model_prob, "
                     + ", ".join(cols)
                 )
-                placeholders = ", ".join(["?"] * (35 + len(cols)))
+                placeholders = ", ".join(["?"] * (36 + len(cols)))
                 self._db.execute(
                     f"INSERT OR IGNORE INTO candle_features ({col_names}) VALUES ({placeholders})",
                     [
@@ -888,6 +912,7 @@ class KronosV2:
                         spread_change,
                         oi_delta_at_midcandle,
                         k5_candle_ts,
+                        mid_candle_model_prob,
                         *vals,
                     ],
                 )
@@ -1032,6 +1057,7 @@ class KronosV2:
 
         # Determine if k15 cache was computed from a candle AFTER this market opened.
         # More precise than candle_progress: 1 = k15 has current-market data, 0 = pre-open.
+        _open_dt = None
         try:
             _close_str = market.get("close_time", "")
             _close_dt = datetime.fromisoformat(_close_str.replace("Z", "+00:00"))
@@ -1045,6 +1071,7 @@ class KronosV2:
             self._candle_ticker_map[_open_dt.isoformat()] = ticker
         except Exception:
             _k15_post_open = None
+        _current_candle_ts: str | None = _open_dt.isoformat() if _open_dt is not None else None
         logger.debug(
             f"KronosBG strike delta: ${abs(cached['strike'] - strike):.2f} "
             f"(cached={cached['strike']:.2f} market={strike:.2f})"
@@ -1115,6 +1142,7 @@ class KronosV2:
             is_drifting=self._drift_monitor.is_drifting(),
             direction_win_rate=dir_win_rate,
             is_bootstrap=is_bootstrap,
+            current_candle_ts=_current_candle_ts,
         )
 
         # g. Checklist failed
@@ -1212,6 +1240,7 @@ class KronosV2:
             is_drifting=self._drift_monitor.is_drifting(),
             direction_win_rate=dir_win_rate,
             is_bootstrap=is_bootstrap,
+            current_candle_ts=_current_candle_ts,
         )
         if not result2.passed:
             logger.info(

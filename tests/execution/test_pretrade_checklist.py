@@ -1,3 +1,4 @@
+import json
 import math
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -903,3 +904,113 @@ def test_gate12_allows_progress_at_floor(checklist):
     signal = make_signal(regime_features={"candle_progress": 0.03})
     r = checklist.run(**base_kwargs(signal))
     assert r.failed_gate != 12
+
+
+def test_gate12_mid_window_no_model_blocks(checklist):
+    """Progress 50% but model not loaded → Gate 12 blocks with 'not loaded' message."""
+    signal = make_signal(regime_features={"candle_progress": 0.50})
+    r = checklist.run(**base_kwargs(signal))
+    assert not r.passed
+    assert r.failed_gate == 12
+    assert "not loaded" in r.failed_reason
+
+
+def test_gate12_mid_window_with_model_passes(checklist):
+    """Progress 50% and model loaded → Gate 12 passes (falls through to Gate 15)."""
+    checklist._mid_candle_model_loaded = True
+    signal = make_signal(regime_features={"candle_progress": 0.50})
+    r = checklist.run(**base_kwargs(signal))
+    assert r.failed_gate != 12
+
+
+# ── Gate 15: Mid-candle model direction filter ──────────────────────────────
+
+def test_gate15_stale_candle_ts_skips(checklist):
+    """Gate 15 skips silently when Redis candle_ts doesn't match current candle."""
+    checklist._mid_candle_model_loaded = True
+
+    def _get_side_effect(key):
+        if key == "mid_candle:prob":
+            return json.dumps(
+                {"prob": 0.20, "candle_ts": "2026-01-01T00:00:00+00:00"}
+            ).encode()
+        return None  # trading:loss_streak → 0
+
+    checklist._redis.get.side_effect = _get_side_effect
+    signal = make_signal(regime_features={"candle_progress": 0.50})
+    r = checklist.run(
+        **base_kwargs(signal),
+        current_candle_ts="2026-01-01T00:15:00+00:00",  # different from Redis ts
+    )
+    assert r.passed  # stale ts → gate skipped → trade allowed
+
+
+def test_gate15_bearish_blocks_yes(checklist):
+    """Gate 15 blocks YES when mid-candle model prob < 0.38."""
+    checklist._mid_candle_model_loaded = True
+    current_ts = "2026-01-01T00:15:00+00:00"
+
+    def _get_side_effect(key):
+        if key == "mid_candle:prob":
+            return json.dumps(
+                {"prob": 0.25, "candle_ts": current_ts}
+            ).encode()
+        return None  # trading:loss_streak → 0
+
+    checklist._redis.get.side_effect = _get_side_effect
+    signal = make_signal(direction=1, regime_features={"candle_progress": 0.50})
+    r = checklist.run(**base_kwargs(signal), current_candle_ts=current_ts)
+    assert not r.passed
+    assert r.failed_gate == 15
+    assert "bearish" in r.failed_reason
+
+
+def test_gate15_bullish_blocks_no(checklist):
+    """Gate 15 blocks NO when mid-candle model prob > 0.62."""
+    checklist._mid_candle_model_loaded = True
+    current_ts = "2026-01-01T00:15:00+00:00"
+
+    def _get_side_effect(key):
+        if key == "mid_candle:prob":
+            return json.dumps(
+                {"prob": 0.75, "candle_ts": current_ts}
+            ).encode()
+        return None  # trading:loss_streak → 0
+
+    checklist._redis.get.side_effect = _get_side_effect
+    # Use NO direction with prob=0.30 (win_prob=0.70) to ensure Kelly doesn't round to 0
+    signal = make_signal(direction=0, calibrated_prob=0.30, regime_features={"candle_progress": 0.50})
+    kw = base_kwargs(signal)
+    kw["best_ask_cents"] = 48
+    kw["best_bid_cents"] = 47  # spread = $0.01, NO fill = 100-47 = 53¢
+    r = checklist.run(**kw, current_candle_ts=current_ts)
+    assert not r.passed
+    assert r.failed_gate == 15
+    assert "bullish" in r.failed_reason
+
+
+def test_gate15_neutral_prob_allows_trade(checklist):
+    """Gate 15 allows trade when prob is within neutral band (0.38-0.62)."""
+    checklist._mid_candle_model_loaded = True
+    current_ts = "2026-01-01T00:15:00+00:00"
+
+    def _get_side_effect(key):
+        if key == "mid_candle:prob":
+            return json.dumps(
+                {"prob": 0.55, "candle_ts": current_ts}  # neutral — not bearish enough to block YES
+            ).encode()
+        return None  # trading:loss_streak → 0
+
+    checklist._redis.get.side_effect = _get_side_effect
+    signal = make_signal(direction=1, regime_features={"candle_progress": 0.50})
+    r = checklist.run(**base_kwargs(signal), current_candle_ts=current_ts)
+    assert r.failed_gate != 15
+
+
+def test_gate15_no_redis_score_allows_trade(checklist):
+    """Gate 15 skips when Redis key is absent (model loaded but no score yet)."""
+    checklist._mid_candle_model_loaded = True
+    checklist._redis.get.return_value = None  # no score in Redis
+    signal = make_signal(regime_features={"candle_progress": 0.50})
+    r = checklist.run(**base_kwargs(signal))
+    assert r.failed_gate != 15
