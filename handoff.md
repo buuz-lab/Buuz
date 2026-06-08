@@ -4,13 +4,13 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 42 complete. Gate 15 + mid-candle integration fully wired (scoring live, Redis write, DB column, Gate 12 mid-window bypass, Gate 15 candle_ts validation) — inert until `models/mid_candle.pkl` exists (~200 rows, ~June 10). Regime v2 deploy imminent: hold flag removed, 641/672 qualifying rows, auto-deploy fires tonight. Regime warm-start shipped: row trigger 200→50 (~12h cadence), +25 trees for ROW/REGIME-SHIFT, cold-start for TIME-BASED. 593 tests passing.
+**Current focus:** Session 43 complete. k15_kalshi_alignment + k15_delta fully shipped: added to _FEATURE_ORDER (session 42), fusion.py inference (session 42), and now DB schema + backfill + test fixtures (session 43). 41 features total. 599 tests passing. Regime v2 auto-deploying tonight (641→672 rows). Next: mid-candle model data gate ~June 10.
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-08 session 42: Gate 15 + mid-candle integration wired end-to-end. Regime v2 auto-deploy unblocked (hold flag removed, ~8h from threshold). Warm-start + faster row trigger shipped. 593 tests passing.**
+**As of 2026-06-08 session 43: k15_kalshi_alignment + k15_delta live end-to-end — inference (fusion), training (candle_features), backfill (437 alignment rows, 773 delta rows). 599 tests passing. Regime v2 auto-deploying tonight.**
 
 ---
 
@@ -531,6 +531,17 @@ After Phase 3c deploys: **keep Gates 13 and 14** as permanent size-protection fl
 | Row trigger 200→50 | `_ROW_TRIGGER_DELTA` in `auto_retrain_regime.py`. Retrains every ~12h. |
 | `train_regime.py --warm-start` | Manual warm-start flag. Loads existing pkl, adds 25 trees. |
 | Regime deploy hold flag removed | Auto-deploy unblocked. 641 rows as of session 42, firing tonight. |
+
+**Session 43 additions:**
+
+| What | Status |
+|---|---|
+| `k15_kalshi_alignment` + `k15_delta` DB schema | `_CANDLE_FEATURES_COLUMN_MIGRATIONS` in `main.py`. Two `REAL DEFAULT NULL` columns. |
+| One-time backfill SQL | On startup: k15_kalshi_alignment = `ROUND((k15-0.5)*(kalshi_open_mid-0.5), 4)`, k15_delta = lag subquery via correlated subquery. Both `IS NULL`-guarded (idempotent). **437 alignment rows, 773 delta rows backfilled.** |
+| Live logging via `*vals` | Features are in `_FEATURE_ORDER` (session 42), so `*vals` expansion logs them at candle close automatically. No explicit logging block needed. |
+| Test fixtures updated | `test_regime_model.py` `_feature_dict()`, `test_fusion.py` `_NULLABLE_KEYS`, `test_auto_retrain_regime.py` `_FEATURE_COLS_FOR_DB` + `_make_db()` — all updated for 41-feature _FEATURE_ORDER. |
+| Feature count: **41** | 39 (session 42) + k15_kalshi_alignment + k15_delta = 41. Test assertions updated across 3 test files. |
+| 599 tests passing | Up from 593. |
 
 **System is code-complete.** Every remaining milestone is data-gated. One build item left: `auto_retrain_mid_candle.py` (needed before mid-candle model drifts after initial train).
 
