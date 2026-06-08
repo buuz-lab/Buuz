@@ -9,7 +9,7 @@ import pytest
 from btc_kalshi_system.signal.fusion import SignalFusionEngine
 
 
-_ALL_39_KEYS = [
+_ALL_41_KEYS = [
     # kalshi_implied_prob, kalshi_spread_normalized, kalshi_open_imbalance, and
     # kalshi_early_drift intentionally excluded — regime model must be independent
     # of Kalshi to avoid circularity with Gates 5/8 — see regime_model.py
@@ -28,6 +28,8 @@ _ALL_39_KEYS = [
     "pcr_delta", "skew_delta", "deepseek_dir_prob",
     # Session 40 — microstructure divergence and directional trend context
     "cvd_price_divergence", "recent_up_fraction",
+    # Session 42 — k15/Kalshi interaction features
+    "k15_kalshi_alignment", "k15_delta",
 ]
 
 
@@ -88,14 +90,14 @@ def _base_ctx() -> dict:
 # ── test_regime_features_includes_all_27_keys ─────────────────────────────────
 
 def test_regime_features_includes_all_28_keys():
-    """_regime_features() must return exactly 39 keys in the correct order."""
+    """_regime_features() must return exactly 41 keys in the correct order."""
     engine = _make_engine(_base_ctx())
     features, stale, deribit_stale, _ = engine._regime_features()
     keys = list(features.keys())
-    assert keys == _ALL_39_KEYS, (
-        f"Key mismatch.\nExpected: {_ALL_39_KEYS}\nGot:      {keys}"
+    assert keys == _ALL_41_KEYS, (
+        f"Key mismatch.\nExpected: {_ALL_41_KEYS}\nGot:      {keys}"
     )
-    assert len(keys) == 39
+    assert len(keys) == 41
 
 
 # ── test_deribit_stale flags ──────────────────────────────────────────────────
