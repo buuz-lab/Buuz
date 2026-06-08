@@ -37,6 +37,7 @@ _WATCH_FEATURES = [
 _MARKER_PATH = "models/regime_last_trained.json"
 _PAUSE_FLAG   = Path("models/regime_paused.flag")
 _MODEL_PATH   = "models/regime.pkl"
+_SHAP_BASELINE_PATH = "models/regime_shap_baseline.json"
 
 _STATUS = {"PASS": "✓", "WARN": "⚠", "FAIL": "✗"}
 
@@ -315,6 +316,92 @@ def section_training_health(conn: sqlite3.Connection) -> list[str]:
     return issues
 
 
+# ── Section 5: Calibration curve + SHAP ─────────────────────────────────────
+
+def section_calibration_and_shap(conn: sqlite3.Connection) -> list[str]:
+    """Section 5: calibration curve by confidence tier + SHAP feature contributions."""
+    issues: list[str] = []
+    print(f"\n── Calibration Curve + SHAP {'─'*43}")
+
+    # ── 5a: Calibration curve ─────────────────────────────────────────────────
+    # shap_coherence column is added later; fall back to NULL if absent
+    _cf_cols = {r[1] for r in conn.execute("PRAGMA table_info(candle_features)").fetchall()}
+    _coh_expr = "shap_coherence" if "shap_coherence" in _cf_cols else "NULL"
+    rows = conn.execute(f"""
+        SELECT regime_prob, btc_direction, kalshi_open_mid, {_coh_expr}
+        FROM candle_features
+        WHERE features_stale=0 AND regime_prob IS NOT NULL
+          AND btc_direction IS NOT NULL AND kalshi_open_mid IS NOT NULL
+        ORDER BY candle_ts ASC
+    """).fetchall()
+
+    n_total = len(rows)
+    if n_total == 0:
+        print("  (no regime_prob rows yet — check back after regime v2 deploys)")
+    else:
+        tiers = [
+            ("Low  (|p-0.5|<0.10)", lambda p: abs(p - 0.5) < 0.10,  False),
+            ("Med  (0.10–0.20)",     lambda p: 0.10 <= abs(p - 0.5) < 0.20, False),
+            ("High (|p-0.5|>0.20)", lambda p: abs(p - 0.5) >= 0.20, True),
+        ]
+        high_regime_brier = high_kalshi_brier = high_n = None
+
+        for tier_name, tier_fn, is_high in tiers:
+            tier_rows = [(p, y, k, c) for p, y, k, c in rows if tier_fn(p)]
+            n = len(tier_rows)
+            if n == 0:
+                print(f"  {tier_name:<24s}  n=0   (accumulating)")
+                continue
+            regime_ps  = [r[0] for r in tier_rows]
+            ys         = [r[1] for r in tier_rows]
+            kalshi_ks  = [r[2] for r in tier_rows]
+            coherences = [r[3] for r in tier_rows if r[3] is not None]
+
+            r_brier = sum((p - y) ** 2 for p, y in zip(regime_ps, ys)) / n
+            k_brier = sum((k - y) ** 2 for k, y in zip(kalshi_ks, ys)) / n
+            adv = (k_brier - r_brier) / k_brier * 100 if k_brier > 0 else 0
+
+            if n >= 10:
+                win_rate = sum(ys) / n * 100
+                coh_str = f"  coh={sum(coherences)/len(coherences):.2f}" if coherences else ""
+                print(f"  {tier_name:<24s}  n={n:<4d}  win={win_rate:.0f}%  "
+                      f"regime={r_brier:.3f}  kalshi={k_brier:.3f}  adv={adv:+.1f}%{coh_str}")
+            else:
+                print(f"  {tier_name:<24s}  n={n:<4d}  (accumulating — need 10+)")
+
+            if is_high:
+                high_regime_brier, high_kalshi_brier, high_n = r_brier, k_brier, n
+
+        # Key signal: does model beat Kalshi in high-confidence tier?
+        if high_n is not None and high_n >= 10:
+            if high_regime_brier < high_kalshi_brier:
+                print(f"  {_STATUS['PASS']} HIGH tier beats Kalshi — go-live signal present")
+            else:
+                msg = f"High-confidence regime ({high_regime_brier:.3f}) ≥ Kalshi ({high_kalshi_brier:.3f})"
+                print(f"  {_STATUS['WARN']} {msg}")
+                issues.append(f"WARN  {msg}")
+
+        print(f"  Total regime_prob rows: {n_total}")
+
+    # ── 5b: SHAP feature contributions ───────────────────────────────────────
+    shap_path = Path(_SHAP_BASELINE_PATH)
+    if shap_path.exists():
+        try:
+            snapshot = json.loads(shap_path.read_text())
+            n_snap   = snapshot.get("n_rows", 0)
+            computed = snapshot.get("computed_at", "unknown")[:19]
+            print(f"\n  SHAP baseline  (n_train={n_snap}, updated {computed})")
+            print(f"  {'Feature':<28s}  {'Mean|SHAP|':>10s}  {'Importance':>10s}")
+            for feat in snapshot["features"][:10]:
+                print(f"  {feat['name']:<28s}  {feat['mean_abs_shap']:>10.4f}  {feat['importance']:>10.3%}")
+        except Exception as exc:
+            print(f"  {_STATUS['WARN']} Could not read SHAP baseline: {exc}")
+    else:
+        print("\n  (SHAP baseline not yet available — appears after first train_regime.py run)")
+
+    return issues
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -335,6 +422,7 @@ def main() -> None:
         all_issues += section_distribution_drift(conn, args.hours)
         all_issues += section_kalshi_edge(conn)
         all_issues += section_training_health(conn)
+        all_issues += section_calibration_and_shap(conn)
     finally:
         conn.close()
 
