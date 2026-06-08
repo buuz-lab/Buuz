@@ -287,7 +287,35 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("deepseek_dir_prob",    "REAL DEFAULT NULL"),
     ("cvd_price_divergence", "REAL DEFAULT NULL"),
     ("recent_up_fraction",   "REAL DEFAULT NULL"),
+    # Mid-candle alpha features — collected at 40-60% candle progress
+    ("cvd_since_open",            "REAL DEFAULT NULL"),
+    ("cvd_rate",                  "REAL DEFAULT NULL"),
+    ("tick_count_since_open",     "INTEGER DEFAULT NULL"),
+    ("brti_at_candle_open",       "REAL DEFAULT NULL"),
+    ("brti_at_midcandle",         "REAL DEFAULT NULL"),
+    ("brti_drift_since_open",     "REAL DEFAULT NULL"),
+    ("brti_velocity",             "REAL DEFAULT NULL"),
+    ("kalshi_drift_cents",        "REAL DEFAULT NULL"),
+    ("kalshi_velocity",           "REAL DEFAULT NULL"),
+    ("cvd_brti_divergence",       "REAL DEFAULT NULL"),
+    ("kalshi_brti_alignment",     "REAL DEFAULT NULL"),
+    ("k5_at_midcandle",           "REAL DEFAULT NULL"),
+    ("k15_at_midcandle",          "REAL DEFAULT NULL"),
+    ("k5_k15_delta_at_midcandle", "REAL DEFAULT NULL"),
+    ("spread_change",             "REAL DEFAULT NULL"),
+    ("oi_delta_at_midcandle",     "REAL DEFAULT NULL"),
 ]
+
+
+def _sign_product(a: float | None, b: float | None) -> float | None:
+    """Return sign(a) * sign(b): +1 (aligned), -1 (diverging), 0 (one is zero), None (missing)."""
+    if a is None or b is None:
+        return None
+    sa = 1 if a > 0 else (-1 if a < 0 else 0)
+    sb = 1 if b > 0 else (-1 if b < 0 else 0)
+    if sa == 0 or sb == 0:
+        return 0.0
+    return float(sa * sb)
 
 
 class KronosV2:
@@ -412,6 +440,8 @@ class KronosV2:
         # when progress crosses 40-60%). Written by _candle_logger_loop, read at close time.
         self._mid_candle_snaps: dict[str, dict] = {}
         self._early_candle_snaps: dict[str, dict] = {}
+        self._candle_open_brti: dict[str, float | None] = {}
+        self._deriv: "DerivativesFeed | None" = None
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
@@ -425,7 +455,7 @@ class KronosV2:
         queues = [asyncio.Queue() for _ in range(4)]
         agg = BRTIAggregator()
         feeds = [CoinbaseFeed(), KrakenFeed(), BitstampFeed(), GeminiFeed()]
-        deriv = DerivativesFeed()
+        self._deriv = DerivativesFeed()
         deribit_feed = DeribitOptionsFeed()
 
         await asyncio.gather(
@@ -435,7 +465,7 @@ class KronosV2:
             feeds[3].run(queues[3]),
             agg.run(queues),
             self._store.run(agg.out_queue),
-            deriv.run(),
+            self._deriv.run(),
             deribit_feed.run(),
             self._orderbook_feed.run(),
             self._main_loop(),
@@ -607,6 +637,11 @@ class KronosV2:
                     _snap_ticker = self._candle_ticker_map.get(_in_progress_key)
                     _snap_ob = self._orderbook_feed.get_orderbook(_snap_ticker) if _snap_ticker else None
 
+                    # First sight of this candle: capture BRTI for mid-candle drift computation.
+                    if _in_progress_key not in self._candle_open_brti:
+                        _brti_open_raw = self._redis.get("brti:resolution_estimate")
+                        self._candle_open_brti[_in_progress_key] = float(_brti_open_raw) if _brti_open_raw else None
+
                     # Early snapshot at T+30s (3-7% progress) — Kalshi price + regime features
                     # for future T+30s model training.
                     if _in_progress_key not in self._early_candle_snaps and 0.03 <= _progress <= 0.07:
@@ -625,20 +660,105 @@ class KronosV2:
                         if _snap_ob:
                             _bid, _ask, _ = self._parse_orderbook(_snap_ob)
                             if _ask > 0:
-                                self._mid_candle_snaps[_in_progress_key] = {
-                                    "mid_prob": (_bid + _ask) / 200.0,
-                                    "spread":   (_ask - _bid) / 100.0,
-                                    "progress": round(_progress, 3),
-                                }
-                                # Paper exit check: would we have exited at this price?
-                                _would_exit, _would_exit_price = self._check_would_exit(
-                                    _snap_ticker, (_bid + _ask) / 200.0
+                                _mid_prob   = (_bid + _ask) / 200.0
+                                _mid_spread = (_ask - _bid) / 100.0
+                                _would_exit, _would_exit_price = self._check_would_exit(_snap_ticker, _mid_prob)
+
+                                # CVD and tick count since candle open (streaming accumulator)
+                                _candle_open_ts_ms = int(_in_progress_ts.timestamp() * 1000)
+                                _cvd_since_open: float | None = None
+                                _tick_count: int | None = None
+                                if self._deriv is not None:
+                                    _cvd_since_open, _tick_count = (
+                                        self._deriv._cvd_accumulator.cvd_since_candle_open(_candle_open_ts_ms)
+                                    )
+                                _cvd_rate = (
+                                    round(_cvd_since_open / _progress, 4)
+                                    if _cvd_since_open is not None and _progress > 0
+                                    else None
                                 )
-                                self._mid_candle_snaps[_in_progress_key]["would_exit"] = int(_would_exit)
-                                self._mid_candle_snaps[_in_progress_key]["would_exit_price_cents"] = _would_exit_price
+
+                                # BRTI drift since candle open
+                                _brti_raw = self._redis.get("brti:resolution_estimate")
+                                _brti_at_mid: float | None = float(_brti_raw) if _brti_raw else None
+                                _brti_at_open = self._candle_open_brti.get(_in_progress_key)
+                                _brti_drift = (
+                                    round(_brti_at_mid - _brti_at_open, 2)
+                                    if _brti_at_mid is not None and _brti_at_open is not None
+                                    else None
+                                )
+                                _brti_velocity = (
+                                    round(_brti_drift / _progress, 2)
+                                    if _brti_drift is not None and _progress > 0
+                                    else None
+                                )
+
+                                # Kalshi drift and velocity vs candle open price
+                                _open_snap_mid = (
+                                    self._orderbook_feed.get_open_snapshot(_snap_ticker)
+                                    if _snap_ticker else None
+                                )
+                                _kalshi_open_mid_now = _open_snap_mid["mid_prob"] if _open_snap_mid else None
+                                _kalshi_drift_cents = (
+                                    round((_mid_prob - _kalshi_open_mid_now) * 100, 3)
+                                    if _kalshi_open_mid_now is not None
+                                    else None
+                                )
+                                _kalshi_velocity = (
+                                    round(_kalshi_drift_cents / _progress, 3)
+                                    if _kalshi_drift_cents is not None and _progress > 0
+                                    else None
+                                )
+
+                                # Divergence: +1 aligned, -1 diverging, 0 one side neutral
+                                _cvd_brti_div    = _sign_product(_cvd_since_open, _brti_drift)
+                                _kalshi_brti_align = _sign_product(_kalshi_drift_cents, _brti_drift)
+
+                                # k5/k15 Kronos at snapshot time
+                                _ck = self._cached_kronos
+                                _k5_mid  = _ck["prob"]              if _ck else None
+                                _k15_mid = _ck.get("prob_15min")    if _ck else None
+                                _k5_k15_delta = (
+                                    round(_k5_mid - _k15_mid, 4)
+                                    if _k5_mid is not None and _k15_mid is not None
+                                    else None
+                                )
+
+                                # OI delta from regime:features at snapshot time
+                                _oi_delta_mid: float | None = None
+                                try:
+                                    _rf_raw = self._redis.get("regime:features")
+                                    if _rf_raw:
+                                        _oi_delta_mid = json.loads(_rf_raw).get("oi_delta_pct")
+                                except Exception:
+                                    pass
+
+                                self._mid_candle_snaps[_in_progress_key] = {
+                                    "mid_prob":                  _mid_prob,
+                                    "spread":                    _mid_spread,
+                                    "progress":                  round(_progress, 3),
+                                    "would_exit":                int(_would_exit),
+                                    "would_exit_price_cents":    _would_exit_price,
+                                    "cvd_since_open":            _cvd_since_open,
+                                    "cvd_rate":                  _cvd_rate,
+                                    "tick_count_since_open":     _tick_count,
+                                    "brti_at_candle_open":       _brti_at_open,
+                                    "brti_at_midcandle":         _brti_at_mid,
+                                    "brti_drift_since_open":     _brti_drift,
+                                    "brti_velocity":             _brti_velocity,
+                                    "kalshi_drift_cents":        _kalshi_drift_cents,
+                                    "kalshi_velocity":           _kalshi_velocity,
+                                    "cvd_brti_divergence":       _cvd_brti_div,
+                                    "kalshi_brti_alignment":     _kalshi_brti_align,
+                                    "k5_at_midcandle":           _k5_mid,
+                                    "k15_at_midcandle":          _k15_mid,
+                                    "k5_k15_delta_at_midcandle": _k5_k15_delta,
+                                    "oi_delta_at_midcandle":     _oi_delta_mid,
+                                }
                                 logger.debug(
                                     f"CandleLogger: mid-candle snapshot {_snap_ticker} "
-                                    f"mid={(_bid+_ask)/200:.3f} progress={_progress:.2f}"
+                                    f"mid={_mid_prob:.3f} progress={_progress:.2f} "
+                                    f"cvd_since_open={_cvd_since_open} ticks={_tick_count}"
                                 )
                 except Exception as exc:
                     logger.debug(f"CandleLogger: candle snapshot failed — {exc}")
@@ -671,6 +791,28 @@ class KronosV2:
                 kalshi_mid_candle_progress = _mid_snap["progress"]  if _mid_snap else None
                 would_exit             = _mid_snap.get("would_exit", 0)           if _mid_snap else 0
                 would_exit_price_cents = _mid_snap.get("would_exit_price_cents")  if _mid_snap else None
+                # Mid-candle alpha features
+                cvd_since_open            = _mid_snap.get("cvd_since_open")            if _mid_snap else None
+                cvd_rate                  = _mid_snap.get("cvd_rate")                  if _mid_snap else None
+                tick_count_since_open     = _mid_snap.get("tick_count_since_open")     if _mid_snap else None
+                brti_at_candle_open       = _mid_snap.get("brti_at_candle_open")       if _mid_snap else None
+                brti_at_midcandle         = _mid_snap.get("brti_at_midcandle")         if _mid_snap else None
+                brti_drift_since_open     = _mid_snap.get("brti_drift_since_open")     if _mid_snap else None
+                brti_velocity             = _mid_snap.get("brti_velocity")             if _mid_snap else None
+                kalshi_drift_cents        = _mid_snap.get("kalshi_drift_cents")        if _mid_snap else None
+                kalshi_velocity           = _mid_snap.get("kalshi_velocity")           if _mid_snap else None
+                cvd_brti_divergence       = _mid_snap.get("cvd_brti_divergence")       if _mid_snap else None
+                kalshi_brti_alignment     = _mid_snap.get("kalshi_brti_alignment")     if _mid_snap else None
+                k5_at_midcandle           = _mid_snap.get("k5_at_midcandle")           if _mid_snap else None
+                k15_at_midcandle          = _mid_snap.get("k15_at_midcandle")          if _mid_snap else None
+                k5_k15_delta_at_midcandle = _mid_snap.get("k5_k15_delta_at_midcandle") if _mid_snap else None
+                oi_delta_at_midcandle     = _mid_snap.get("oi_delta_at_midcandle")     if _mid_snap else None
+                self._candle_open_brti.pop(_candle_key, None)
+                spread_change = (
+                    round(kalshi_mid_candle_spread - kalshi_open_spread, 4)
+                    if kalshi_mid_candle_spread is not None and kalshi_open_spread is not None
+                    else None
+                )
 
                 _early_snap = self._early_candle_snaps.pop(_candle_key, None)
                 kalshi_early_mid      = _early_snap["mid_prob"]  if _early_snap else None
@@ -684,7 +826,6 @@ class KronosV2:
 
                 cols = list(_FEATURE_ORDER)
                 vals = [features.get(c) for c in cols]
-                placeholders = ", ".join(["?"] * (16 + len(cols)))
                 col_names = (
                     "candle_ts, btc_direction, logged_at, features_stale, deribit_stale, "
                     "kalshi_open_mid, kalshi_open_spread, kalshi_open_depth, "
@@ -692,9 +833,15 @@ class KronosV2:
                     "kalshi_early_mid, kalshi_early_progress, regime_prob, "
                     "would_exit, would_exit_price_cents, "
                     "kalshi_early_drift, features_early, "
+                    "cvd_since_open, cvd_rate, tick_count_since_open, "
+                    "brti_at_candle_open, brti_at_midcandle, brti_drift_since_open, brti_velocity, "
+                    "kalshi_drift_cents, kalshi_velocity, "
+                    "cvd_brti_divergence, kalshi_brti_alignment, "
+                    "k5_at_midcandle, k15_at_midcandle, k5_k15_delta_at_midcandle, "
+                    "spread_change, oi_delta_at_midcandle, "
                     + ", ".join(cols)
                 )
-                placeholders = ", ".join(["?"] * (18 + len(cols)))
+                placeholders = ", ".join(["?"] * (34 + len(cols)))
                 self._db.execute(
                     f"INSERT OR IGNORE INTO candle_features ({col_names}) VALUES ({placeholders})",
                     [
@@ -716,6 +863,22 @@ class KronosV2:
                         would_exit_price_cents,
                         kalshi_early_drift,
                         features_early,
+                        cvd_since_open,
+                        cvd_rate,
+                        tick_count_since_open,
+                        brti_at_candle_open,
+                        brti_at_midcandle,
+                        brti_drift_since_open,
+                        brti_velocity,
+                        kalshi_drift_cents,
+                        kalshi_velocity,
+                        cvd_brti_divergence,
+                        kalshi_brti_alignment,
+                        k5_at_midcandle,
+                        k15_at_midcandle,
+                        k5_k15_delta_at_midcandle,
+                        spread_change,
+                        oi_delta_at_midcandle,
                         *vals,
                     ],
                 )

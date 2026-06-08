@@ -53,6 +53,9 @@ def _make_system() -> "main.KronosV2":
     system._candle_ticker_map = {}
     system._mid_candle_snaps = {}
     system._early_candle_snaps = {}
+    system._candle_open_brti = {}
+    system._cached_kronos = None
+    system._deriv = None
 
     db = sqlite3.connect(":memory:")
     db.execute(main._CREATE_TRADES_TABLE)

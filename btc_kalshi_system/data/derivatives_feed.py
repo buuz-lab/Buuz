@@ -70,6 +70,22 @@ class StreamingCVDAccumulator:
             return True
         return (time.time() - self._last_tick_at) > _CVD_STALE_TIMEOUT
 
+    def cvd_since_candle_open(self, candle_open_ts_ms: int) -> tuple[float | None, int]:
+        """CVD and tick count for trades at or after candle_open_ts_ms (ms epoch).
+
+        Returns (cvd_normalized, tick_count). cvd_normalized is None when no ticks exist
+        for the window — caller should treat None as missing data, not zero.
+        """
+        recent = [t for t in self._trades if t[0] >= candle_open_ts_ms]
+        n = len(recent)
+        if n == 0:
+            return None, 0
+        buy_vol  = sum(t[2] for t in recent if t[1] == "buy")
+        sell_vol = sum(t[2] for t in recent if t[1] == "sell")
+        total = buy_vol + sell_vol
+        cvd = (buy_vol - sell_vol) / total if total > 0.0 else 0.0
+        return cvd, n
+
     # ── Tick ingestion ─────────────────────────────────────────────────────────
 
     def _ingest_tick(self, tick: tuple[int, str, float, float]) -> None:
