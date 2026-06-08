@@ -143,6 +143,21 @@ class PreTradeChecklist:
             return fail(12, "Mid-candle window (40-60%) requires model — not loaded yet")
         # else: mid-window + model loaded → fall through to Gate 15
 
+        # Gate 15 — Mid-candle model direction filter (40-60% window only)
+        # Only fires when candle is in mid-window. Skips silently if Redis score is
+        # from a different candle (cross-candle contamination guard).
+        if 0.40 <= candle_progress <= 0.60:
+            _mc_raw = self._redis.get("mid_candle:prob")
+            if _mc_raw:
+                _mc = json.loads(_mc_raw)
+                if _mc.get("candle_ts") == current_candle_ts:
+                    _mc_prob = _mc.get("prob")
+                    if _mc_prob is not None:
+                        if signal.direction == 1 and _mc_prob < 0.38:
+                            return fail(15, f"Mid-candle model bearish ({_mc_prob:.2f}) vs YES entry")
+                        if signal.direction == 0 and _mc_prob > 0.62:
+                            return fail(15, f"Mid-candle model bullish ({_mc_prob:.2f}) vs NO entry")
+
         # NOTE: Gate 11 uses signal.kronos_calibrated which equals kronos_raw while the
         # calibrator is in passthrough mode. Once the calibrator activates and compresses
         # strong signals (e.g. k15_raw=0.80 → k15_cal≈0.55), this gate will silently
