@@ -3,7 +3,7 @@
 #
 # Retraining triggers (in priority order):
 #   1. Regime-shift: rolling 48-candle btc_direction mean shifts ≥15% from train-time mean
-#   2. Row-based: +200 new candle_features rows since last train (~2 days at 96/day)
+#   2. Row-based: +50 new candle_features rows since last train (~12h at 96/day)
 #   3. Time-based: 14 days elapsed since last train
 #
 # Rolling window: last 2000 qualifying rows (~21 days). Time-ordered split: last
@@ -41,7 +41,7 @@ from btc_kalshi_system.models.regime_model import RegimeModel, _FEATURE_ORDER
 
 _MARKER_PATH = "models/regime_last_trained.json"
 
-_ROW_TRIGGER_DELTA = 200   # retrain when +200 new candle rows since last train (~2 days)
+_ROW_TRIGGER_DELTA = 50    # retrain when +50 new candle rows since last train (~12h)
 _TIME_TRIGGER_DAYS = 14    # retrain if 14 days elapsed since last train
 _MIN_ROWS = 672            # refuse to retrain below this (7 days × 96 candles/day)
 _WINDOW = None             # use ALL qualifying candles — no rolling cap.
@@ -229,6 +229,11 @@ def should_deploy(candidate_brier: float, deployed_brier: float | None) -> bool:
     return candidate_brier < deployed_brier
 
 
+def _use_warm_start(trigger: str) -> bool:
+    """True for incremental triggers (ROW-BASED, REGIME-SHIFT); False for full resets."""
+    return trigger.startswith("ROW-BASED") or trigger.startswith("REGIME-SHIFT")
+
+
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -320,8 +325,16 @@ def main() -> None:
         extra_kwargs["scale_pos_weight"] = neg / pos
         print(f"Applying scale_pos_weight={extra_kwargs['scale_pos_weight']:.3f}")
 
+    # Warm-start for incremental triggers; cold-start for TIME-BASED and FORCE.
+    deployed_for_warm = None
+    if _use_warm_start(trigger):
+        try:
+            deployed_for_warm = RegimeModel.load(str(args.out))
+        except FileNotFoundError:
+            pass  # no model yet — cold start
+
     candidate = RegimeModel()
-    candidate.train(X_train, y_train, **extra_kwargs)
+    candidate.train(X_train, y_train, warm_start_from=deployed_for_warm, **extra_kwargs)
 
     # 8. Evaluate candidate on holdout
     proba_candidate = candidate._clf.predict_proba(X_holdout)[:, 1]

@@ -29,6 +29,7 @@ from scripts.auto_retrain_regime import (
     _REGIME_SHIFT_WINDOW,
     _REGIME_SHIFT_DELTA,
     _REGIME_PAUSE_FLAG,
+    _use_warm_start,
 )
 
 
@@ -417,3 +418,28 @@ def test_save_marker_direction_mean_none_when_omitted(tmp_path):
 
 def test_pause_flag_path_is_in_models_dir():
     assert "models" in str(_REGIME_PAUSE_FLAG)
+
+
+# ── row trigger delta ──────────────────────────────────────────────────────────
+
+def test_row_trigger_delta_is_50():
+    """Row trigger fires every 50 new rows (~12h at 96 candles/day)."""
+    assert _ROW_TRIGGER_DELTA == 50
+
+
+# ── _use_warm_start ────────────────────────────────────────────────────────────
+
+def test_use_warm_start_true_for_row_based():
+    assert _use_warm_start("ROW-BASED") is True
+
+
+def test_use_warm_start_true_for_regime_shift():
+    assert _use_warm_start("REGIME-SHIFT (0.45→0.60)") is True
+
+
+def test_use_warm_start_false_for_time_based():
+    assert _use_warm_start("TIME-BASED") is False
+
+
+def test_use_warm_start_false_for_force():
+    assert _use_warm_start("FORCE") is False
