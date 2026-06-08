@@ -83,18 +83,12 @@ def section_overview(data: dict, n: int) -> None:
 
 
 def section_brier(candles: list) -> None:
-    # regime_prob[N] was trained to predict direction[N+1] (1-candle lag).
-    # Comparing against same-row btc_direction is wrong — use lagged pairs.
-    print("\n── Rolling Brier vs Kalshi (1-candle lag — how model was trained) " + "─" * 4)
-    if not candles:
-        print("  (no regime_prob candle rows yet — accumulating)")
-        return
-
+    # regime_prob[N] predicts direction[N+1] (1-candle lag = training objective).
+    print("\n── N+1 Candle Accuracy (close-lag, how model was trained) " + "─" * 14)
     if len(candles) < 2:
-        print(f"  (need ≥2 rows for lag comparison — have {len(candles)})")
+        print(f"  (need ≥2 rows — have {len(candles)})")
         return
 
-    # pairs: (regime_prob[N], kalshi_open_mid[N]) predicting direction[N+1]
     pairs = [(candles[i][1], candles[i][3], candles[i+1][4]) for i in range(len(candles) - 1)]
     n = len(pairs)
 
@@ -103,14 +97,36 @@ def section_brier(candles: list) -> None:
     regime_acc   = sum(1 for p, k, d in pairs if int(p >= 0.5) == d) / n
     kalshi_acc   = sum(1 for p, k, d in pairs if int(k >= 0.5) == d) / n
     adv = (kalshi_brier - regime_brier) / kalshi_brier * 100 if kalshi_brier > 0 else 0
+    beating = regime_brier < kalshi_brier
 
-    print(f"  n={n:<4d}  "
-          f"regime Brier={regime_brier:.4f} ({regime_acc:.0%})  "
-          f"kalshi Brier={kalshi_brier:.4f} ({kalshi_acc:.0%})  "
-          f"adv={adv:+.1f}%  {_brier_color(regime_brier)}")
+    print(f"  All-time  n={n:<3d}  "
+          f"regime={regime_brier:.4f} ({regime_acc:.0%})  "
+          f"kalshi={kalshi_brier:.4f} ({kalshi_acc:.0%})  "
+          f"adv={adv:+.1f}%  {'✓ beating' if beating else '✗ behind'}")
+
+    # Last-5 rolling window for trend
+    if n >= 5:
+        last5 = pairs[-5:]
+        rb5 = sum((p - d) ** 2 for p, k, d in last5) / 5
+        kb5 = sum((k - d) ** 2 for p, k, d in last5) / 5
+        acc5 = sum(1 for p, k, d in last5 if int(p >= 0.5) == d) / 5
+        adv5 = (kb5 - rb5) / kb5 * 100 if kb5 > 0 else 0
+        trend = "↑" if rb5 < regime_brier else "↓"
+        print(f"  Last-5    n=5    "
+              f"regime={rb5:.4f} ({acc5:.0%})  "
+              f"kalshi={kb5:.4f}  "
+              f"adv={adv5:+.1f}%  {trend} vs all-time")
+
+    # Per-candle row
+    print(f"\n  {'Candle':<16}  {'prob':>5}  {'→next':>5}  {'result':>6}  {'R.Brier':>7}  {'K.Brier':>7}")
+    for i, (p, k, d) in enumerate(pairs[-10:]):
+        ok = int(p >= 0.5) == d
+        rb = (p - d) ** 2
+        kb = (k - d) ** 2
+        print(f"  {candles[i][0][:16]}  {p:.2f}   {'↑' if d else '↓'}     {'✓' if ok else '✗'}      {rb:.3f}    {kb:.3f}")
 
     if n < 10:
-        print(f"  ⚠  {10 - n} more candles needed for reliable comparison")
+        print(f"\n  ⚠  {10 - n} more candles for reliable stats")
 
 
 def section_calibration(candles: list) -> None:
@@ -171,29 +187,40 @@ def section_shap(candles: list) -> None:
 
 
 def section_recent_signals(rejections: list) -> None:
+    # One-shot cache: since the fix, regime_prob should be identical across
+    # all gate rejections within the same market. "stable" = cache working.
     print("\n── Recent Signals (gate rejections) " + "─" * 35)
     if not rejections:
         print("  (none yet)")
         return
 
-    # Group by ticker to show per-market story
     by_ticker: dict[str, list] = {}
-    for r in rejections[:20]:
+    for r in rejections[:24]:
         t = r[1][-15:] if len(r[1]) > 15 else r[1]
         by_ticker.setdefault(t, []).append(r)
 
-    for ticker, entries in list(by_ticker.items())[:6]:
-        ts_latest = datetime.fromtimestamp(entries[0][0], tz=timezone.utc).strftime("%H:%M")
-        probs = [e[3] for e in entries]
-        cohs  = [e[4] for e in entries if e[4] is not None]
-        gates = [str(e[2]) for e in entries]
+    for ticker, entries in list(by_ticker.items())[:7]:
+        ts = datetime.fromtimestamp(entries[0][0], tz=timezone.utc).strftime("%H:%M")
+        probs   = [e[3] for e in entries]
+        cohs    = [e[4] for e in entries if e[4] is not None]
+        gates   = [str(e[2]) for e in entries]
         outcome = next((e[7] for e in entries if e[7] is not None), None)
-        outcome_str = f"→ {'WIN' if outcome == 1 else 'LOSS'}" if outcome is not None else "→ pending"
-        avg_prob = sum(probs) / len(probs)
-        avg_coh  = sum(cohs) / len(cohs) if cohs else 0
-        prob_str = f"[{min(probs):.2f}→{max(probs):.2f}]" if len(probs) > 1 else f"{probs[0]:.3f}"
-        print(f"  {ts_latest}  {ticker}  prob={prob_str}  coh={avg_coh:.3f}  "
-              f"gates={','.join(gates)}  {outcome_str}")
+        result  = f"→ {'WIN' if outcome == 1 else 'LOSS'}" if outcome is not None else "→ pending"
+        avg_coh = sum(cohs) / len(cohs) if cohs else 0
+
+        stable = max(probs) - min(probs) < 0.001
+        if len(probs) == 1:
+            prob_str  = f"{probs[0]:.3f}"
+            cache_tag = ""
+        elif stable:
+            prob_str  = f"{probs[0]:.3f} ×{len(probs)}"
+            cache_tag = " [cache✓]"
+        else:
+            prob_str  = f"[{min(probs):.2f}→{max(probs):.2f}]"
+            cache_tag = " [pre-fix]"
+
+        print(f"  {ts}  {ticker}  prob={prob_str}  coh={avg_coh:.3f}  "
+              f"gates={','.join(gates)}  {result}{cache_tag}")
 
 
 def section_row_progress(data: dict) -> None:
