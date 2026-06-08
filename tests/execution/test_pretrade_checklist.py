@@ -17,6 +17,8 @@ def make_signal(
     regime_features: dict | None = None,
     market_context: dict | None = None,
 ) -> TradingSignal:
+    _rf = {"candle_progress": 0.05}
+    _rf.update(regime_features or {})
     return TradingSignal(
         direction=direction,
         calibrated_prob=calibrated_prob,
@@ -28,7 +30,7 @@ def make_signal(
         timeframe="5min",
         strike=strike,
         timestamp=datetime.now(timezone.utc),
-        regime_features=regime_features or {},
+        regime_features=_rf,
         market_context=market_context or {},
     )
 
@@ -755,18 +757,18 @@ def test_gate8_high_uncertainty_same_signal_passes_in_neutral(checklist):
 
 # ── Gate 12: Dynamic candle progress cap ────────────────────────────────────
 
-def test_gate12_quiet_market_allows_18_pct_progress(checklist):
-    """Low vol + tight spread → cap=0.20, progress 18% passes Gate 12."""
+def test_gate12_quiet_market_allows_9_pct_progress(checklist):
+    """Low vol + tight spread → cap=0.10, progress 9% passes Gate 12."""
     signal = make_signal(
         regime_features={
-            "candle_progress": 0.18,
+            "candle_progress": 0.09,
             "brti_volatility_1h": 0.001,
             "volume_ratio_1h": 1.0,
         },
         market_context={"kalshi_spread_normalized": 0.02},
     )
     result = checklist.run(**base_kwargs(signal))
-    # Should NOT be rejected by Gate 12 (cap=0.20, progress=0.18 <= 0.20)
+    # Should NOT be rejected by Gate 12 (cap=0.10, progress=0.09 <= 0.10)
     assert result.failed_gate != 12
 
 
@@ -884,3 +886,20 @@ def test_ranging_down_bet_not_shrunk(checklist):
     assert ranging_result.passed
     assert trend_result.passed
     assert ranging_result.kelly_dollars > trend_result.kelly_dollars
+
+
+# ── Gate 12 floor tests ───────────────────────────────────────────────────────
+
+def test_gate12_fires_when_progress_below_floor(checklist):
+    """Candle at 1% progress — too early, must wait for T+27s."""
+    signal = make_signal(regime_features={"candle_progress": 0.01})
+    r = checklist.run(**base_kwargs(signal))
+    assert r.failed_gate == 12
+    assert "floor" in r.failed_reason
+
+
+def test_gate12_allows_progress_at_floor(checklist):
+    """Candle at exactly 3% progress — minimum met, should pass Gate 12."""
+    signal = make_signal(regime_features={"candle_progress": 0.03})
+    r = checklist.run(**base_kwargs(signal))
+    assert r.failed_gate != 12

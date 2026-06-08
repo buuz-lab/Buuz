@@ -62,3 +62,9 @@ KALSHI_CONSENSUS_THRESHOLD: float = 0.25
 # Path to the serialized isotonic-regression Calibrator. Created by scripts/train_calibrator.py
 # or by in-process refit every 25 resolutions. KronosV2 attempts to load on startup.
 CALIBRATOR_MODEL_PATH: str = os.getenv("CALIBRATOR_MODEL_PATH", "models/calibrator.pkl")
+
+# Path to the serialized MidCandleModel. Created by scripts/train_mid_candle.py
+# once ≥200 qualifying candle_features rows (with cvd_since_open NOT NULL) are
+# accumulated. KronosV2 will attempt to load at startup; if missing, mid-candle
+# model scoring is skipped and the snapshot is still logged for future training.
+MID_CANDLE_MODEL_PATH: str = os.getenv("MID_CANDLE_MODEL_PATH", "models/mid_candle.pkl")

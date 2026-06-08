@@ -25,14 +25,14 @@ class RuleBasedProgressCap(ProgressCapModel):
     _WIDE_SPREAD = 0.04   # >4¢ spread — thin or rapidly repricing
 
     def get_cap(self, volatility: float, spread: float, volume_ratio: float) -> float:
+        # Data: 10-15% progress = -$2.62/trade, 15-20% = -$5.74/trade — edge gone by 90s.
+        # Upper bound is 10% in all conditions; 5% only when both volatile AND wide spread.
         high_vol    = volatility > self._HIGH_VOL
         wide_spread = spread    > self._WIDE_SPREAD
         if high_vol and wide_spread:
             return 0.05
-        elif high_vol or wide_spread:
-            return 0.10
         else:
-            return 0.20
+            return 0.10
 
 
 _PROGRESS_CAP_MODEL = RuleBasedProgressCap()
@@ -116,15 +116,18 @@ class PreTradeChecklist:
         if signal.direction == 0 and trade_price_cents > _MAX_NO_TRADE_PRICE_CENTS:
             return fail(2, f"NO fill {trade_price_cents}¢ exceeds {_MAX_NO_TRADE_PRICE_CENTS}¢ max (market already bearish, 25% WR historically)")
 
-        # Gate 12 — Dynamic candle progress cap
-        # Entry window depends on market conditions. Quiet markets (low vol + tight spread)
-        # allow entry up to 20% progress. Active/uncertain markets constrain entry earlier.
-        # Thresholds: _HIGH_VOL=0.3%/5min, _WIDE_SPREAD=4¢. Rules: both→5%, one→10%, none→20%.
+        # Gate 12 — Dynamic candle progress window (floor 3%, ceiling 5-10%)
+        # Floor: wait for T+27s so Kalshi can reprice to the candle open (avg 2.71¢ move in 30s).
+        # Ceiling: edge decays rapidly after 90s (10-15% = -$2.62/trade, 15-20% = -$5.74/trade).
+        # Thresholds: _HIGH_VOL=0.3%/5min, _WIDE_SPREAD=4¢. Rules: both→5%, else→10%.
+        _PROGRESS_FLOOR = 0.03
         candle_progress = (signal.regime_features or {}).get("candle_progress", 0.0) or 0.0
         _volatility  = (signal.regime_features or {}).get("brti_volatility_1h", 0.0) or 0.0
         _spread      = (signal.market_context  or {}).get("kalshi_spread_normalized", 0.0) or 0.0
         _vol_ratio   = (signal.regime_features or {}).get("volume_ratio_1h", 1.0) or 1.0
         _cap = _PROGRESS_CAP_MODEL.get_cap(_volatility, _spread, _vol_ratio)
+        if candle_progress < _PROGRESS_FLOOR:
+            return fail(12, f"Candle progress {candle_progress:.3f} below {_PROGRESS_FLOOR} floor — waiting for T+27s Kalshi reaction")
         if candle_progress > _cap:
             return fail(12, (
                 f"Candle progress {candle_progress:.2f} exceeds dynamic cap {_cap:.2f} "

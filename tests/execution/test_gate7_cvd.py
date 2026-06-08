@@ -26,7 +26,7 @@ def _make_signal(direction: int, cvd: float, calibrated_prob: float = 0.65) -> T
         timeframe="15min",
         strike=95000.0,
         timestamp=datetime.now(timezone.utc),
-        regime_features={"cvd_normalized": cvd},
+        regime_features={"cvd_normalized": cvd, "candle_progress": 0.05},
         features_stale=False,
     )
 
