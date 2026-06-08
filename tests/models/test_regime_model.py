@@ -89,9 +89,7 @@ def test_get_regime_has_required_keys():
     X, y = _synthetic_features()
     model.train(X, y)
     result = model.get_regime(_feature_dict())
-    assert "prob_up" in result
-    assert "direction" in result
-    assert "confidence" in result
+    assert set(result.keys()) == {"prob_up", "direction", "confidence", "shap_coherence"}
 
 
 def test_get_regime_prob_up_is_float_in_unit_interval():

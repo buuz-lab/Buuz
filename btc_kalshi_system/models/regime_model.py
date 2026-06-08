@@ -90,13 +90,15 @@ class RegimeModel:
             raise NotTrainedError(
                 "RegimeModel has not been trained. Call train() or load() first."
             )
+        from btc_kalshi_system.models.shap_utils import compute_coherence
         # None entries (e.g. kronos_raw_15min before bootstrap loop fires) → NaN;
         # XGBoost treats NaN as missing values natively.
         X = np.array([[features[k] if features[k] is not None else float("nan") for k in _FEATURE_ORDER]])
         prob_up = float(self._clf.predict_proba(X)[0, 1])
         direction = int(prob_up >= 0.5)
         confidence = float(abs(prob_up - 0.5) * 2)  # 0 at boundary, 1 at extremes
-        return {"prob_up": prob_up, "direction": direction, "confidence": confidence}
+        shap_coherence = compute_coherence(self._clf, X)
+        return {"prob_up": prob_up, "direction": direction, "confidence": confidence, "shap_coherence": shap_coherence}
 
     def train(self, X: np.ndarray, y: np.ndarray,
               warm_start_from: "RegimeModel | None" = None,
