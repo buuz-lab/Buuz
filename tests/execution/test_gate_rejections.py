@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS gate_rejections (
     regime_prob              REAL DEFAULT NULL,
     signal_edge              REAL DEFAULT NULL,
     brti_volatility_1h       REAL DEFAULT NULL,
-    kalshi_spread_normalized REAL DEFAULT NULL
+    kalshi_spread_normalized REAL DEFAULT NULL,
+    shap_coherence REAL DEFAULT NULL
 )
 """
 

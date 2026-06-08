@@ -278,7 +278,7 @@ class SignalFusionEngine:
             try:
                 regime_result = self._regime.get_regime(features)
                 regime_prob = regime_result["prob_up"]
-                shap_coherence = regime_result["shap_coherence"]
+                shap_coherence = regime_result.get("shap_coherence")
             except NotTrainedError:
                 pass
         return features, features_stale, deribit_stale, regime_prob, shap_coherence
