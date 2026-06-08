@@ -44,18 +44,15 @@ _FEATURE_ORDER = [
     # NULL (→ NaN) when bootstrap loop hasn't fired yet; XGBoost treats NaN as missing.
     "kronos_raw_15min",
     "kronos_raw_5min",
-    # Kalshi imbalance snapshot (session 35) — captured from WS at trade entry time;
-    # None (→ NaN) when REST fallback is used. Independent of Kalshi implied_prob (Gate 5).
-    "kalshi_open_imbalance",
     # Macro correlation features (session 35) — 8-day rolling BTC correlation with SPX/QQQ;
     # sourced from Redis via DerivativesFeed; default 0.0 when unavailable.
     "btc_spx_corr_8d",
     "btc_qqq_corr_8d",
-    # T+30s market reaction (session 38) — Kalshi mid price drift in first ~30s of candle.
-    # Positive = market repriced upward in the entry window; negative = downward.
-    # Only populated for candles where kalshi_early_mid AND kalshi_open_mid are both logged.
-    # Historical rows default to NaN (XGBoost missing-value handling).
-    "kalshi_early_drift",
+    # NOTE: kalshi_open_imbalance and kalshi_early_drift intentionally excluded.
+    # The regime model must be Kalshi-independent: regime_prob feeds Gate 5
+    # (signal_edge = |regime_prob - kalshi_price|) and Gate 8 (consensus check).
+    # Any Kalshi feature in regime_prob makes those comparisons circular.
+    # Both columns still logged to candle_features for future Kalshi-aware models.
     # Session 39 — cascade momentum, cross-asset, order flow, options delta, LLM direction
     "liq_net_norm",
     "eth_direction_15min",
