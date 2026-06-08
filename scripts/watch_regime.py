@@ -22,7 +22,8 @@ def load(db: str, n: int) -> dict:
     conn = sqlite3.connect(db)
     try:
         rows = conn.execute("""
-            SELECT candle_ts, regime_prob, shap_coherence, kalshi_open_mid, btc_direction
+            SELECT candle_ts, regime_prob, shap_coherence, kalshi_open_mid, btc_direction,
+                   kalshi_early_mid, kalshi_early_progress
             FROM candle_features
             WHERE regime_prob IS NOT NULL AND btc_direction IS NOT NULL
               AND kalshi_open_mid IS NOT NULL
@@ -85,11 +86,29 @@ def main() -> None:
     if n_c < 2:
         print(f"  (need ≥2 rows to compare — have {n_c})")
     else:
-        # Fair Kalshi benchmark: use kalshi_open_mid[N+1] (Kalshi at candle N+1 open —
-        # same moment the one-shot regime fires) not kalshi_open_mid[N] which is
-        # Kalshi 15 minutes BEFORE regime fires on a completely different candle.
-        pairs = [(candles[i][0][:16], candles[i][1], candles[i+1][3], candles[i+1][4])
-                 for i in range(n_c - 1)]
+        # Kalshi benchmark hierarchy (all from candle N+1 — same candle regime predicts):
+        #   1st choice: kalshi_early_mid[N+1] — Kalshi at T+35s, same moment regime fires
+        #   2nd choice: kalshi_open_mid[N+1]  — Kalshi at T=0, 35s before regime fires
+        # cols: (candle_ts, regime_prob, shap_coherence, kalshi_open_mid, btc_direction,
+        #        kalshi_early_mid, kalshi_early_progress)
+        def _kalshi_bench(row: tuple) -> tuple[float, str]:
+            early = row[5]
+            if early is not None:
+                return early, f"T+{row[6]*900:.0f}s"
+            return row[3], "T=0"
+
+        pairs = []
+        k_sources: list[str] = []
+        for i in range(n_c - 1):
+            k_val, k_src = _kalshi_bench(candles[i+1])
+            pairs.append((candles[i][0][:16], candles[i][1], k_val, candles[i+1][4]))
+            k_sources.append(k_src)
+
+        # Coverage summary
+        t35_count = sum(1 for s in k_sources if s != "T=0")
+        if t35_count < len(k_sources):
+            print(f"  Kalshi benchmark: T+35s for {t35_count}/{len(k_sources)} pairs, "
+                  f"T=0 fallback for {len(k_sources)-t35_count} (early snap not yet captured)")
         n = len(pairs)
 
         rb_all = sum((p - d)**2 for _, p, k, d in pairs) / n
@@ -111,20 +130,21 @@ def main() -> None:
             print(f"  Last-5    n=5    regime={rb5:.3f} ({acc5:.0%})  "
                   f"kalshi={kb5:.3f}  adv={adv5:+.1f}%  {arrow}")
 
-        # Per-candle table — regime_prob[N] predicting direction[N+1]
-        # K.Brier uses kalshi_open_mid[N+1] (same moment regime fires)
+        # Per-candle table — K.Brier source shown in last column
         offset = max(0, n - 10)
-        print(f"\n  {'At close [N]':<16}  {'Pred':>5}  {'Dir[N+1]':>8}  Res  R.Brier  K.Brier(N+1)")
-        print(f"  {'─'*16}  {'─'*5}  {'─'*8}  ───  ───────  ────────────")
-        for i, (ts, p, k, d) in enumerate(pairs[-10:]):
+        shown_pairs   = pairs[-10:]
+        shown_sources = k_sources[-10:]
+        print(f"\n  {'At close [N]':<16}  {'Pred':>5}  {'→N+1':>4}  Res  R.Brier  K.Brier  K.src")
+        print(f"  {'─'*16}  {'─'*5}  {'─'*4}  ───  ───────  ───────  ─────")
+        for i, ((ts, p, k, d), src) in enumerate(zip(shown_pairs, shown_sources)):
             ok   = int(p >= 0.5) == d
             rb   = (p - d)**2
             kb   = (k - d)**2
             pred = f"{'↑' if p >= 0.5 else '↓'}{p:.2f}"
             nxt  = f"{'↑' if d else '↓'}"
             win  = "✓" if ok else "✗"
-            star = " ★" if rb < kb else "  "
-            print(f"  {candles[offset+i][0][:16]}  {pred:<5}  {nxt:<8}  {win}    {rb:.3f}    {kb:.3f}{star}")
+            star = "★" if rb < kb else " "
+            print(f"  {candles[offset+i][0][:16]}  {pred:<5}  {nxt:<4}  {win}  {star} {rb:.3f}   {kb:.3f}  {src}")
 
         if n < 20:
             need_go  = max(0, 20 - n)
