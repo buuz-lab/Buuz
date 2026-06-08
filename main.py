@@ -723,7 +723,7 @@ class KronosV2:
                         if _snap_ob:
                             _bid, _ask, _ = self._parse_orderbook(_snap_ob)
                             if _ask > 0:
-                                _early_features, _, _, _ = self._fusion.get_features_snapshot()
+                                _early_features, _, _, _, _ = self._fusion.get_features_snapshot()
                                 self._early_candle_snaps[_in_progress_key] = {
                                     "mid_prob":      (_bid + _ask) / 200.0,
                                     "progress":      round(_progress, 3),
