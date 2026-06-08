@@ -180,3 +180,33 @@ def test_get_regime_handles_none_kronos_features():
     fd["kronos_raw_5min"] = None
     result = model.get_regime(fd)
     assert isinstance(result["prob_up"], float)
+
+
+# ── warm-start ─────────────────────────────────────────────────────────────────
+
+def test_cold_start_produces_100_trees():
+    """Default cold start always uses 100 boosted rounds."""
+    X, y = _synthetic_features()
+    model = RegimeModel()
+    model.train(X, y)
+    assert model._clf.get_booster().num_boosted_rounds() == 100
+
+
+def test_warm_start_adds_25_trees():
+    """Warm-start from existing model produces base + 25 total boosted rounds."""
+    X, y = _synthetic_features()
+    base = RegimeModel()
+    base.train(X, y)
+    base_rounds = base._clf.get_booster().num_boosted_rounds()  # 100
+
+    warm = RegimeModel()
+    warm.train(X, y, warm_start_from=base)
+    assert warm._clf.get_booster().num_boosted_rounds() == base_rounds + 25
+
+
+def test_warm_start_none_is_cold_start():
+    """warm_start_from=None is identical to cold start (100 trees)."""
+    X, y = _synthetic_features()
+    model = RegimeModel()
+    model.train(X, y, warm_start_from=None)
+    assert model._clf.get_booster().num_boosted_rounds() == 100
