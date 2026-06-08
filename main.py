@@ -304,6 +304,7 @@ _CANDLE_FEATURES_COLUMN_MIGRATIONS: list[tuple[str, str]] = [
     ("k5_k15_delta_at_midcandle", "REAL DEFAULT NULL"),
     ("spread_change",             "REAL DEFAULT NULL"),
     ("oi_delta_at_midcandle",     "REAL DEFAULT NULL"),
+    ("k5_candle_ts",              "TEXT DEFAULT NULL"),
 ]
 
 
@@ -723,6 +724,11 @@ class KronosV2:
                                     if _k5_mid is not None and _k15_mid is not None
                                     else None
                                 )
+                                # Candle timestamp of the k5 computation — lets training
+                                # filter rows where k5 was computed from a prior candle.
+                                _k5_candle_ts = (
+                                    str(_ck["candle_ts"]) if _ck and _ck.get("candle_ts") is not None else None
+                                )
 
                                 # OI delta from regime:features at snapshot time
                                 _oi_delta_mid: float | None = None
@@ -754,6 +760,7 @@ class KronosV2:
                                     "k15_at_midcandle":          _k15_mid,
                                     "k5_k15_delta_at_midcandle": _k5_k15_delta,
                                     "oi_delta_at_midcandle":     _oi_delta_mid,
+                                    "k5_candle_ts":              _k5_candle_ts,
                                 }
                                 logger.debug(
                                     f"CandleLogger: mid-candle snapshot {_snap_ticker} "
@@ -807,6 +814,7 @@ class KronosV2:
                 k15_at_midcandle          = _mid_snap.get("k15_at_midcandle")          if _mid_snap else None
                 k5_k15_delta_at_midcandle = _mid_snap.get("k5_k15_delta_at_midcandle") if _mid_snap else None
                 oi_delta_at_midcandle     = _mid_snap.get("oi_delta_at_midcandle")     if _mid_snap else None
+                k5_candle_ts              = _mid_snap.get("k5_candle_ts")              if _mid_snap else None
                 self._candle_open_brti.pop(_candle_key, None)
                 spread_change = (
                     round(kalshi_mid_candle_spread - kalshi_open_spread, 4)
@@ -838,10 +846,10 @@ class KronosV2:
                     "kalshi_drift_cents, kalshi_velocity, "
                     "cvd_brti_divergence, kalshi_brti_alignment, "
                     "k5_at_midcandle, k15_at_midcandle, k5_k15_delta_at_midcandle, "
-                    "spread_change, oi_delta_at_midcandle, "
+                    "spread_change, oi_delta_at_midcandle, k5_candle_ts, "
                     + ", ".join(cols)
                 )
-                placeholders = ", ".join(["?"] * (34 + len(cols)))
+                placeholders = ", ".join(["?"] * (35 + len(cols)))
                 self._db.execute(
                     f"INSERT OR IGNORE INTO candle_features ({col_names}) VALUES ({placeholders})",
                     [
@@ -879,6 +887,7 @@ class KronosV2:
                         k5_k15_delta_at_midcandle,
                         spread_change,
                         oi_delta_at_midcandle,
+                        k5_candle_ts,
                         *vals,
                     ],
                 )

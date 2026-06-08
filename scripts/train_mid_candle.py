@@ -68,6 +68,7 @@ FROM candle_features
 WHERE btc_direction IS NOT NULL
   AND cvd_since_open IS NOT NULL
   AND kalshi_mid_candle_mid IS NOT NULL
+  AND tick_count_since_open > 200
 ORDER BY candle_ts ASC
 """
 
