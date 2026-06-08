@@ -289,7 +289,7 @@ def section_training_health(conn: sqlite3.Connection) -> list[str]:
             last_brier = marker.get("holdout_brier")
             dir_mean  = marker.get("direction_mean_at_train")
             rows_since = total_qual - last_rows
-            next_trigger = max(0, 200 - rows_since)
+            next_trigger = max(0, 50 - rows_since)  # _ROW_TRIGGER_DELTA=50 in auto_retrain_regime.py
             print(f"  Last train: {last_rows} rows  ({last_ts[:19]})")
             if last_brier:
                 print(f"  Deploy holdout Brier: {last_brier:.4f}")
