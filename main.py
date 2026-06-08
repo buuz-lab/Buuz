@@ -866,6 +866,10 @@ class KronosV2:
                     continue
                 closed_candle = df15.iloc[-2]
                 btc_direction = 1 if closed_candle["close"] > closed_candle["open"] else 0
+                # Wait for Kronos MC so k15 is fresh before capturing regime_prob.
+                # The signal loop fires regime with no delay — this only affects
+                # what gets logged in candle_features for training data quality.
+                await asyncio.sleep(35)
                 features, features_stale, deribit_stale, regime_prob, shap_coherence = self._fusion.get_features_snapshot()
 
                 # Look up Kalshi opening snapshot for the closed candle.

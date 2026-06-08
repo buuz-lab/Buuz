@@ -7,7 +7,7 @@ no torch inference.
 """
 
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +19,7 @@ from btc_kalshi_system.signal.fusion import (
     _KRONOS_WEIGHT,
     _REGIME_WEIGHT,
     _REGIME_PAUSE_FLAG,
+    _candle_boundary,
     SignalFusionEngine,
     TradingSignal,
 )
@@ -546,3 +547,78 @@ def test_kalshi_imbalance_defaults_to_none_before_set():
     # kalshi_open_imbalance intentionally excluded from _regime_features to avoid
     # circularity. Verify internal cache is initialized to None.
     assert engine._last_kalshi_open_imbalance is None
+
+
+# ── Per-candle regime cache ───────────────────────────────────────────────────
+
+def test_regime_computed_once_per_candle():
+    """get_regime() is called exactly once per candle regardless of how many times
+    get_signal() or get_features_snapshot() fires within that candle."""
+    engine = make_engine(regime_prob=0.75)
+    fixed_ts = "2026-06-08T19:00:00"
+    with patch("btc_kalshi_system.signal.fusion._candle_boundary", return_value=fixed_ts):
+        engine.get_signal("15min", 76000.0)
+        engine.get_signal("15min", 76000.0)
+        engine.get_features_snapshot()
+    assert engine._regime.get_regime.call_count == 1
+
+
+def test_regime_cache_cleared_on_new_candle():
+    """Cache clears when _candle_boundary returns a different timestamp."""
+    engine = make_engine(regime_prob=0.75)
+    with patch("btc_kalshi_system.signal.fusion._candle_boundary", return_value="2026-06-08T19:00:00"):
+        engine.get_signal("15min", 76000.0)
+    assert engine._regime.get_regime.call_count == 1
+
+    with patch("btc_kalshi_system.signal.fusion._candle_boundary", return_value="2026-06-08T19:15:00"):
+        engine.get_signal("15min", 76000.0)
+    assert engine._regime.get_regime.call_count == 2
+
+
+def test_get_signal_and_get_features_snapshot_share_cache():
+    """Both entry points return the same cached regime_prob within one candle."""
+    engine = make_engine(regime_prob=0.82)
+    fixed_ts = "2026-06-08T20:00:00"
+    with patch("btc_kalshi_system.signal.fusion._candle_boundary", return_value=fixed_ts):
+        sig = engine.get_signal("15min", 76000.0)
+        _, _, _, snap_prob, _ = engine.get_features_snapshot()
+    assert sig is not None
+    assert sig.regime_prob == snap_prob
+
+
+def test_regime_cache_not_trained_retries_next_candle():
+    """NotTrainedError on candle N does not permanently poison the cache —
+    candle N+1 tries again and succeeds when the model loads."""
+    engine = make_engine(raise_not_trained=True)
+    with patch("btc_kalshi_system.signal.fusion._candle_boundary", return_value="2026-06-08T19:00:00"):
+        sig = engine.get_signal("15min", 76000.0)
+    # Bootstrap mode — no regime_prob
+    assert sig is not None
+    assert math.isnan(sig.regime_prob)
+
+    # Simulate model loading between candles
+    engine._regime.get_regime.side_effect = None
+    engine._regime.get_regime.return_value = {"prob_up": 0.78, "direction": 1, "confidence": 0.56}
+
+    with patch("btc_kalshi_system.signal.fusion._candle_boundary", return_value="2026-06-08T19:15:00"):
+        sig2 = engine.get_signal("15min", 76000.0)
+    assert sig2 is not None
+    assert sig2.regime_prob == pytest.approx(0.78)
+
+
+def test_candle_boundary_rounds_to_15min_floor():
+    """_candle_boundary() floors to :00/:15/:30/:45 regardless of seconds."""
+    cases = [
+        ("2026-06-08T19:00:00+00:00", "2026-06-08T19:00:00"),
+        ("2026-06-08T19:07:33+00:00", "2026-06-08T19:00:00"),
+        ("2026-06-08T19:14:59+00:00", "2026-06-08T19:00:00"),
+        ("2026-06-08T19:15:00+00:00", "2026-06-08T19:15:00"),
+        ("2026-06-08T19:29:58+00:00", "2026-06-08T19:15:00"),
+        ("2026-06-08T19:45:01+00:00", "2026-06-08T19:45:00"),
+    ]
+    for input_ts, expected in cases:
+        mock_now = datetime.fromisoformat(input_ts)
+        with patch("btc_kalshi_system.signal.fusion.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            result = _candle_boundary()
+        assert result.startswith(expected), f"{input_ts} → {result!r}, expected {expected!r}"

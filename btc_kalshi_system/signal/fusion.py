@@ -44,6 +44,16 @@ from btc_kalshi_system.models.regime_model import NotTrainedError, RegimeModel
 
 _REGIME_PAUSE_FLAG = Path("models/regime_paused.flag")
 
+# Sentinel — distinguishes "not yet computed this candle" from a real cached result.
+_NOT_COMPUTED: object = object()
+
+
+def _candle_boundary() -> str:
+    """Return the ISO timestamp of the currently open 15-min candle (floor to :00/:15/:30/:45)."""
+    now = datetime.now(timezone.utc)
+    m = (now.minute // 15) * 15
+    return now.replace(minute=m, second=0, microsecond=0).isoformat()
+
 _KRONOS_WEIGHT = 0.0   # Kronos is anti-correlated at 1-candle lag (Brier 0.37, Acc 46%).
 # The apparent 70% same-candle accuracy was leakage (k15[N] vs direction[N] it was
 # computed from). Regime v2 correctly fades Kronos — that IS the right behavior.
@@ -123,6 +133,31 @@ class SignalFusionEngine:
         self._last_kalshi_early_drift: float | None = None
         self._last_deepseek_dir_prob: float = 0.5   # 0.5 = no directional view yet
         self._k15_delta: float | None = None
+        # Per-candle regime cache. Cleared when the 15-min boundary ticks over.
+        # Ensures regime is computed once per candle (one-shot) using the features
+        # snapshot right after Kronos MC finishes (~T+30s after candle close).
+        # _NOT_COMPUTED sentinel = not yet computed this candle.
+        self._regime_cache: object = _NOT_COMPUTED
+        self._regime_cache_candle_ts: str | None = None
+
+    def _get_cached_regime(self, features: dict) -> dict:
+        """
+        Compute regime once per 15-min candle and cache the result.
+
+        Clears the cache when the candle boundary ticks over so the next candle
+        gets a fresh computation. Raises NotTrainedError if the model is not
+        loaded — callers should catch this and fall back to bootstrap mode.
+        This is intentional: if the model loads mid-candle, the first call after
+        load will compute and cache; all subsequent calls in that candle reuse it.
+        """
+        candle_ts = _candle_boundary()
+        if candle_ts != self._regime_cache_candle_ts:
+            self._regime_cache = _NOT_COMPUTED
+            self._regime_cache_candle_ts = candle_ts
+        if self._regime_cache is _NOT_COMPUTED:
+            # First call this candle — compute and cache (may raise NotTrainedError)
+            self._regime_cache = self._regime.get_regime(features)
+        return self._regime_cache  # type: ignore[return-value]
 
     def update_market_context(self, ctx: dict) -> None:
         self._market_context = ctx
@@ -192,7 +227,7 @@ class SignalFusionEngine:
         try:
             if _REGIME_PAUSE_FLAG.exists():
                 raise NotTrainedError("regime model paused — drawdown protection active")
-            regime_result = self._regime.get_regime(regime_features)
+            regime_result = self._get_cached_regime(regime_features)
             regime_prob = regime_result["prob_up"]
             regime_direction = regime_result["direction"]
             regime_shap_coherence = regime_result.get("shap_coherence")
@@ -276,7 +311,7 @@ class SignalFusionEngine:
         shap_coherence: float | None = None
         if not _REGIME_PAUSE_FLAG.exists():
             try:
-                regime_result = self._regime.get_regime(features)
+                regime_result = self._get_cached_regime(features)
                 regime_prob = regime_result["prob_up"]
                 shap_coherence = regime_result.get("shap_coherence")
             except NotTrainedError:
