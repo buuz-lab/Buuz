@@ -318,6 +318,18 @@ def section_training_health(conn: sqlite3.Connection) -> list[str]:
 
 # ── Section 5: Calibration curve + SHAP ─────────────────────────────────────
 
+def _mid_candle_signals_for_window(conn: sqlite3.Connection,
+                                    open_epoch: float, close_epoch: float) -> list[tuple]:
+    """Return gate rejection rows that fired during (open_epoch, close_epoch]."""
+    return conn.execute("""
+        SELECT regime_prob, outcome
+        FROM gate_rejections
+        WHERE regime_prob IS NOT NULL
+          AND timestamp > ? AND timestamp <= ?
+        ORDER BY timestamp ASC
+    """, (open_epoch, close_epoch)).fetchall()
+
+
 def section_calibration_and_shap(conn: sqlite3.Connection) -> list[str]:
     """Section 5: calibration curve by confidence tier + SHAP feature contributions."""
     issues: list[str] = []
@@ -349,15 +361,39 @@ def section_calibration_and_shap(conn: sqlite3.Connection) -> list[str]:
         n_pairs = len(pairs)
 
         # Per-candle prediction history (most recent 20)
-        print(f"  {'Candle':<16s}  {'Predicted':>9s}  {'Next dir':>8s}  {'Kalshi':>6s}  {'Coh':>5s}  Result")
-        print(f"  {'─'*16}  {'─'*9}  {'─'*8}  {'─'*6}  {'─'*5}  {'─'*6}")
-        for ts, prob, kalshi, next_dir, coh in pairs[-20:]:
-            bias     = "BULL" if prob >= 0.5 else "BEAR"
-            correct  = int(prob >= 0.5) == next_dir
-            result   = "✓" if correct else "✗"
-            dir_str  = "UP  " if next_dir == 1 else "DOWN"
-            coh_str  = f"{coh:.2f}" if coh is not None else "  -  "
-            print(f"  {ts[:16]}  {prob:.3f} {bias}  {dir_str}     {kalshi:.3f}  {coh_str}  {result}")
+        # Two columns: close→next (model's training objective) AND mid-candle gate signals
+        # (same-candle trades). These diverge because k15 only refreshes at candle close.
+        print(f"  {'Candle':<16s}  {'Close→Next(lag)':>16s}  {'Mid-candle gates(same)':>22s}")
+        print(f"  {'─'*16}  {'─'*16}  {'─'*22}")
+        for i, (ts, prob, kalshi, next_dir, coh) in enumerate(pairs[-20:]):
+            bias    = "BULL" if prob >= 0.5 else "BEAR"
+            correct = int(prob >= 0.5) == next_dir
+            lag_str = f"{prob:.2f}{bias[0]}→{'↑' if next_dir else '↓'} {'✓' if correct else '✗'}"
+
+            # find mid-candle gate signals that fired during this candle window
+            from datetime import datetime, timedelta, timezone as tz
+            import calendar
+            c_close_dt = datetime.fromisoformat(ts).replace(tzinfo=tz.utc)
+            c_open_dt  = c_close_dt - timedelta(minutes=15)
+            mid_rows = _mid_candle_signals_for_window(
+                conn,
+                calendar.timegm(c_open_dt.timetuple()),
+                calendar.timegm(c_close_dt.timetuple()),
+            )
+
+            if mid_rows:
+                probs    = [r[0] for r in mid_rows]
+                outcomes = [r[1] for r in mid_rows if r[1] is not None]
+                if outcomes:
+                    won = outcomes[0] == 1
+                    mid_str = (f"{len(mid_rows)}x [{min(probs):.2f}→{max(probs):.2f}] "
+                               f"{'↑' if outcomes[0] else '↓'} {'✓' if won else '✗'}")
+                else:
+                    mid_str = f"{len(mid_rows)}x [{min(probs):.2f}→{max(probs):.2f}] pending"
+            else:
+                mid_str = "—"
+
+            print(f"  {ts[:16]}  {lag_str:<16s}  {mid_str}")
 
         # Overall rolling Brier
         print()
