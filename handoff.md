@@ -4,13 +4,158 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 39+40 complete. 41 features (was 33). 556 tests. Gate 4 shadow mode live. Trending DOWN half-Kelly bootstrap-only. Service restarted — `features_early` now logging. Three layers of entry-timing improvements planned (see NEXT STEPS below): Gate 12 tighten to 10%, minimum 3% progress floor, DerivativesFeed 60s refresh. T+30s Phase B data-gated (~June 11-12). Regime v2 full train ~June 8-9.
+**Current focus:** Session 41 complete. Mid-candle data collection live — 16 new alpha features captured at 40-60% candle progress (CVD rate, BRTI velocity, k5/k15 delta, divergence signals). `MidCandleModel` class + `train_mid_candle.py` built. KronosV2 restarted to apply schema migrations. Data gate: ~200 qualifying rows (~2.5 days). Live integration (Gate 15 + model scoring at snapshot time) deferred until data gate is hit.
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-07 session 39+40: 41 features (added liq_net_norm, eth_direction_15min, okx_spot_imbalance, pcr_delta, skew_delta, deepseek_dir_prob, cvd_price_divergence, recent_up_fraction). Gate 4 shadow mode live. Trending DOWN half-Kelly in bootstrap only. Service restarted — features_early now logging. 556 tests passing. Three entry-timing improvements planned for next session (see below).**
+**As of 2026-06-07 session 41: Mid-candle alpha feature collection live. `MidCandleModel` + `train_mid_candle.py` built. KronosV2 restarted — 16 new `candle_features` columns now accumulating at each 40-60% snapshot. Gate 15 and live scoring deferred until 200+ qualifying rows.**
+
+---
+
+### What was built — session 41
+
+| What | Status |
+|---|---|
+| `StreamingCVDAccumulator.cvd_since_candle_open(ts_ms)` | Filters deque to in-candle ticks; returns `(cvd_normalized, tick_count)`. Free — no HTTP cost. |
+| `self._deriv` stored as instance var | `DerivativesFeed` promoted from local var in `run()` to `self._deriv` so CVD accumulator is accessible from `_candle_logger_loop`. |
+| 16 new `candle_features` columns | Schema migrations added; all captured at 40-60% candle snapshot. See table below. |
+| BRTI-at-open capture | `self._candle_open_brti` dict; BRTI snapped on first loop sight of each candle for drift computation. |
+| `_sign_product()` helper | Module-level; returns +1 (aligned), -1 (diverging), 0 (one side neutral), None (missing). Used for divergence features. |
+| `MidCandleModel` class | `btc_kalshi_system/models/mid_candle_model.py`. XGBoost, 16 features, same-candle label (no lag). `predict(snapshot_dict)` → `{prob_up, direction, confidence}`. NaN-safe. |
+| `train_mid_candle.py` | `scripts/train_mid_candle.py`. Time-ordered split, walk-forward CV, Brier + accuracy, NaN coverage warnings, high-confidence profitability check (tails vs middle 60%) as deploy gate. Min 200 rows. |
+| `config.MID_CANDLE_MODEL_PATH` | `models/mid_candle.pkl`. KronosV2 will load at startup once file exists. |
+
+**16 new mid-candle alpha columns:**
+
+| Column | What it captures | Alpha thesis |
+|---|---|---|
+| `cvd_since_open` | CVD of in-candle ticks only (not full 15-min window) | Kalshi watches price, not order flow |
+| `cvd_rate` | `cvd_since_open / elapsed_fraction` | Stalling CVD mid-candle = failed breakout |
+| `tick_count_since_open` | Trade count since candle open | Market activity / conviction level |
+| `brti_at_candle_open` | BRTI price at first loop sight | Drift baseline |
+| `brti_at_midcandle` | BRTI at snapshot | Current price context |
+| `brti_drift_since_open` | `brti_mid - brti_open` | How far BTC has moved |
+| `brti_velocity` | `brti_drift / elapsed_fraction` | Is the move accelerating or stalling? |
+| `kalshi_drift_cents` | `(kalshi_mid - kalshi_open) × 100` | How Kalshi has repriced |
+| `kalshi_velocity` | `kalshi_drift_cents / elapsed_fraction` | Kalshi repricing speed |
+| `cvd_brti_divergence` | +1 aligned, -1 diverging (CVD vs BRTI) | Hidden pressure Kalshi hasn't priced |
+| `kalshi_brti_alignment` | +1 aligned, -1 diverging (Kalshi vs BRTI) | Is market pricing consistent with BTC? |
+| `k5_at_midcandle` | k5 Kronos prob at snapshot (refreshes at 33%/66%) | Short-horizon signal |
+| `k15_at_midcandle` | k15 Kronos prob at snapshot (prior-close anchor) | Prior-trend regime baseline |
+| `k5_k15_delta_at_midcandle` | `k5 - k15` | Dead-cat bounce detector (validated pattern) |
+| `spread_change` | `kalshi_mid_spread - kalshi_open_spread` | Spread widening = uncertainty/illiquidity |
+| `oi_delta_at_midcandle` | `oi_delta_pct` from `regime:features` at snapshot | OI expanding/contracting mid-candle |
+
+**k5/k15 note:** k5 refreshes at every 5-min close (~33% and ~66% of the candle), so `k5_at_midcandle` is at most 5 min stale at the 40-60% snapshot. k15 only updates once per 15-min close — `k15_at_midcandle` is always the prior-close anchor. This is intentional: k15 represents the prior-trend prior; `k5_k15_delta` captures the divergence. The model learns to use k15 as a baseline, not a real-time signal.
+
+---
+
+### NEXT SESSION — Mid-candle model live integration (data-gated, ~200 rows ≈ 2.5 days)
+
+**Data gate check:**
+```sql
+SELECT COUNT(*) FROM candle_features
+WHERE btc_direction IS NOT NULL
+  AND cvd_since_open IS NOT NULL
+  AND kalshi_mid_candle_mid IS NOT NULL;
+```
+Target: ≥200. At ~77 qualifying snaps/day (not all candles hit the 40-60% window), ~2.5 days from restart.
+
+**Step 1 — Preview training data (no model written):**
+```bash
+python3 scripts/train_mid_candle.py --dry-run
+```
+Check: NaN coverage per feature (should be <20% for core features), Brier < 0.25, tails outperform middle.
+
+**Step 2 — Train and save:**
+```bash
+python3 scripts/train_mid_candle.py --db trades.db --out models/mid_candle.pkl
+```
+
+**Step 3 — Add to `main.py`:**
+
+In `__init__`:
+```python
+try:
+    self._mid_candle_model = MidCandleModel.load(config.MID_CANDLE_MODEL_PATH)
+    logger.info(f"MidCandleModel loaded from {config.MID_CANDLE_MODEL_PATH}")
+except FileNotFoundError:
+    self._mid_candle_model = None
+```
+
+In `_candle_logger_loop` right after building `self._mid_candle_snaps[key]`:
+```python
+_mid_candle_prob = None
+if self._mid_candle_model is not None:
+    try:
+        _mid_candle_prob = self._mid_candle_model.predict(
+            self._mid_candle_snaps[_in_progress_key]
+        )["prob_up"]
+    except Exception:
+        pass
+self._mid_candle_snaps[_in_progress_key]["mid_candle_prob"] = _mid_candle_prob
+# Write to Redis for main loop to read at trade time:
+if _mid_candle_prob is not None:
+    self._redis.set(
+        "mid_candle:prob",
+        json.dumps({"prob": _mid_candle_prob, "candle_ts": _in_progress_key}),
+        ex=600,
+    )
+```
+
+Add `mid_candle_model_prob REAL DEFAULT NULL` to `_CANDLE_FEATURES_COLUMN_MIGRATIONS` and to the INSERT.
+
+**Step 4 — Gate 15 in `PreTradeChecklist`:**
+
+Gate 15 only fires when candle progress is in the 40-60% window AND the model is loaded:
+```python
+# Gate 15 — Mid-candle model confirmation (40-60% window only)
+if 0.40 <= candle_progress <= 0.60:
+    _mc_raw = self._redis_client.get("mid_candle:prob")
+    if _mc_raw:
+        _mc = json.loads(_mc_raw)
+        _mc_prob = _mc.get("prob")
+        if _mc_prob is not None:
+            if signal.direction == 1 and _mc_prob < 0.38:
+                return fail(15, f"Mid-candle model bearish ({_mc_prob:.2f}) vs YES entry")
+            if signal.direction == 0 and _mc_prob > 0.62:
+                return fail(15, f"Mid-candle model bullish ({_mc_prob:.2f}) vs NO entry")
+```
+
+**Step 5 — Gate 12 second window:**
+
+Gate 12 currently blocks all entries after 10% progress. For mid-candle entries to reach Gate 15, add a second allowed window:
+```python
+# Allow a second entry window at 40-60% when mid-candle model is loaded
+_MID_CANDLE_WINDOW = (0.40, 0.60)
+if (_MID_CANDLE_WINDOW[0] <= candle_progress <= _MID_CANDLE_WINDOW[1]
+        and self._mid_candle_model_loaded):
+    pass  # skip the progress cap check for this window
+elif candle_progress > _cap:
+    return fail(12, ...)
+```
+
+**Step 6 — Auto-retrain:** `scripts/auto_retrain_mid_candle.py` — same pattern as `auto_retrain_regime.py`. Trigger: +50 qualifying rows since last train. Min rows: 200.
+
+**Deploy gate for Gate 15:** Only add Gate 15 after verifying the high-confidence profitability check passes on ≥2 consecutive retrains (tails consistently outperform middle 60%). The model scoring (Step 3) can go live immediately — it's read-only and logged for analysis.
+
+---
+
+### Profitability thesis for mid-candle entries
+
+The edge comes from signals Kalshi traders can't see at mid-candle:
+
+| Pattern | Signals | Trade |
+|---|---|---|
+| Hidden selling pressure | `cvd_brti_divergence=-1`, `cvd_rate` decelerating, k15 bearish | NO |
+| Dead-cat bounce | `k5_k15_delta > 0.15`, k5 recently near 1.0, `brti_velocity` declining | NO |
+| Confirmed breakout | `cvd_since_open > 0.4`, `kalshi_brti_alignment=1`, `brti_velocity` positive | YES |
+
+Kalshi mid-candle price discounts the visible price action, not order flow exhaustion or k5/k15 divergence. That's where the alpha lives. The model should be **selective** — only trigger when `prob_up < 0.35` or `> 0.65` to clear Kalshi's widened mid-candle spread.
+
+---
 
 ---
 
