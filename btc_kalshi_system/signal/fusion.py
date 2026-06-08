@@ -119,6 +119,7 @@ class SignalFusionEngine:
         self._last_kalshi_open_imbalance: float | None = None
         self._last_kalshi_early_drift: float | None = None
         self._last_deepseek_dir_prob: float = 0.5   # 0.5 = no directional view yet
+        self._k15_delta: float | None = None
 
     def update_market_context(self, ctx: dict) -> None:
         self._market_context = ctx
@@ -165,6 +166,11 @@ class SignalFusionEngine:
             # only used in tests — production always provides kronos_raw from _cached_kronos
             kronos_raw = self._kronos.run_monte_carlo(self._store, threshold=strike)
         self._last_kronos_raw_5min = kronos_raw
+        # k15_delta: change from prior k15 (kronos stall detection)
+        if kronos_raw_15min is not None and self._last_kronos_raw_15min is not None:
+            self._k15_delta = round(kronos_raw_15min - self._last_kronos_raw_15min, 4)
+        else:
+            self._k15_delta = None
         self._last_kronos_raw_15min = kronos_raw_15min
         # Phase 3c: calibrator now trains on regime_prob, not k15_raw.
         # kronos_cal holds raw k15 (for Gate 11 / TradingSignal.kronos_calibrated).
@@ -566,5 +572,17 @@ class SignalFusionEngine:
             # Session 40 — microstructure divergence and directional trend context
             "cvd_price_divergence":  cvd_price_divergence,
             "recent_up_fraction":    recent_up_fraction,
+            # k15/Kalshi interaction features — session 42
+            "k15_kalshi_alignment": (
+                round(
+                    (self._last_kronos_raw_15min - 0.5)
+                    * (self._market_context.get("kalshi_mid_cents") / 100.0 - 0.5),
+                    4,
+                )
+                if self._last_kronos_raw_15min is not None
+                and self._market_context.get("kalshi_mid_cents") is not None
+                else None
+            ),
+            "k15_delta": self._k15_delta,
         }
         return features, stale, deribit_stale, okx_stale

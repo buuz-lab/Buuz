@@ -63,6 +63,9 @@ _FEATURE_ORDER = [
     # Session 40 — microstructure divergence and directional trend context
     "cvd_price_divergence",
     "recent_up_fraction",
+    # k15/Kalshi interaction — session 42
+    "k15_kalshi_alignment",   # (k15-0.5)*(kalshi_mid-0.5): positive=agrees, negative=disagrees
+    "k15_delta",              # k15_now - k15_prior_candle: near-zero=stalling, nonzero=fresh signal
 ]
 
 
