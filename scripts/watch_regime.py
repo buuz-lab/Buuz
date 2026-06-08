@@ -52,11 +52,31 @@ def load(db: str, n: int) -> dict:
         except Exception:
             pass
 
+        # Current candle's regime read (from latest gate rejection this candle)
+        now_utc = datetime.now(timezone.utc)
+        cur_min = (now_utc.minute // 15) * 15
+        candle_open = now_utc.replace(minute=cur_min, second=0, microsecond=0)
+        elapsed_s   = (now_utc - candle_open).total_seconds()
+        progress    = elapsed_s / 900.0
+
+        # Latest gate rejection that fired during the current candle open
+        cur_regime = conn.execute("""
+            SELECT regime_prob, shap_coherence, failed_gate
+            FROM gate_rejections
+            WHERE regime_prob IS NOT NULL
+              AND timestamp >= ?
+            ORDER BY timestamp DESC LIMIT 1
+        """, (candle_open.timestamp(),)).fetchone()
+
         return {
             "candles": candles,
             "rejections": rejections,
             "total_rows": total_rows,
             "warm_trained_rows": warm_trained_rows,
+            "candle_open": candle_open,
+            "elapsed_s": elapsed_s,
+            "progress": progress,
+            "cur_regime": cur_regime,  # (regime_prob, shap_coh, gate) or None
         }
     finally:
         conn.close()
@@ -127,7 +147,7 @@ def main() -> None:
         if t35 < n:
             print(f"  Kalshi src: T+35s for {t35}/{n}, T=0 fallback for {n-t35}")
 
-        # Per-candle table — newest at top
+        # Per-candle table — newest at top, pending current candle at very top
         shown  = list(reversed(pairs[-10:]))
         ssrcs  = list(reversed(srcs[-10:]))
         off    = max(0, n - 10)
@@ -135,6 +155,19 @@ def main() -> None:
 
         print(f"\n  {'Candle [N]':<16}  {'Pred':<6}  N+1  Res   R.Brier  K.Brier  Src")
         print(f"  {'─'*16}  {'─'*6}  {'─'*3}  {'─'*3}  {'─'*7}  {'─'*7}  {'─'*5}")
+
+        # Current open candle — pending row
+        cur  = data["cur_regime"]
+        prog = data["progress"]
+        c_ts = data["candle_open"].strftime("%Y-%m-%dT%H:%M")
+        if cur is not None:
+            cp, ccoh, cgate = cur
+            cpred = f"{'UP  ' if cp >= 0.5 else 'DOWN'} {cp:.2f}"
+            coh_s = f"coh={ccoh:.2f}" if ccoh else ""
+            print(f"  {c_ts}  {cpred}  ...  ?   ?  {prog*100:.0f}% in  {coh_s}  [OPEN]")
+        else:
+            print(f"  {c_ts}  (no signal yet)            {prog*100:.0f}% in  [OPEN]")
+
         for j, ((ts, p, k, d), src) in enumerate(zip(shown, ssrcs)):
             ci   = off + (nshow - 1 - j)
             ok   = int(p >= 0.5) == d
