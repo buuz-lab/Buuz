@@ -328,7 +328,7 @@ def section_calibration_and_shap(conn: sqlite3.Connection) -> list[str]:
     _cf_cols = {r[1] for r in conn.execute("PRAGMA table_info(candle_features)").fetchall()}
     _coh_expr = "shap_coherence" if "shap_coherence" in _cf_cols else "NULL"
     all_rows = conn.execute(f"""
-        SELECT regime_prob, btc_direction, kalshi_open_mid, {_coh_expr}
+        SELECT candle_ts, regime_prob, btc_direction, kalshi_open_mid, {_coh_expr}
         FROM candle_features
         WHERE features_stale=0 AND regime_prob IS NOT NULL
           AND btc_direction IS NOT NULL AND kalshi_open_mid IS NOT NULL
@@ -340,18 +340,35 @@ def section_calibration_and_shap(conn: sqlite3.Connection) -> list[str]:
         print("  (no regime_prob rows yet — check back after regime v2 deploys)")
     else:
         # Build 1-candle lag pairs: features[N] → direction[N+1]
-        pairs = [(all_rows[i][0], all_rows[i][2], all_rows[i+1][1], all_rows[i][3])
-                 for i in range(len(all_rows) - 1)]  # (prob, kalshi, next_dir, coh)
+        # cols: (candle_ts, regime_prob, btc_direction, kalshi_open_mid, shap_coherence)
+        pairs = [
+            (all_rows[i][0], all_rows[i][1], all_rows[i][3],  # ts, prob, kalshi
+             all_rows[i+1][2], all_rows[i][4])                 # next_dir, coh
+            for i in range(len(all_rows) - 1)
+        ]
         n_pairs = len(pairs)
 
+        # Per-candle prediction history (most recent 20)
+        print(f"  {'Candle':<16s}  {'Predicted':>9s}  {'Next dir':>8s}  {'Kalshi':>6s}  {'Coh':>5s}  Result")
+        print(f"  {'─'*16}  {'─'*9}  {'─'*8}  {'─'*6}  {'─'*5}  {'─'*6}")
+        for ts, prob, kalshi, next_dir, coh in pairs[-20:]:
+            bias     = "BULL" if prob >= 0.5 else "BEAR"
+            correct  = int(prob >= 0.5) == next_dir
+            result   = "✓" if correct else "✗"
+            dir_str  = "UP  " if next_dir == 1 else "DOWN"
+            coh_str  = f"{coh:.2f}" if coh is not None else "  -  "
+            print(f"  {ts[:16]}  {prob:.3f} {bias}  {dir_str}     {kalshi:.3f}  {coh_str}  {result}")
+
         # Overall rolling Brier
+        print()
         if n_pairs > 0:
-            overall_rbrier = sum((p - d) ** 2 for p, k, d, c in pairs) / n_pairs
-            overall_kbrier = sum((k - d) ** 2 for p, k, d, c in pairs) / n_pairs
-            overall_acc    = sum(1 for p, k, d, c in pairs if int(p >= 0.5) == d) / n_pairs
+            overall_rbrier = sum((p - d) ** 2 for _, p, k, d, c in pairs) / n_pairs
+            overall_kbrier = sum((k - d) ** 2 for _, p, k, d, c in pairs) / n_pairs
+            overall_acc    = sum(1 for _, p, k, d, c in pairs if int(p >= 0.5) == d) / n_pairs
             overall_adv    = (overall_kbrier - overall_rbrier) / overall_kbrier * 100 if overall_kbrier > 0 else 0
             adv_sym = _STATUS["PASS"] if overall_rbrier < overall_kbrier else _STATUS["WARN"]
-            print(f"  {adv_sym} Overall (n={n_pairs})  regime={overall_rbrier:.3f} ({overall_acc:.0%})  "
+            print(f"  {adv_sym} Overall (n={n_pairs})  "
+                  f"regime={overall_rbrier:.3f} ({overall_acc:.0%})  "
                   f"kalshi={overall_kbrier:.3f}  adv={overall_adv:+.1f}%")
             print()
 
@@ -363,7 +380,7 @@ def section_calibration_and_shap(conn: sqlite3.Connection) -> list[str]:
         high_regime_brier = high_kalshi_brier = high_n = None
 
         for tier_name, tier_fn, is_high in tiers:
-            tier_pairs = [(p, k, d, c) for p, k, d, c in pairs if tier_fn(p)]
+            tier_pairs = [(p, k, d, c) for _, p, k, d, c in pairs if tier_fn(p)]
             n = len(tier_pairs)
             if n == 0:
                 print(f"  {tier_name:<24s}  n=0   (accumulating)")
