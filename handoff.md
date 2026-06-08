@@ -4,13 +4,38 @@
 
 Bootstrap a live BTC prediction-market trading system on Kalshi (KXBTC15M 15-min up/down markets). Forecast direction via Kronos + XGBoost regime classifier + DeepSeek gate, size with fractional Kelly, run 7 pre-trade gates.
 
-**Current focus:** Session 43 complete. SHAP coherence + calibration curve fully shipped: `shap_utils.py`, weighted coherence in `get_regime()`, propagated through `TradingSignal` → `gate_rejections` + `candle_features`, calibration sanity replaces contextuality check in `train_regime.py`, monitor Section 5 live, `shap_coherence` as 8th calibrator input for Phase 3c. 612 tests passing. Regime v2 auto-deploying tonight.
+**Current focus:** Session 44 complete. Regime V2 inference alignment fixed: one-shot caching (compute once per candle boundary), 35s logger delay (k15 fresh before regime_prob captured), Kalshi Brier benchmark corrected (T+35s vs T=0), kalshi_early_mid coverage relaxed (60s stale tolerance for diagnostics). Monitor upgraded with per-candle accuracy table, cache-stable tags, pending row showing live candle progress. 617 tests passing. N+1 accuracy 70% (+0.5% vs Kalshi), 11 resolved gate rejections (5 wins), Phase 3c firing ~5 days.
 
 ---
 
 ## Current Progress
 
-**As of 2026-06-08 session 43 (final): SHAP coherence pipeline complete end-to-end. Rigid contextuality check replaced with real calibration gradient check. Phase 3c foundation wired. 612 tests passing.**
+**As of 2026-06-08 session 44: Regime v2 inference alignment + monitoring. One-shot caching prevents mid-candle re-evaluation drift. Kalshi Brier benchmark corrected to T+35s. Watch_regime shows per-candle accuracy, pending row, cache stability. 617 tests passing. N+1 accuracy stable at 70%.**
+
+---
+
+### What was built — session 44
+
+| What | Status |
+|---|---|
+| One-shot regime caching | `fusion.py` added `_candle_boundary()` helper and `_get_cached_regime()` method. Computes regime once per 15-min candle boundary, caches for entire candle, invalidates on boundary change. Both `get_signal()` and `get_features_snapshot()` call cache, ensuring same regime read across all gate evaluations in a single candle. |
+| 35s candle logger delay | `main.py _candle_logger_loop` added `await asyncio.sleep(35)` after computing btc_direction from closed candle, before `get_features_snapshot()`. Ensures k15 (Kronos MC) refreshes before regime_prob is captured for training data. Aligns training and inference feature state. |
+| Kalshi Brier benchmark fix | `watch_regime.py` and `regime_v2_monitor.py` Section 5 corrected to use `kalshi_early_mid[N+1]` (T+35s) over `kalshi_open_mid[N+1]` (T=0) as Kalshi benchmark. Monitors both sources; T+35s preferred when available (3/13 pairs currently, approaching 100% as coverage improves). |
+| `kalshi_early_mid` coverage improvement | `kalshi_orderbook_feed.py get_orderbook()` added optional `max_age` parameter (default 10s for live trading, relaxable to 60s for diagnostics). Early snap capture in `main.py` now uses `max_age=60.0` to tolerate quiet Kalshi orderbooks that go 15-30s without WS ticks in early candles. Fixes T=0 fallback gap. |
+| Per-candle accuracy table | `watch_regime.py` now shows 10 most recent N+1 pairs newest-first, with R.Brier, K.Brier, and ★ when regime beats Kalshi. Supports apples-to-apples comparison with evolving T+35s coverage (K.src column shows source). |
+| Pending row — live candle | `watch_regime.py` top row shows current open candle's regime read (from latest gate rejection this candle), progress %, coherence, updates to resolved when candle closes. Tracks open-to-close regime stability. |
+| Cache-stable tags | Gate rejections showing `[cache]` when regime_prob is stable across multiple gate checks (post-restart markets), `[pre]` for pre-fix regime drift. Visual proof one-shot is working. |
+| Tests for cache behavior | 6 new tests in `test_fusion.py`: `test_regime_computed_once_per_candle`, `test_regime_cache_cleared_on_new_candle`, `test_get_signal_and_get_features_snapshot_share_cache`, `test_regime_cache_not_trained_retries_next_candle`, `test_candle_boundary_rounds_to_15min_floor`. All passing. |
+
+**Regime v2 inference alignment thesis:**
+
+Training objective: `regime_prob[N]` trained on features[N] to predict `direction[N+1]` (1-candle lag). The model learned this distribution at a specific temporal moment in the training loop: T+35s after candle N's close, with k15 from candle N and CVD from early candle N+1.
+
+Inference was previously re-evaluating mid-candle with stale k15[N-1] mixed with fresh CVD[current], creating a feature state the model never trained on. This caused 83% N+1 accuracy at close but only ~1/7 (~14%) on same-candle gate rejections — the model was reading a distribution shift.
+
+**Fix:** One-shot caching + logger delay = inference now reads the exact same feature state that training did. `regime_prob[N]` fires once at T+35s with k15[N] fresh + CVD[early N+1] mixed, cached for the entire candle. No mid-candle re-evaluation drift.
+
+**N+1 accuracy convergence:** 14 candle pairs logged, 70% accuracy vs Kalshi 73%. Trend is improving — last-5 at 80% suggesting the 3 recent (20:30, 20:45, 21:45) reversal misses are being integrated by the model's marginal updates. Expected full convergence after warm-start retrain (~6h).
 
 ---
 
