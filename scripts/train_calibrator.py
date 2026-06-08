@@ -62,31 +62,41 @@ def main() -> None:
     if not Path(args.db).exists():
         sys.exit(f"Database not found: {args.db}")
 
+    # ticker + timestamp included for per-market deduplication (dropped before training).
+    # gate_rejections fires 2-4x per market within one candle — same outcome, different
+    # regime_prob as model conviction builds mid-candle. Keeping all entries would give
+    # correlated label samples that bias the calibrator against high-confidence calls.
+    # Fix: keep EARLIEST entry per ticker (first signal = cleanest, before intra-candle
+    # drift inflates model conviction on the developing candle).
+    # trades does not have a signal_edge column (gate_rejections does).
+    # Use NULL AS signal_edge for trades rows — the calibrator handles NULL edges gracefully.
     _UNION_QUERY = """
         SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome,
                kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized,
-               shap_coherence FROM (
-            SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp,
+               shap_coherence, ticker, timestamp FROM (
+            SELECT regime_prob, NULL AS signal_edge, deepseek_regime, direction, outcome,
+                   CAST(strftime('%s', timestamp) AS REAL) AS timestamp,
                    kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized,
-                   NULL AS shap_coherence
+                   NULL AS shap_coherence, ticker
             FROM trades
-            WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
+            WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL
             UNION ALL
             SELECT regime_prob, signal_edge, deepseek_regime, direction, outcome, timestamp,
                    kronos_raw_15min, brti_volatility_1h, kalshi_spread_normalized,
-                   shap_coherence
+                   shap_coherence, ticker
             FROM gate_rejections
             WHERE outcome IS NOT NULL AND shadow = 0
               AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
         )
         ORDER BY timestamp DESC LIMIT ?
     """
+    # Count unique markets (tickers) — the real denominator after deduplication.
     _COUNT_QUERY = """
-        SELECT COUNT(*) FROM (
-            SELECT regime_prob FROM trades
-            WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
+        SELECT COUNT(DISTINCT ticker) FROM (
+            SELECT ticker FROM trades
+            WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL
             UNION ALL
-            SELECT regime_prob FROM gate_rejections
+            SELECT ticker FROM gate_rejections
             WHERE outcome IS NOT NULL AND regime_prob IS NOT NULL AND signal_edge IS NOT NULL
               AND shadow = 0
         )
@@ -94,16 +104,28 @@ def main() -> None:
 
     conn = sqlite3.connect(args.db)
     try:
-        total_available = conn.execute(_COUNT_QUERY).fetchone()[0]
+        unique_markets = conn.execute(_COUNT_QUERY).fetchone()[0]
         rows = conn.execute(_UNION_QUERY, (args.window,)).fetchall()
     finally:
         conn.close()
 
+    # Deduplicate: keep earliest entry per ticker.
+    # Sort ascending by timestamp (index 10), keep first seen per ticker (index 9).
+    seen: set[str] = set()
+    deduped: list[tuple] = []
+    for r in sorted(rows, key=lambda x: x[10]):
+        if r[9] not in seen:
+            seen.add(r[9])
+            deduped.append(r)
+    n_raw = len(rows)
+    rows = deduped
     n = len(rows)
-    print(f"Phase 3c training rows (regime_prob IS NOT NULL) in {args.db}: {total_available} available, using {n}")
-    if total_available < args.min_rows:
+
+    print(f"Phase 3c training rows in {args.db}: {unique_markets} unique markets  "
+          f"({n_raw} raw entries, {n_raw - n} same-candle duplicates removed, using {n})")
+    if unique_markets < args.min_rows:
         sys.exit(
-            f"Need ≥{args.min_rows} regime_prob rows; have {total_available}. "
+            f"Need ≥{args.min_rows} unique markets; have {unique_markets}. "
             f"Regime v2 must be deployed and generating predictions before Phase 3c can train."
         )
 
