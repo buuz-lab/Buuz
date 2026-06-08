@@ -720,8 +720,13 @@ class KronosV2:
                     # Early snapshot at T+30s (3-7% progress) — Kalshi price + regime features
                     # for future T+30s model training.
                     if _in_progress_key not in self._early_candle_snaps and 0.03 <= _progress <= 0.07:
-                        if _snap_ob:
-                            _bid, _ask, _ = self._parse_orderbook(_snap_ob)
+                        # Use 60s max_age — early snap is for diagnostics/benchmarking,
+                        # not live trading. Kalshi orderbooks in quiet early-candle windows
+                        # often go 15-30s without a WS tick, causing the default 10s guard
+                        # to return None and miss the T+35s Kalshi benchmark capture.
+                        _snap_ob_early = self._orderbook_feed.get_orderbook(_snap_ticker, max_age=60.0) if _snap_ticker else None
+                        if _snap_ob_early:
+                            _bid, _ask, _ = self._parse_orderbook(_snap_ob_early)
                             if _ask > 0:
                                 _early_features, _, _, _, _ = self._fusion.get_features_snapshot()
                                 self._early_candle_snaps[_in_progress_key] = {

@@ -143,11 +143,16 @@ class KalshiOrderbookFeed:
                         last_update_ts=0.0,
                     )
 
-    def get_orderbook(self, ticker: str) -> dict | None:
+    def get_orderbook(self, ticker: str, max_age: float = _WS_STALE_SECONDS) -> dict | None:
         """Return cached orderbook in orderbook_fp format, or None if unavailable.
 
         Returns None when: not subscribed, snapshot not yet received, or last
-        update was more than 10 seconds ago (forces REST fallback in router).
+        update older than max_age seconds.
+
+        Default max_age=10s forces REST fallback in the router for live trading.
+        Pass max_age=60 for non-trading reads (e.g. candle logger early snap)
+        where slightly stale data is acceptable — Kalshi orderbooks in quiet
+        early-candle windows may not tick for 15-30s.
 
         Format matches what main._parse_orderbook() already handles:
             {"orderbook_fp": {"yes_dollars": [[price, qty], ...],
@@ -158,7 +163,7 @@ class KalshiOrderbookFeed:
             state = self._books.get(ticker)
             if state is None or not state.has_snapshot:
                 return None
-            if time.time() - state.last_update_ts > _WS_STALE_SECONDS:
+            if time.time() - state.last_update_ts > max_age:
                 return None
 
             yes_levels = sorted(state.manager.yes.items(), key=lambda x: float(x[0]))
