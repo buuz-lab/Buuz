@@ -38,13 +38,15 @@ def load(db: str, n: int) -> dict:
     conn = sqlite3.connect(db)
     try:
         # Candle-level rows with regime_prob
-        candles = conn.execute("""
+        # DESC + reverse: get most-recent n rows but in chronological order for lag pairs
+        rows = conn.execute("""
             SELECT candle_ts, regime_prob, shap_coherence, kalshi_open_mid, btc_direction
             FROM candle_features
             WHERE regime_prob IS NOT NULL AND btc_direction IS NOT NULL
               AND kalshi_open_mid IS NOT NULL
             ORDER BY candle_ts DESC LIMIT ?
         """, (n,)).fetchall()
+        candles = list(reversed(rows))  # oldest→newest so pairs[i] predicts pairs[i+1]
 
         # Gate rejections with regime_prob (most recent first)
         rejections = conn.execute("""
@@ -81,35 +83,45 @@ def section_overview(data: dict, n: int) -> None:
 
 
 def section_brier(candles: list) -> None:
-    print("\n── Rolling Brier vs Kalshi " + "─" * 44)
+    # regime_prob[N] was trained to predict direction[N+1] (1-candle lag).
+    # Comparing against same-row btc_direction is wrong — use lagged pairs.
+    print("\n── Rolling Brier vs Kalshi (1-candle lag — how model was trained) " + "─" * 4)
     if not candles:
         print("  (no regime_prob candle rows yet — accumulating)")
         return
 
-    probs   = [r[1] for r in candles]
-    kprobs  = [r[3] for r in candles]
-    dirs    = [r[4] for r in candles]
+    if len(candles) < 2:
+        print(f"  (need ≥2 rows for lag comparison — have {len(candles)})")
+        return
 
-    regime_brier  = sum((p - d) ** 2 for p, d in zip(probs, dirs)) / len(probs)
-    kalshi_brier  = sum((k - d) ** 2 for k, d in zip(kprobs, dirs)) / len(probs)
-    regime_acc    = sum(1 for p, d in zip(probs, dirs) if int(p >= 0.5) == d) / len(probs)
-    kalshi_acc    = sum(1 for k, d in zip(kprobs, dirs) if int(k >= 0.5) == d) / len(probs)
+    # pairs: (regime_prob[N], kalshi_open_mid[N]) predicting direction[N+1]
+    pairs = [(candles[i][1], candles[i][3], candles[i+1][4]) for i in range(len(candles) - 1)]
+    n = len(pairs)
+
+    regime_brier = sum((p - d) ** 2 for p, k, d in pairs) / n
+    kalshi_brier = sum((k - d) ** 2 for p, k, d in pairs) / n
+    regime_acc   = sum(1 for p, k, d in pairs if int(p >= 0.5) == d) / n
+    kalshi_acc   = sum(1 for p, k, d in pairs if int(k >= 0.5) == d) / n
     adv = (kalshi_brier - regime_brier) / kalshi_brier * 100 if kalshi_brier > 0 else 0
 
-    print(f"  n={len(candles):<4d}  "
+    print(f"  n={n:<4d}  "
           f"regime Brier={regime_brier:.4f} ({regime_acc:.0%})  "
           f"kalshi Brier={kalshi_brier:.4f} ({kalshi_acc:.0%})  "
           f"adv={adv:+.1f}%  {_brier_color(regime_brier)}")
 
-    if len(candles) < 10:
-        print(f"  ⚠  {10 - len(candles)} more candles needed for reliable comparison")
+    if n < 10:
+        print(f"  ⚠  {10 - n} more candles needed for reliable comparison")
 
 
 def section_calibration(candles: list) -> None:
-    print("\n── Calibration by Confidence Tier " + "─" * 37)
+    print("\n── Calibration by Confidence Tier (1-candle lag) " + "─" * 22)
     if len(candles) < 3:
         print("  (accumulating — need 10+ per tier for stats)")
         return
+
+    # 1-candle lag pairs
+    pairs = [(candles[i][1], candles[i][3], candles[i+1][4], candles[i][2])
+             for i in range(len(candles) - 1)]  # (prob, kalshi, next_dir, coh)
 
     tiers = [
         ("Low  |p-0.5|<0.10", lambda p: abs(p - 0.5) < 0.10),
@@ -117,15 +129,18 @@ def section_calibration(candles: list) -> None:
         ("High |p-0.5|>0.20", lambda p: abs(p - 0.5) >= 0.20),
     ]
     for name, fn in tiers:
-        subset = [(r[1], r[3], r[2]) for r in candles if fn(r[1])]
+        subset = [(p, k, d, c) for p, k, d, c in pairs if fn(p)]
         n = len(subset)
         if n == 0:
             print(f"  {name:<20s}  n=0")
             continue
-        ps, ds, chs = zip(*subset)
+        ps  = [x[0] for x in subset]
+        ks  = [x[1] for x in subset]
+        ds  = [x[2] for x in subset]
+        chs = [x[3] for x in subset if x[3] is not None]
         brier  = sum((p - d) ** 2 for p, d in zip(ps, ds)) / n
         acc    = sum(1 for p, d in zip(ps, ds) if int(p >= 0.5) == d) / n
-        avg_coh = sum(c for c in chs if c is not None) / max(1, sum(1 for c in chs if c is not None))
+        avg_coh = sum(chs) / len(chs) if chs else 0
         stats = f"Brier={brier:.3f}  acc={acc:.0%}  coh={avg_coh:.3f}" if n >= 10 else f"n={n} (accumulating)"
         bar = _bar(acc) if n >= 10 else ""
         print(f"  {name:<20s}  n={n:<3d}  {stats}  {bar}")
@@ -133,14 +148,15 @@ def section_calibration(candles: list) -> None:
 
 def section_shap(candles: list) -> None:
     print("\n── SHAP Coherence vs Outcome " + "─" * 42)
-    resolved = [(r[1], r[2], r[4]) for r in candles if r[2] is not None]
-    if len(resolved) < 3:
+    # 1-candle lag: coherence at candle N vs correctness predicting candle N+1
+    pairs = [(candles[i][1], candles[i][2], candles[i+1][4])
+             for i in range(len(candles) - 1) if candles[i][2] is not None]
+    if len(pairs) < 3:
         print("  (accumulating)")
         return
 
-    # Does higher coherence correlate with correctness?
-    correct   = [c for p, c, d in resolved if int(p >= 0.5) == d]
-    incorrect = [c for p, c, d in resolved if int(p >= 0.5) != d]
+    correct   = [c for p, c, d in pairs if int(p >= 0.5) == d]
+    incorrect = [c for p, c, d in pairs if int(p >= 0.5) != d]
     avg_c_ok  = sum(correct)   / len(correct)   if correct   else 0
     avg_c_no  = sum(incorrect) / len(incorrect) if incorrect else 0
     n_ok, n_no = len(correct), len(incorrect)
