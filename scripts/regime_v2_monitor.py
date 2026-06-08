@@ -339,8 +339,11 @@ def section_calibration_and_shap(conn: sqlite3.Connection) -> list[str]:
     # regime_prob[N] predicts direction[N+1]. Same-row comparison is wrong.
     _cf_cols = {r[1] for r in conn.execute("PRAGMA table_info(candle_features)").fetchall()}
     _coh_expr = "shap_coherence" if "shap_coherence" in _cf_cols else "NULL"
+    # Include kalshi_early_mid for T+35s benchmark (prefer over open_mid)
+    _kem_expr = "kalshi_early_mid" if "kalshi_early_mid" in _cf_cols else "NULL"
     all_rows = conn.execute(f"""
-        SELECT candle_ts, regime_prob, btc_direction, kalshi_open_mid, {_coh_expr}
+        SELECT candle_ts, regime_prob, btc_direction, kalshi_open_mid, {_coh_expr},
+               {_kem_expr}
         FROM candle_features
         WHERE features_stale=0 AND regime_prob IS NOT NULL
           AND btc_direction IS NOT NULL AND kalshi_open_mid IS NOT NULL
@@ -352,10 +355,15 @@ def section_calibration_and_shap(conn: sqlite3.Connection) -> list[str]:
         print("  (no regime_prob rows yet — check back after regime v2 deploys)")
     else:
         # Build 1-candle lag pairs: features[N] → direction[N+1]
-        # cols: (candle_ts, regime_prob, btc_direction, kalshi_open_mid, shap_coherence)
+        # Kalshi benchmark: prefer kalshi_early_mid[N+1] (T+35s, same moment as regime)
+        # over kalshi_open_mid[N+1] (T=0). Never use kalshi[N] — wrong candle.
+        # cols: (candle_ts, regime_prob, btc_direction, kalshi_open_mid, coh, kalshi_early_mid)
+        def _kb(row):
+            return row[5] if row[5] is not None else row[3]
+
         pairs = [
-            (all_rows[i][0], all_rows[i][1], all_rows[i][3],  # ts, prob, kalshi
-             all_rows[i+1][2], all_rows[i][4])                 # next_dir, coh
+            (all_rows[i][0], all_rows[i][1], _kb(all_rows[i+1]),  # ts, prob, kalshi[N+1]
+             all_rows[i+1][2], all_rows[i][4])                      # next_dir, coh
             for i in range(len(all_rows) - 1)
         ]
         n_pairs = len(pairs)
