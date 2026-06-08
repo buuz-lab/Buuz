@@ -85,7 +85,10 @@ def main() -> None:
     if n_c < 2:
         print(f"  (need ≥2 rows to compare — have {n_c})")
     else:
-        pairs = [(candles[i][0][:16], candles[i][1], candles[i][3], candles[i+1][4])
+        # Fair Kalshi benchmark: use kalshi_open_mid[N+1] (Kalshi at candle N+1 open —
+        # same moment the one-shot regime fires) not kalshi_open_mid[N] which is
+        # Kalshi 15 minutes BEFORE regime fires on a completely different candle.
+        pairs = [(candles[i][0][:16], candles[i][1], candles[i+1][3], candles[i+1][4])
                  for i in range(n_c - 1)]
         n = len(pairs)
 
@@ -108,10 +111,11 @@ def main() -> None:
             print(f"  Last-5    n=5    regime={rb5:.3f} ({acc5:.0%})  "
                   f"kalshi={kb5:.3f}  adv={adv5:+.1f}%  {arrow}")
 
-        # Per-candle table — index-safe for rolling window
+        # Per-candle table — regime_prob[N] predicting direction[N+1]
+        # K.Brier uses kalshi_open_mid[N+1] (same moment regime fires)
         offset = max(0, n - 10)
-        print(f"\n  {'Candle':<16}  {'Pred':>4}  {'Next':>4}  Res  R.Brier  K.Brier")
-        print(f"  {'─'*16}  {'─'*4}  {'─'*4}  ───  ───────  ───────")
+        print(f"\n  {'At close [N]':<16}  {'Pred':>5}  {'Dir[N+1]':>8}  Res  R.Brier  K.Brier(N+1)")
+        print(f"  {'─'*16}  {'─'*5}  {'─'*8}  ───  ───────  ────────────")
         for i, (ts, p, k, d) in enumerate(pairs[-10:]):
             ok   = int(p >= 0.5) == d
             rb   = (p - d)**2
@@ -119,9 +123,8 @@ def main() -> None:
             pred = f"{'↑' if p >= 0.5 else '↓'}{p:.2f}"
             nxt  = f"{'↑' if d else '↓'}"
             win  = "✓" if ok else "✗"
-            # K.Brier wins indicator
-            edge = " ★" if rb < kb else "  "
-            print(f"  {candles[offset+i][0][:16]}  {pred:<4}  {nxt:<4}  {win}    {rb:.3f}    {kb:.3f}{edge}")
+            star = " ★" if rb < kb else "  "
+            print(f"  {candles[offset+i][0][:16]}  {pred:<5}  {nxt:<8}  {win}    {rb:.3f}    {kb:.3f}{star}")
 
         if n < 20:
             need_go  = max(0, 20 - n)
