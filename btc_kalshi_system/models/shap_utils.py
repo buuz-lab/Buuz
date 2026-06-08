@@ -15,7 +15,8 @@ def compute_coherence(clf, X: np.ndarray) -> float:
     Uses XGBoost's built-in pred_contribs — no external shap library needed.
     X must be shape (1, n_features).
     """
-    assert X.shape[0] == 1, f"compute_coherence expects shape (1, n_features), got {X.shape}"
+    if X.shape[0] != 1:
+        raise ValueError(f"compute_coherence expects shape (1, n_features), got {X.shape}")
     booster = clf.get_booster()
     dmatrix = xgb.DMatrix(X)
     contribs = booster.predict(dmatrix, pred_contribs=True)[0]   # shape: (n_features + 1,)
@@ -24,8 +25,12 @@ def compute_coherence(clf, X: np.ndarray) -> float:
     if total_prediction == 0.0 or not np.isfinite(total_prediction):
         return 0.5
     pred_sign = 1 if total_prediction > 0 else -1
-    n_agree = int(np.sum(feature_contribs * pred_sign > 0))
-    return round(float(n_agree / len(feature_contribs)), 4)
+    abs_contribs = np.abs(feature_contribs)
+    total_abs = float(abs_contribs.sum())
+    if total_abs == 0.0:
+        return 0.5
+    agree_weight = float(abs_contribs[feature_contribs * pred_sign > 0].sum())
+    return round(agree_weight / total_abs, 4)
 
 
 def compute_baseline_snapshot(

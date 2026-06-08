@@ -118,6 +118,15 @@ def test_get_regime_confidence_is_float_in_unit_interval():
     assert 0.0 <= result["confidence"] <= 1.0
 
 
+def test_get_regime_shap_coherence_is_float_in_unit_interval():
+    model = RegimeModel()
+    X, y = _synthetic_features()
+    model.train(X, y)
+    result = model.get_regime(_feature_dict())
+    assert isinstance(result["shap_coherence"], float)
+    assert 0.0 <= result["shap_coherence"] <= 1.0
+
+
 def test_direction_consistent_with_prob_up():
     """direction=1 iff prob_up >= 0.5."""
     model = RegimeModel()

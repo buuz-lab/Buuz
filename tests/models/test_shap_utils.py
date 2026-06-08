@@ -36,7 +36,7 @@ def test_compute_coherence_in_unit_interval():
 
 
 def test_compute_coherence_matches_manual_calculation():
-    """Coherence must equal the fraction computed directly from pred_contribs."""
+    """Coherence must equal weighted fraction: sum(|agreeing contribs|) / sum(|all contribs|)."""
     from btc_kalshi_system.models.shap_utils import compute_coherence
     clf = _tiny_clf()
     X = np.array([[0.9, 0.8, 0.7]])
@@ -44,11 +44,17 @@ def test_compute_coherence_matches_manual_calculation():
     contribs = booster.predict(xgb.DMatrix(X), pred_contribs=True)[0]
     feature_contribs = contribs[:-1]
     total = contribs.sum()
-    if total == 0:
+    if total == 0 or not np.isfinite(total):
         expected = 0.5
     else:
         pred_sign = 1 if total > 0 else -1
-        expected = round(float(np.sum(feature_contribs * pred_sign > 0) / len(feature_contribs)), 4)
+        abs_contribs = np.abs(feature_contribs)
+        total_abs = float(abs_contribs.sum())
+        if total_abs == 0.0:
+            expected = 0.5
+        else:
+            agree_weight = float(abs_contribs[feature_contribs * pred_sign > 0].sum())
+            expected = round(agree_weight / total_abs, 4)
     assert compute_coherence(clf, X) == expected
 
 
@@ -57,9 +63,9 @@ def test_compute_coherence_zero_prediction_returns_half():
     from btc_kalshi_system.models.shap_utils import compute_coherence
     clf = _tiny_clf()
     import unittest.mock as mock
-    fake_contribs = np.array([[0.1, -0.1, 0.0, 0.0]])  # sum = 0 (bias+features)
-    booster = clf.get_booster()
-    with mock.patch.object(booster, "predict", return_value=fake_contribs):
+    # sum = 0 → total_prediction == 0.0 path returns 0.5
+    fake_contribs = np.array([[0.1, -0.1, 0.0, 0.0]])  # sum = 0
+    with mock.patch.object(clf.get_booster(), "predict", return_value=fake_contribs):
         result = compute_coherence(clf, np.array([[0.5, 0.5, 0.5]]))
     assert result == 0.5
 
