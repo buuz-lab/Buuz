@@ -12,10 +12,20 @@ import argparse
 import sqlite3
 from datetime import datetime, timezone
 
+# ── ANSI colours ─────────────────────────────────────────────────────────────
+G  = "\033[92m"   # green
+R  = "\033[91m"   # red
+Y  = "\033[93m"   # yellow / gold
+DIM= "\033[2m"    # dim grey
+B  = "\033[94m"   # blue
+RST= "\033[0m"    # reset
 
-def _bar(frac: float, width: int = 24) -> str:
+def _c(text: str, colour: str) -> str:
+    return f"{colour}{text}{RST}"
+
+def _bar(frac: float, width: int = 22) -> str:
     filled = int(round(frac * width))
-    return "█" * filled + "░" * (width - filled)
+    return _c("█" * filled, G) + _c("░" * (width - filled), DIM)
 
 
 def load(db: str, n: int) -> dict:
@@ -29,7 +39,7 @@ def load(db: str, n: int) -> dict:
               AND kalshi_open_mid IS NOT NULL
             ORDER BY candle_ts DESC LIMIT ?
         """, (n,)).fetchall()
-        candles = list(reversed(rows))
+        candles = list(reversed(rows))   # chronological, oldest→newest
 
         rejections = conn.execute("""
             SELECT timestamp, ticker, failed_gate, regime_prob, shap_coherence,
@@ -69,12 +79,12 @@ def main() -> None:
     p.add_argument("--n",  type=int, default=50)
     args = p.parse_args()
 
-    data     = load(args.db, args.n)
-    candles  = data["candles"]
-    rejs     = data["rejections"]
-    total    = data["total_rows"]
-    now_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    n_c      = len(candles)
+    data    = load(args.db, args.n)
+    candles = data["candles"]
+    rejs    = data["rejections"]
+    total   = data["total_rows"]
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    n_c     = len(candles)
 
     print(f"\n{'='*70}")
     print(f"  Regime v2  —  {now_str}")
@@ -82,154 +92,155 @@ def main() -> None:
     print(f"{'='*70}")
 
     # ── N+1 accuracy ──────────────────────────────────────────────────────────
-    print(f"\n── N+1 Candle Accuracy  {'─'*47}")
+    print(f"\n── N+1 Candle Accuracy {_c('(regime[N] → direction[N+1])', DIM)}  {'─'*20}")
     if n_c < 2:
-        print(f"  (need ≥2 rows to compare — have {n_c})")
+        print(f"  {_c('(need ≥2 candle rows)', DIM)}")
     else:
-        # Kalshi benchmark hierarchy (all from candle N+1 — same candle regime predicts):
-        #   1st choice: kalshi_early_mid[N+1] — Kalshi at T+35s, same moment regime fires
-        #   2nd choice: kalshi_open_mid[N+1]  — Kalshi at T=0, 35s before regime fires
-        # cols: (candle_ts, regime_prob, shap_coherence, kalshi_open_mid, btc_direction,
-        #        kalshi_early_mid, kalshi_early_progress)
-        def _kalshi_bench(row: tuple) -> tuple[float, str]:
-            early = row[5]
-            if early is not None:
-                return early, f"T+{row[6]*900:.0f}s"
-            return row[3], "T=0"
+        # Kalshi benchmark: prefer kalshi_early_mid[N+1] (T+35s), fall back to open_mid[N+1]
+        def _kb(row: tuple) -> tuple[float, str]:
+            return (row[5], f"T+{row[6]*900:.0f}s") if row[5] is not None else (row[3], "T=0")
 
-        pairs = []
-        k_sources: list[str] = []
+        pairs: list[tuple] = []
+        srcs:  list[str]   = []
         for i in range(n_c - 1):
-            k_val, k_src = _kalshi_bench(candles[i+1])
-            pairs.append((candles[i][0][:16], candles[i][1], k_val, candles[i+1][4]))
-            k_sources.append(k_src)
+            kv, ks = _kb(candles[i + 1])
+            pairs.append((candles[i][0][:16], candles[i][1], kv, candles[i + 1][4]))
+            srcs.append(ks)
 
-        # Coverage summary
-        t35_count = sum(1 for s in k_sources if s != "T=0")
-        if t35_count < len(k_sources):
-            print(f"  Kalshi benchmark: T+35s for {t35_count}/{len(k_sources)} pairs, "
-                  f"T=0 fallback for {len(k_sources)-t35_count} (early snap not yet captured)")
-        n = len(pairs)
+        t35 = sum(1 for s in srcs if s != "T=0")
+        if t35 < len(srcs):
+            print(f"  {_c(f'Kalshi: T+35s for {t35}/{len(srcs)} pairs, T=0 fallback for rest', DIM)}")
 
-        rb_all = sum((p - d)**2 for _, p, k, d in pairs) / n
-        kb_all = sum((k - d)**2 for _, p, k, d in pairs) / n
+        n       = len(pairs)
+        rb_all  = sum((p - d) ** 2 for _, p, k, d in pairs) / n
+        kb_all  = sum((k - d) ** 2 for _, p, k, d in pairs) / n
         acc_all = sum(1 for _, p, k, d in pairs if int(p >= 0.5) == d) / n
         adv_all = (kb_all - rb_all) / kb_all * 100 if kb_all else 0
-        beat    = "✓ beating Kalshi" if rb_all < kb_all else "✗ behind Kalshi"
+        beat_c  = G if rb_all < kb_all else R
+        beat_s  = "✓ beating Kalshi" if rb_all < kb_all else "✗ behind Kalshi"
 
-        print(f"  All-time  n={n:<3d}  regime={rb_all:.3f} ({acc_all:.0%})  "
-              f"kalshi={kb_all:.3f}  adv={adv_all:+.1f}%  {beat}")
+        print(f"  All-time  n={n:<3d}  "
+              f"regime={_c(f'{rb_all:.3f}', G if rb_all < 0.25 else Y)}  "
+              f"({_c(f'{acc_all:.0%}', G if acc_all > 0.55 else R)})  "
+              f"kalshi={kb_all:.3f}  "
+              f"adv={_c(f'{adv_all:+.1f}%', beat_c)}  "
+              f"{_c(beat_s, beat_c)}")
 
         if n >= 5:
-            last = pairs[-5:]
-            rb5  = sum((p - d)**2 for _, p, k, d in last) / 5
-            kb5  = sum((k - d)**2 for _, p, k, d in last) / 5
-            acc5 = sum(1 for _, p, k, d in last if int(p >= 0.5) == d) / 5
-            adv5 = (kb5 - rb5) / kb5 * 100 if kb5 else 0
-            arrow = "↑ improving" if rb5 < rb_all else "↓ declining"
-            print(f"  Last-5    n=5    regime={rb5:.3f} ({acc5:.0%})  "
-                  f"kalshi={kb5:.3f}  adv={adv5:+.1f}%  {arrow}")
+            last  = pairs[-5:]
+            rb5   = sum((p - d) ** 2 for _, p, k, d in last) / 5
+            kb5   = sum((k - d) ** 2 for _, p, k, d in last) / 5
+            acc5  = sum(1 for _, p, k, d in last if int(p >= 0.5) == d) / 5
+            adv5  = (kb5 - rb5) / kb5 * 100 if kb5 else 0
+            trend = _c("↑ improving", G) if rb5 < rb_all else _c("↓ declining", R)
+            print(f"  Last-5    n=5    "
+                  f"regime={rb5:.3f} ({acc5:.0%})  "
+                  f"kalshi={kb5:.3f}  "
+                  f"adv={adv5:+.1f}%  {trend}")
 
-        # Per-candle table — K.Brier source shown in last column
-        offset = max(0, n - 10)
-        shown_pairs   = pairs[-10:]
-        shown_sources = k_sources[-10:]
-        print(f"\n  {'At close [N]':<16}  {'Pred':>5}  {'→N+1':>4}  Res  R.Brier  K.Brier  K.src")
-        print(f"  {'─'*16}  {'─'*5}  {'─'*4}  ───  ───────  ───────  ─────")
-        for i, ((ts, p, k, d), src) in enumerate(zip(shown_pairs, shown_sources)):
+        # Per-candle table — NEWEST AT TOP
+        shown_pairs = list(reversed(pairs[-10:]))
+        shown_srcs  = list(reversed(srcs[-10:]))
+        shown_base  = max(0, n - 10)   # index into candles[] for the oldest shown pair
+
+        print(f"\n  {'Candle [N]':<16}  Pred   N+1  {'Res':^3}  R.Brier  K.Brier  Src")
+        print(f"  {'─'*16}  {'─'*6}  {'─'*3}  {'─'*3}  {'─'*7}  {'─'*7}  {'─'*5}")
+        for j, ((ts, p, k, d), src) in enumerate(zip(shown_pairs, shown_srcs)):
+            # j=0 is newest; candle index = shown_base + (len(shown_pairs)-1-j)
+            ci   = shown_base + (len(shown_pairs) - 1 - j)
             ok   = int(p >= 0.5) == d
-            rb   = (p - d)**2
-            kb   = (k - d)**2
-            pred = f"{'↑' if p >= 0.5 else '↓'}{p:.2f}"
+            rb   = (p - d) ** 2
+            kb   = (k - d) ** 2
+            pred = f"{'↑' if p >= 0.5 else '↓'} {p:.2f}"
             nxt  = f"{'↑' if d else '↓'}"
-            win  = "✓" if ok else "✗"
-            star = "★" if rb < kb else " "
-            print(f"  {candles[offset+i][0][:16]}  {pred:<5}  {nxt:<4}  {win}  {star} {rb:.3f}   {kb:.3f}  {src}")
+            win  = _c("✓", G) if ok else _c("✗", R)
+            star = _c("★", Y) if rb < kb else " "
+            rb_s = _c(f"{rb:.3f}", G) if rb < kb else f"{rb:.3f}"
+            kb_s = _c(f"{kb:.3f}", G) if kb < rb else f"{kb:.3f}"
+            src_s = _c(src, G) if src != "T=0" else _c(src, DIM)
+            print(f"  {candles[ci][0][:16]}  {pred}  {nxt}    {win}  {star} {rb_s}   {kb_s}  {src_s}")
 
         if n < 20:
-            need_go  = max(0, 20 - n)
-            need_cal = max(0, 10 - n)
             notes = []
-            if need_cal > 0:
-                notes.append(f"{need_cal} more for tier stats")
-            if need_go > 0:
-                notes.append(f"{need_go} more for go-live read")
-            print(f"\n  Next: {' · '.join(notes)}")
+            if n < 10: notes.append(f"{10-n} more for tier stats")
+            if n < 20: notes.append(f"{20-n} more for go-live read")
+            print(f"\n  {_c('Next: ' + ' · '.join(notes), DIM)}")
 
-    # ── Gate rejection record ─────────────────────────────────────────────────
-    print(f"\n── Gate Rejections (same-candle record)  {'─'*30}")
+    # ── Gate rejections ───────────────────────────────────────────────────────
+    print(f"\n── Gate Rejections {_c('(same-candle, newest at top)', DIM)}  {'─'*27}")
 
     by_ticker: dict[str, list] = {}
-    for r in rejs[:35]:
-        t = r[1][-15:]
-        by_ticker.setdefault(t, []).append(r)
+    for r in rejs[:40]:
+        by_ticker.setdefault(r[1][-15:], []).append(r)
 
-    resolved = [(entries, next((e[7] for e in entries if e[7] is not None), None))
-                for entries in by_ticker.values()]
-    res_outcomes = [o for _, o in resolved if o is not None]
-    wins  = sum(1 for o in res_outcomes if o == 1)
-    total_res = len(res_outcomes)
-
-    # Cache stability (post one-shot fix)
-    cached_markets = sum(
-        1 for entries, _ in resolved
-        if len([e[3] for e in entries]) > 1 and
-           max(e[3] for e in entries) - min(e[3] for e in entries) < 0.001
+    res_outcomes = [
+        next((e[7] for e in entries if e[7] is not None), None)
+        for entries in by_ticker.values()
+    ]
+    wins      = sum(1 for o in res_outcomes if o == 1)
+    total_res = sum(1 for o in res_outcomes if o is not None)
+    stable    = sum(
+        1 for entries in by_ticker.values()
+        if len(entries) > 1 and max(e[3] for e in entries) - min(e[3] for e in entries) < 0.001
     )
-    total_multi = sum(1 for entries, _ in resolved if len(entries) > 1)
+    multi = sum(1 for e in by_ticker.values() if len(e) > 1)
 
     if total_res:
-        print(f"  Resolved: {wins}/{total_res} wins ({wins/total_res:.0%})  "
-              f"| Cache stable: {cached_markets}/{total_multi} multi-entry markets")
-    else:
-        print(f"  No resolved outcomes yet")
+        w_c = G if wins / total_res >= 0.5 else R
+        print(f"  Resolved: {_c(f'{wins}/{total_res} wins ({wins/total_res:.0%})', w_c)}  "
+              f"| {_c(f'Cache stable: {stable}/{multi}', G if stable == multi else Y)}")
 
-    print(f"\n  {'Time':<5}  {'Market':<15}  {'Regime':<13}  {'Coh':>4}  {'Gates':<8}  Outcome")
-    for ticker, entries in list(by_ticker.items())[:8]:
+    print(f"\n  {'Time':<5}  {'Market':<15}  {'Regime':<14}  {'Coh':>4}  {'Gates':<9}  Outcome")
+    print(f"  {'─'*5}  {'─'*15}  {'─'*14}  {'─'*4}  {'─'*9}  {'─'*7}")
+    for ticker, entries in list(by_ticker.items())[:9]:
         ts      = datetime.fromtimestamp(entries[0][0], tz=timezone.utc).strftime("%H:%M")
         probs   = [e[3] for e in entries]
         cohs    = [e[4] for e in entries if e[4] is not None]
         gates   = ",".join(str(e[2]) for e in entries)
         outcome = next((e[7] for e in entries if e[7] is not None), None)
         avg_coh = sum(cohs) / len(cohs) if cohs else 0
-        result  = "WIN " if outcome == 1 else "LOSS" if outcome == 0 else "pending"
 
-        stable = len(probs) > 1 and max(probs) - min(probs) < 0.001
+        result_s = (_c("WIN ", G)  if outcome == 1 else
+                    _c("LOSS", R)  if outcome == 0 else
+                    _c("pend", DIM))
+
+        stable_mkt = len(probs) > 1 and max(probs) - min(probs) < 0.001
         if len(probs) == 1:
-            prob_str = f"{probs[0]:.3f} (1x)"
-        elif stable:
-            prob_str = f"{probs[0]:.3f} ×{len(probs)}✓"
+            prob_str = f"{probs[0]:.3f}    "
+        elif stable_mkt:
+            prob_str = _c(f"{probs[0]:.3f} ×{len(probs)}✓", G)
         else:
-            prob_str = f"{min(probs):.2f}→{max(probs):.2f} pre"
+            prob_str = _c(f"{min(probs):.2f}→{max(probs):.2f}", DIM) + " pre"
 
-        print(f"  {ts:<5}  {ticker:<15}  {prob_str:<13}  {avg_coh:.2f}  {gates:<8}  {result}")
+        coh_c = G if avg_coh > 0.65 else (Y if avg_coh > 0.55 else DIM)
+        print(f"  {ts:<5}  {ticker:<15}  {prob_str:<14}  "
+              f"{_c(f'{avg_coh:.2f}', coh_c)}  {gates:<9}  {result_s}")
 
-    # ── Progress ──────────────────────────────────────────────────────────────
+    # ── Milestones ─────────────────────────────────────────────────────────────
     print(f"\n── Milestones  {'─'*55}")
 
-    warm_trained = data["warm_trained_rows"] or 682
-    warm_next    = warm_trained + 50
-    warm_left    = max(0, warm_next - total)
-    warm_pct     = min(1.0, (total - warm_trained) / 50) if warm_left > 0 else 1.0
-    warm_status  = "FIRES NOW" if warm_left == 0 else f"{warm_left} rows  (~{warm_left//6}h)"
-    print(f"  Warm-start  {_bar(warm_pct)} {warm_status}")
+    warm_base = data["warm_trained_rows"] or 682
+    warm_next = warm_base + 50
+    warm_left = max(0, warm_next - total)
+    warm_pct  = min(1.0, (total - warm_base) / 50)
+    warm_s    = _c("FIRES NOW", G) if warm_left == 0 else f"{warm_left} rows (~{warm_left//6}h)"
+    print(f"  Warm-start  {_bar(warm_pct)} {warm_s}")
 
-    n_c_total = n_c
-    cal_pct   = min(1.0, n_c_total / 10)
-    cal_left  = max(0, 10 - n_c_total)
-    print(f"  Tier stats  {_bar(cal_pct)} {n_c_total}/10 candles  "
-          f"({'ready' if cal_left == 0 else f'{cal_left} more'})")
+    cal_pct = min(1.0, n_c / 10)
+    cal_s   = _c("ready", G) if n_c >= 10 else f"{10 - n_c} more"
+    print(f"  Tier stats  {_bar(cal_pct)} {min(n_c, 10)}/10 candles  {cal_s}")
 
-    # Phase 3c: count unique resolved markets
     seen: set[str] = set()
-    unique_res = 0
+    uniq = sum(1 for r in rejs if r[7] is not None and not seen.add(r[1]) and r[1] not in seen)
+    # simpler unique resolved count
+    seen2: set[str] = set()
+    uniq = 0
     for r in rejs:
-        if r[7] is not None and r[1] not in seen:
-            seen.add(r[1])
-            unique_res += 1
-    c3_pct = min(1.0, unique_res / 500)
-    print(f"  Phase 3c    {_bar(c3_pct)} {unique_res}/500 unique markets (~Day 18-20)")
-
+        if r[7] is not None and r[1] not in seen2:
+            seen2.add(r[1])
+            uniq += 1
+    c3_pct = min(1.0, uniq / 500)
+    print(f"  Phase 3c    {_bar(c3_pct)} {uniq}/500 unique markets (~Day 18-20)")
     print()
 
 
