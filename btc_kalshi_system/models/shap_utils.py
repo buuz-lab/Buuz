@@ -15,12 +15,13 @@ def compute_coherence(clf, X: np.ndarray) -> float:
     Uses XGBoost's built-in pred_contribs — no external shap library needed.
     X must be shape (1, n_features).
     """
+    assert X.shape[0] == 1, f"compute_coherence expects shape (1, n_features), got {X.shape}"
     booster = clf.get_booster()
     dmatrix = xgb.DMatrix(X)
     contribs = booster.predict(dmatrix, pred_contribs=True)[0]   # shape: (n_features + 1,)
     feature_contribs = contribs[:-1]                    # drop bias column
     total_prediction = contribs.sum()                   # full margin including bias
-    if total_prediction == 0.0:
+    if total_prediction == 0.0 or not np.isfinite(total_prediction):
         return 0.5
     pred_sign = 1 if total_prediction > 0 else -1
     n_agree = int(np.sum(feature_contribs * pred_sign > 0))
@@ -37,6 +38,10 @@ def compute_baseline_snapshot(
     Returns a JSON-serializable dict for saving to models/regime_shap_baseline.json.
     Updated on every train_regime.py run.
     """
+    if len(feature_names) != X_train.shape[1]:
+        raise ValueError(
+            f"feature_names length {len(feature_names)} != X_train n_features {X_train.shape[1]}"
+        )
     booster = clf.get_booster()
     dmatrix = xgb.DMatrix(X_train)
     contribs = booster.predict(dmatrix, pred_contribs=True)[:, :-1]  # drop bias

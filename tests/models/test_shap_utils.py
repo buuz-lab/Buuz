@@ -103,3 +103,11 @@ def test_compute_baseline_snapshot_feature_names_preserved():
     result = compute_baseline_snapshot(clf, X, names)
     result_names = {f["name"] for f in result["features"]}
     assert result_names == set(names)
+
+
+def test_compute_baseline_snapshot_raises_on_length_mismatch():
+    from btc_kalshi_system.models.shap_utils import compute_baseline_snapshot
+    clf = _tiny_clf()
+    X = np.array([[0.9, 0.8, 0.7], [0.1, 0.2, 0.1]], dtype=float)
+    with pytest.raises(ValueError, match="feature_names length"):
+        compute_baseline_snapshot(clf, X, ["only_two_names"])
